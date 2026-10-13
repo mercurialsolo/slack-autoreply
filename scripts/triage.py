@@ -73,8 +73,8 @@ def questions(me: str) -> dict:
             "type": "choice",
             "instructions": f"How should {me} handle this latest message right now?",
             "criteria": {
-                "ignore": "No reply needed: an acknowledgement, thanks, an FYI, a bot or system message, something aimed at someone else, or already answered in the thread.",
-                "ack": "Just signal it was seen. The sender is sharing something or giving a heads-up; a quick 'seen' or an emoji is enough and no answer is expected yet.",
+                "ignore": f"Nothing is expected back. Say ignore for anything informational: an FYI, a shared link or document, a status broadcast or numbers posted for the record, a heads-up that asks nothing, thanks or an acknowledgement, a bot or system message, something aimed at someone else, or something already answered in the thread. Informational counts as ignore even when it is addressed to {me} — if there is no question and nothing to do, the right action is no action.",
+                "ack": f"Nothing to answer, but {me} going silent would be wrong: the sender is handing something over, assigning {me} something to pick up later, or waiting to know the message landed before they move. Only when a visible 'seen' genuinely changes what they do next.",
                 "hold": f"The sender needs an answer, decision, or piece of work that takes real effort, judgment, or information {me} would have to go and get. The right move is a time-bound 'I'll get back to you by X'.",
                 "reply": f"A direct, low-stakes answer is appropriate and can be given from the conversation plus {me}'s own documents, files, or accounts: a link, a status, a date, a number, a yes on something routine.",
                 "escalate": "Too sensitive or high-stakes to answer automatically: money, pricing, contracts, legal, hiring or people issues, investors, health, personal matters, complaints, conflict, anything confidential. A human must look first.",

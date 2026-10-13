@@ -189,6 +189,15 @@ def _env_ignores_inline_comment():
 
 check("env() treats a comment-only value as empty", _env_ignores_inline_comment())
 
+# Informational messages must land on `ignore` (free, silent) and not `ack` (a visible 👀 on
+# every FYI). The old ack criterion said "sharing something or giving a heads-up", which pulled
+# FYIs, status broadcasts and shared links into a reaction.
+_routes = triage.questions("me")["route"]["criteria"]
+check("ignore covers informational messages",
+      all(w in _routes["ignore"].lower() for w in ("fyi", "status broadcast", "heads-up")))
+check("ack no longer claims every shared heads-up",
+      "sharing something or giving a heads-up" not in _routes["ack"].lower())
+
 # ------------------------------------------------------------ the daemon
 voice.ensure_voice_file()
 voice.save_samples([{"text": "yep on it", "channel": D, "ts": "1000", "prompt": "can you look?", "reply_to_user": U}])
