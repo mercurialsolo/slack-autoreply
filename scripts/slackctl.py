@@ -331,7 +331,7 @@ def load_services():
     ledger = Ledger(config.p("outcomes.jsonl"), config.p("corrections.jsonl"), CFG)
     try:
         import anthropic
-        llm = anthropic.Anthropic() if os.getenv("ANTHROPIC_API_KEY") else None
+        llm = anthropic.Anthropic() if config.env("ANTHROPIC_API_KEY") else None
     except ImportError:
         llm = None
     return ledger, llm

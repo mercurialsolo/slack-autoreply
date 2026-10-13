@@ -71,8 +71,8 @@ def check_state(r: Report):
 
 
 def check_slack(r: Report):
-    app = os.getenv("SLACK_APP_TOKEN", "")
-    usr = os.getenv("SLACK_USER_TOKEN", "")
+    app = config.env("SLACK_APP_TOKEN")
+    usr = config.env("SLACK_USER_TOKEN")
     if not app.startswith("xapp-") or len(app) < 20 or app.endswith("..."):
         r.add(FAIL, "SLACK_APP_TOKEN not set", "Basic Information → App-Level Tokens → generate with connections:write (starts xapp-); paste into ~/.slack-autoreply/.env")
     else:
@@ -107,7 +107,7 @@ def check_slack(r: Report):
 
 
 def check_socket_mode(r: Report):
-    app = os.getenv("SLACK_APP_TOKEN", "")
+    app = config.env("SLACK_APP_TOKEN")
     if not app.startswith("xapp-") or len(app) < 20 or app.endswith("..."):
         return
     try:
@@ -185,7 +185,7 @@ def check_context(r: Report):
 
 
 def check_triage(r: Report):
-    if os.getenv("TYPESAFE_API_KEY"):
+    if config.env("TYPESAFE_API_KEY"):
         try:
             import httpx
             resp = httpx.post(f"{os.getenv('TYPESAFE_BASE_URL', 'https://api.typesafe.ai/v1').rstrip('/')}/systemone",
@@ -198,7 +198,7 @@ def check_triage(r: Report):
                 r.add(WARN, f"Jev returned {resp.status_code}", f"{resp.text[:160]} — triage will fall back per message")
         except Exception as e:
             r.add(WARN, "Jev not reachable", f"{str(e)[:120]} — triage will fall back per message")
-    elif os.getenv("ANTHROPIC_API_KEY"):
+    elif config.env("ANTHROPIC_API_KEY"):
         r.add(OK, f"triage: {CFG['triage_fallback_model']} via ANTHROPIC_API_KEY (no TypeSafe key)")
     else:
         r.add(WARN, "no triage model configured", "Claude Code decides the route itself per message (slower, no sensitivity floor). Set TYPESAFE_API_KEY or ANTHROPIC_API_KEY.")

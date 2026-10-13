@@ -169,6 +169,26 @@ def _jev_retry_recovers():
 
 check("jev retries a transient 529 instead of falling through", _jev_retry_recovers())
 
+# .env.example ships `ALLOW_USERS=    # IDs or @handles`; dotenv only strips an inline comment
+# when a value precedes it, so an empty value yields the comment text. Left unguarded that makes
+# allow_users a one-entry list matching nobody — every message silently skipped.
+def _env_ignores_inline_comment():
+    import config as _c
+    saved = {k: os.environ.get(k) for k in ("ALLOW_USERS", "CLAUDE_MODEL")}
+    try:
+        os.environ["ALLOW_USERS"] = "# IDs or @handles; empty = everyone. BLOCK wins."
+        os.environ["CLAUDE_MODEL"] = "# empty = your Claude Code default"
+        return (_c.env_list("ALLOW_USERS") == []
+                and _c.env("CLAUDE_MODEL") == ""
+                and _c.env_list("ALLOW_USERS", "") == []
+                and _c.env("MODE", "learn") in ("learn", "draft", "auto"))
+    finally:
+        for k, v in saved.items():
+            if v is None: os.environ.pop(k, None)
+            else: os.environ[k] = v
+
+check("env() treats a comment-only value as empty", _env_ignores_inline_comment())
+
 # ------------------------------------------------------------ the daemon
 voice.ensure_voice_file()
 voice.save_samples([{"text": "yep on it", "channel": D, "ts": "1000", "prompt": "can you look?", "reply_to_user": U}])

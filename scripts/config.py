@@ -37,50 +37,66 @@ def ensure_dirs() -> None:
     INBOX_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def env(key: str, default: str = "") -> str:
+    """os.getenv, minus dotenv's empty-value-with-inline-comment trap.
+
+    `.env.example` ships keys as `ALLOW_USERS=    # IDs or @handles`. python-dotenv strips an
+    inline comment only when something precedes it, so an *empty* value yields the comment text
+    itself. Unnoticed that is severe: ALLOW_USERS becomes a one-entry allow-list that matches
+    nobody (every message silently skipped), ANTHROPIC_API_KEY becomes a 401, and CLAUDE_MODEL is
+    passed to `claude -p` as a bogus model. A value that begins with '#' is always a mis-parse.
+    """
+    v = os.getenv(key)
+    if v is None:
+        return default
+    v = v.strip()
+    return "" if v.startswith("#") else v
+
+
 def env_list(key: str, default: str = "") -> list[str]:
-    return [x.strip() for x in os.getenv(key, default).split(",") if x.strip()]
+    return [x.strip() for x in env(key, default).split(",") if x.strip()]
 
 
 def env_bool(key: str, default: bool) -> bool:
-    return os.getenv(key, str(default)).strip().lower() in ("1", "true", "yes", "on")
+    return (env(key) or str(default)).strip().lower() in ("1", "true", "yes", "on")
 
 
 def env_float(key: str, default: float) -> float:
     try:
-        return float(os.getenv(key, str(default)))
+        return float(env(key) or str(default))
     except ValueError:
         return default
 
 
 def env_int(key: str, default: int) -> int:
     try:
-        return int(os.getenv(key, str(default)))
+        return int(env(key) or str(default))
     except ValueError:
         return default
 
 
 CFG = dict(
     # behaviour
-    mode=os.getenv("MODE", "learn").strip().lower(),             # learn | draft | auto
+    mode=env("MODE", "learn").strip().lower(),             # learn | draft | auto
     delay_min=env_float("REPLY_DELAY_MIN", 20),
     delay_max=env_float("REPLY_DELAY_MAX", 90),
     only_when_away=env_bool("ONLY_WHEN_AWAY", False),
-    channels=os.getenv("REPLY_IN_CHANNELS", "mentions").strip().lower(),
-    group_dms=os.getenv("REPLY_IN_GROUP_DMS", "mentions").strip().lower(),
+    channels=env("REPLY_IN_CHANNELS", "mentions").strip().lower(),
+    group_dms=env("REPLY_IN_GROUP_DMS", "mentions").strip().lower(),
     allow_users=env_list("ALLOW_USERS"),
     block_users=env_list("BLOCK_USERS"),
     allow_channels=env_list("ALLOW_CHANNELS"),
     block_channels=env_list("BLOCK_CHANNELS"),
-    quiet_hours=os.getenv("QUIET_HOURS", "").strip(),
+    quiet_hours=env("QUIET_HOURS", "").strip(),
     max_per_hour=env_int("MAX_REPLIES_PER_HOUR_PER_CONVERSATION", 6),
     disclose=env_bool("DISCLOSE_IF_ASKED", True),
     context_messages=env_int("CONTEXT_MESSAGES", 25),
     # triage
-    triage_fallback_model=os.getenv("TRIAGE_FALLBACK_MODEL", "claude-haiku-5-5"),
+    triage_fallback_model=env("TRIAGE_FALLBACK_MODEL", "claude-haiku-5-5"),
     triage_min_confidence=env_float("TRIAGE_MIN_CONFIDENCE", 0.6),
     sensitivity_escalate=env_float("SENSITIVITY_ESCALATE", 4),
-    ack_style=os.getenv("ACK_STYLE", "reaction").strip().lower(),
-    ack_emoji=os.getenv("ACK_EMOJI", "eyes").strip().strip(":"),
+    ack_style=env("ACK_STYLE", "reaction").strip().lower(),
+    ack_emoji=env("ACK_EMOJI", "eyes").strip().strip(":"),
     # follow-ups
     followup_lead=env_int("FOLLOWUP_REMINDER_MINUTES", 15),
     # sharing
@@ -95,10 +111,10 @@ CFG = dict(
     draft_expire_hours=env_float("DRAFT_EXPIRE_HOURS", 24),
     voice_cap=env_int("VOICE_SAMPLES_CAP", 600),
     # dispatch (daemon → headless Claude Code)
-    dispatch=os.getenv("DISPATCH", "claude").strip().lower(),   # claude | none
-    claude_bin=os.getenv("CLAUDE_BIN", "claude"),
-    claude_cwd=os.path.expanduser(os.getenv("CLAUDE_CWD", "").strip()) or None,
-    claude_model=os.getenv("CLAUDE_MODEL", "").strip() or None,
+    dispatch=env("DISPATCH", "claude").strip().lower(),   # claude | none
+    claude_bin=env("CLAUDE_BIN", "claude"),
+    claude_cwd=os.path.expanduser(env("CLAUDE_CWD", "").strip()) or None,
+    claude_model=env("CLAUDE_MODEL", "").strip() or None,
     claude_max_turns=env_int("CLAUDE_MAX_TURNS", 25),
     claude_timeout=env_int("CLAUDE_TIMEOUT_SECONDS", 600),
     dispatch_parallel=env_int("DISPATCH_PARALLEL", 2),

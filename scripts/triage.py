@@ -24,6 +24,8 @@ import os
 import re
 from dataclasses import dataclass, field
 
+import config
+
 log = logging.getLogger("autoreply.triage")
 
 ROUTES = ("ignore", "ack", "hold", "reply", "escalate")
@@ -298,7 +300,7 @@ class Triager:
         self.policy = policy
         self.anthropic = anthropic_client
         self.fallback_model = fallback_model
-        self.api_key = os.getenv("TYPESAFE_API_KEY", "").strip()
+        self.api_key = config.env("TYPESAFE_API_KEY")
         self.jev_ok = bool(self.api_key)
         if not self.jev_ok and anthropic_client is not None:
             log.warning("TYPESAFE_API_KEY not set — triage runs on %s instead of Jev", fallback_model)
