@@ -145,9 +145,29 @@ class State:
                 data = json.loads(self.path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 data = {}
-        for k in ("pending", "sent", "ignored", "last_auto", "sessions"):
+        for k in ("pending", "sent", "ignored", "last_auto", "sessions", "paused"):
             data.setdefault(k, {})
         return data
+
+    # ---- pause: lives in state.json, not .env, so it takes effect without a restart
+    def pause_info(self) -> dict | None:
+        """{'since','until','reason'} while paused, else None. Expired pauses lift themselves."""
+        p = self._read().get("paused") or {}
+        if not p.get("since"):
+            return None
+        until = p.get("until")
+        if until and now_iso() >= until:
+            self.update(lambda d: d.update(paused={}))
+            return None
+        return p
+
+    def set_pause(self, until: str | None, reason: str = "") -> dict:
+        info = {"since": now_iso(), "until": until, "reason": reason}
+        self.update(lambda d: d.update(paused=info))
+        return info
+
+    def clear_pause(self) -> None:
+        self.update(lambda d: d.update(paused={}))
 
     def update(self, fn):
         config.ensure_dirs()
@@ -884,6 +904,11 @@ class Daemon(Slack):
             return
         who = self.name_of(sender)
         clean = clean_text(text, self.name_of)
+        if (paused := self.state.pause_info()) is not None:
+            # Paused means Solo does not act. The message is still logged, and anything you answer
+            # yourself still feeds the learning path, so a pause costs you nothing but the draft.
+            until = f" until {paused['until']}" if paused.get("until") else ""
+            log.info("skip (paused%s) %s: %s", until, who, clean[:80]); return
         if not self._allowed(sender, channel):
             log.info("skip (allow/block) %s: %s", who, clean[:80]); return
         if in_quiet_hours(CFG["quiet_hours"]):
@@ -1034,12 +1059,53 @@ def cmd_doctor(a):
     sys.exit(doctor.run())
 
 
+DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([mhd])\s*$", re.I)
+
+
+def parse_duration(text: str) -> float:
+    """'90m' | '3h' | '2d' → seconds. Raises ValueError so the CLI can say what it wanted."""
+    m = DURATION_RE.match(text or "")
+    if not m:
+        raise ValueError(f"can't read {text!r} as a duration — use 90m, 3h or 2d")
+    return float(m.group(1)) * {"m": 60, "h": 3600, "d": 86400}[m.group(2).lower()]
+
+
+def cmd_pause(a):
+    until = None
+    if a.for_:
+        try:
+            secs = parse_duration(a.for_)
+        except ValueError as e:
+            sys.exit(str(e))
+        # naive local, same shape as now_iso(), so the string comparison in pause_info() holds
+        until = (datetime.now() + timedelta(seconds=secs)).isoformat(timespec="seconds")
+    info = State().set_pause(until, a.reason)
+    when = f"until {info['until']}" if until else "until you resume"
+    print(f"paused {when}{' — ' + a.reason if a.reason else ''}")
+    print("a running daemon picks this up on the next message; nothing is drafted or sent meanwhile.")
+    print("anything you answer yourself still feeds the learning path. resume with: slackctl resume")
+
+
+def cmd_resume(a):
+    st = State()
+    if st.pause_info() is None:
+        print("not paused.")
+        return
+    st.clear_pause()
+    print("resumed — Solo is drafting again.")
+
+
 def cmd_status(a):
     s = Slack()
     ledger, llm = load_services()
     fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
-    st = State().read()
+    state = State()
+    st = state.read()
     print(f"account: @{s.me_handle} ({s.me_name}, {s.me}) · workspace {s.team}")
+    if (p := state.pause_info()) is not None:
+        until = f"until {p['until']}" if p.get("until") else "until you resume"
+        print(f"PAUSED {until} (since {p['since']}){' — ' + p['reason'] if p.get('reason') else ''}"
+              f"\n  nothing is drafted or sent while paused; resume with: slackctl resume")
     print(f"state dir: {config.STATE_DIR}")
     print(f"mode: {CFG['mode']} · dispatch: {CFG['dispatch']} · triage: {'Jev' if os.getenv('TYPESAFE_API_KEY') else (CFG['triage_fallback_model'] if llm else 'none — Claude decides routes')}")
     print(f"voice: {'VOICE.md ok' if voice.load_notes() else 'VOICE.md empty'} · {len(voice.load_samples())} samples · "
@@ -1285,6 +1351,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status").set_defaults(fn=cmd_status)
+    p_pause = sub.add_parser("pause", help="stop drafting and sending; takes effect immediately, no restart")
+    p_pause.add_argument("--for", dest="for_", metavar="DURATION", help="e.g. 90m, 3h, 2d — omit to pause until you resume")
+    p_pause.add_argument("--reason", default="", help="shown in status and the log")
+    p_pause.set_defaults(fn=cmd_pause)
+    sub.add_parser("resume", help="lift a pause").set_defaults(fn=cmd_resume)
     sub.add_parser("doctor", help="preflight every dependency; sends nothing").set_defaults(fn=cmd_doctor)
     p = sub.add_parser("build-voice"); p.add_argument("--count", type=int, default=200); p.add_argument("--no-context", action="store_true"); p.set_defaults(fn=cmd_build_voice)
     p = sub.add_parser("voice"); p.add_argument("--channel"); p.add_argument("--user"); p.add_argument("--all", action="store_true"); p.add_argument("--limit", type=int, default=40); p.set_defaults(fn=cmd_voice)

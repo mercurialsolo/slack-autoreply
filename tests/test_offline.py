@@ -294,5 +294,30 @@ out = ctl("note", U, "prefers short answers"); check("note cli (offline id)", ou
 out = ctl("review-data", "--days", "1"); check("review-data cli", "Recent corrections" in out.stdout and "dossiers" in out.stdout)
 out = ctl("doctor"); check("doctor exits 1 with clear FAILs when unconfigured", out.returncode == 1 and "SLACK_USER_TOKEN" in out.stdout)
 
+# ------------------------------------------------------------------- pause
+# Pause lives in state.json, not .env, so a running daemon honours it without a restart.
+_st = S.State()
+_st.clear_pause()
+check("not paused by default", _st.pause_info() is None)
+_st.set_pause(None, "on a call")
+check("pause with no end stays paused", (_st.pause_info() or {}).get("reason") == "on a call")
+_st.set_pause("2000-01-01T00:00:00", "stale")
+check("an expired pause lifts itself", _st.pause_info() is None)
+_st.set_pause((datetime.now() + timedelta(hours=1)).isoformat(timespec="seconds"), "")
+check("a future pause is still in force", _st.pause_info() is not None)
+_st.clear_pause()
+check("resume clears the pause", _st.pause_info() is None)
+check("duration parsing", S.parse_duration("90m") == 5400 and S.parse_duration("2h") == 7200
+      and S.parse_duration("1d") == 86400)
+try:
+    S.parse_duration("banana"); _bad = False
+except ValueError:
+    _bad = True
+check("a bad duration is rejected, not silently ignored", _bad)
+out = ctl("pause", "--for", "2h", "--reason", "testing")
+check("pause cli", out.returncode == 0 and "paused until" in out.stdout)
+out = ctl("resume")
+check("resume cli", out.returncode == 0 and "resumed" in out.stdout.lower())
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{passed} checks passed")
