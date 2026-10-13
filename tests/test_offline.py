@@ -135,6 +135,40 @@ check("policy: confident reply and answerable stays reply",
 check("triage defaults keep positional construction working",
       triage.Triage("reply", 0.9, 2, 2, 0, 0, "t").topic == "other")
 
+# Jev 429/5xx are transient; without a retry one blip drops the message to a fallback
+# that may not be configured. Stub httpx so the first call 529s and the second succeeds.
+def _jev_retry_recovers():
+    import types
+    _saved = sys.modules.get("httpx")
+    calls = {"n": 0}
+    class _Err(Exception):
+        def __init__(self, m, request=None, response=None):
+            super().__init__(m); self.response = response
+    class _Resp:
+        def __init__(self, code, payload=None): self.status_code, self._p = code, payload or {}
+        def json(self): return self._p
+        def raise_for_status(self):
+            if self.status_code >= 400: raise _Err(str(self.status_code), response=self)
+    fake = types.SimpleNamespace(HTTPStatusError=_Err, TransportError=OSError)
+    def _post(url, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1: return _Resp(529)
+        return _Resp(200, {"model": "jev-1", "answers": {
+            "route": {"choice": "reply", "confidence": 0.9},
+            "sensitivity": {"score": 2.0}, "urgency": {"score": 2.0},
+            "needs_context": {"noul": 0.2}, "asks_for_content": {"noul": 0.0},
+            "topic": {"choice": "status_request"}, "can_answer_now": {"noul": 0.8}}})
+    fake.post = _post
+    sys.modules["httpx"] = fake
+    try:
+        t = triage.jev({"message": "hi"}, "me", "k")
+        return calls["n"] == 2 and t.route == "reply" and t.topic == "status_request"
+    finally:
+        if _saved is not None: sys.modules["httpx"] = _saved
+        else: sys.modules.pop("httpx", None)
+
+check("jev retries a transient 529 instead of falling through", _jev_retry_recovers())
+
 # ------------------------------------------------------------ the daemon
 voice.ensure_voice_file()
 voice.save_samples([{"text": "yep on it", "channel": D, "ts": "1000", "prompt": "can you look?", "reply_to_user": U}])

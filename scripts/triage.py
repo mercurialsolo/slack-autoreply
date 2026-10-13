@@ -191,17 +191,37 @@ def _lookup(resp: dict, key: str) -> dict | None:
     return None
 
 
-def jev(state: dict, me: str, api_key: str, timeout: float = 8.0) -> Triage:
+def jev(state: dict, me: str, api_key: str, timeout: float = 8.0, attempts: int = 3) -> Triage:
+    import time
+
     import httpx
 
     body = {"model": JEV_MODEL, "state": state, "questions": questions(me)}
-    r = httpx.post(
-        f"{TYPESAFE_BASE_URL}/systemone",
-        json=body,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        timeout=timeout,
-    )
-    r.raise_for_status()
+    # 429/5xx from Jev are transient (529 = overloaded). Without a retry a single blip
+    # drops the message to the fallback, which is slower and may not be configured at all.
+    last = None
+    for attempt in range(attempts):
+        try:
+            r = httpx.post(
+                f"{TYPESAFE_BASE_URL}/systemone",
+                json=body,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                timeout=timeout,
+            )
+            r.raise_for_status()
+            break
+        except (httpx.HTTPStatusError, httpx.TransportError) as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            retryable = status is None or status == 429 or status >= 500
+            last = e
+            if not retryable or attempt == attempts - 1:
+                raise
+            delay = 0.4 * (3 ** attempt)
+            log.warning("jev %s (attempt %d/%d) — retrying in %.1fs", status or type(e).__name__,
+                        attempt + 1, attempts, delay)
+            time.sleep(delay)
+    else:  # pragma: no cover - loop always breaks or raises
+        raise last
     resp = r.json()
 
     route = _lookup(resp, "route") or {}
