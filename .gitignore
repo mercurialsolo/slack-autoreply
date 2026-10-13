@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+
+# Secrets never belong in this repo — tokens live only in ~/.slack-autoreply/.env
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.secret
+
+# Local runtime state (lives in ~/.slack-autoreply, but guard against copies)
+voice_samples.json
+VOICE.md
+outcomes.jsonl
+corrections.jsonl
+replies.jsonl
+followups.json
+state.json
+inbox/
+people/
+channels/
+curriculum/
+*.log
+
+.DS_Store

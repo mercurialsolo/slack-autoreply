@@ -1,0 +1,21 @@
+# systemd user unit. install-service.sh fills in __HOME__, __PYTHON__, __PATH__ and enables it.
+#   systemctl --user status slack-autoreply
+#   journalctl --user -u slack-autoreply -f
+[Unit]
+Description=slack-autoreply daemon (Slack → Claude Code, replies from your own account)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__HOME__/.slack-autoreply
+ExecStart=__PYTHON__ __HOME__/.claude/skills/slack-autoreply/scripts/slackctl.py listen
+Restart=always
+RestartSec=15
+Environment=PATH=__PATH__
+Environment=HOME=__HOME__
+Environment=LANG=en_US.UTF-8
+# the daemon reads ~/.slack-autoreply/.env itself; nothing secret goes here
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,42 @@
+_metadata:
+  major_version: 1
+  minor_version: 1
+
+display_information:
+  name: Solo
+  description: Replies to my Slack messages from my own account, in my voice
+  background_color: "#1f1f1f"
+
+settings:
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false
+  event_subscriptions:
+    # "user_events" = delivered on behalf of the installing user, not a bot.
+    # Drop message.channels / message.groups if you only want DMs — in a big
+    # workspace they stream every message from every channel you're in.
+    user_events:
+      - message.im
+      - message.mpim
+      - message.channels
+      - message.groups
+      - reaction_added
+
+oauth_config:
+  scopes:
+    # User scopes only — no bot user, no bot token, no proxy handle.
+    user:
+      - channels:history
+      - channels:read
+      - chat:write        # post as you
+      - groups:history
+      - groups:read
+      - im:history
+      - im:read
+      - im:write          # open your self-DM for draft approval
+      - mpim:history
+      - mpim:read
+      - reactions:read    # ✅ / ❌ on drafts
+      - reactions:write   # 👀 acks
+      - search:read       # build_voice.py pulls your past messages
+      - users:read

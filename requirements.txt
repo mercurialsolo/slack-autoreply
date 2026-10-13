@@ -1,0 +1,4 @@
+slack_sdk>=3.27
+python-dotenv>=1.0
+httpx>=0.27
+anthropic>=0.40        # optional: triage fallback when TYPESAFE_API_KEY is unset
