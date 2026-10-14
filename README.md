@@ -118,6 +118,42 @@ The **share gate** watches which tools Claude actually called, not what it claim
 | `history @who\|#chan`, `search "words" --with @who`, `about @who`, `note @who "fact"` | memory |
 | `build-voice`, `voice`, `review-data` | voice + learning data |
 
+## Running it on another machine, driving it from yours
+
+A laptop that sleeps is a Solo that misses messages. Move the daemon to an always-on Mac and keep
+the control surface where you are:
+
+```
+./install.sh on the node · copy ~/.slack-autoreply/{.env,VOICE.md,voice_samples.json,people} across
+deploy/install-service.sh          on the node
+deploy/install-service.sh --remove on the laptop   ← do this FIRST
+```
+
+**Only one machine may run `listen`.** Slack load-balances events across Socket Mode connections on
+the same app ("each payload may be sent to *any* of the connections"), so two daemons means your DMs
+arrive at whichever one Slack picked. Remove the old service before starting the new one.
+
+`deploy/solo` (symlink it to `~/.local/bin/solo`) drives the node from your laptop. There is no
+second copy of the state — every command runs against the node's:
+
+| | |
+|---|---|
+| `solo status` · `drafts` · `followups` | what is waiting |
+| `solo pause [--for 2h]` · `solo resume` | stop and start it, immediately |
+| `solo approve <item>` · `solo drop <item>` | same as ✅ / ❌ |
+| `solo about @who` · `history` · `search` · `note @who "…"` | memory, and teaching it |
+| `solo logs [-f]` · `solo restart` · `solo ssh` | the daemon |
+| `solo voice` · `solo pull` · `solo push` | read VOICE.md, edit it here, send it back |
+| `solo train [review\|setup]` | run the training skill **on the node**, interactively |
+
+Training runs on the node on purpose — VOICE.md, the samples and the outcomes live there, and
+running `setup` or `review` locally would quietly fork them. `pull` and `push` are for hand edits.
+Anything not listed falls through to `slackctl`, so new subcommands work without touching the script.
+
+Set `SOLO_NODE` / `SOLO_REMOTE_HOME` if your node's ssh alias or home differs. Note the node's
+`CONTEXT_DIRS` must be **absolute paths that exist on the node** — a path twin like
+`/Users/you/Sandbox` is not the same as the service account's `~/Sandbox`.
+
 ## Notes and limits
 
 - **Jev** is in early access (console.typesafe.ai). `triage.py` calls `POST /v1/systemone` with `{model, state, questions}` and reads answers keyed by question name, per the public guides; if the shape differs, the adapter is ~40 lines. Any Jev error falls back for that message.

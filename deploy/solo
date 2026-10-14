@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# `solo` — drive Solo from this machine while it runs on another.
+#
+# Solo's daemon and its state (tokens, VOICE.md, dossiers, outcomes) live on the node.
+# That is deliberate: only one machine may hold the Socket Mode connection, because Slack
+# load-balances events across connections on the same app. So this is a proxy, not a second
+# copy — every command runs against the node's state, and there is one source of truth.
+#
+#   solo status | drafts | followups | inbox      what is waiting
+#   solo pause [--for 2h] | resume                stop and start it, immediately
+#   solo approve <item> | drop <item>             same as ✅ / ❌ in Slack
+#   solo about @who | history @who | search "…"   memory
+#   solo note @who "fact"                         teach it something durable
+#   solo logs [-n N] [-f]                         the daemon log
+#   solo restart                                  restart the service on the node
+#   solo voice                                    print VOICE.md as the node has it
+#   solo pull                                     copy VOICE.md + dossiers here to edit
+#   solo push                                     send your edits back, then restart
+#   solo train [review|setup]                     run the training skill ON the node
+#   solo ssh                                      a shell there
+#
+# Anything not listed is passed straight through to slackctl, so new subcommands work
+# without changing this file.
+set -euo pipefail
+
+NODE="${SOLO_NODE:-mini}"
+REMOTE_HOME="${SOLO_REMOTE_HOME:-/Users/baradas}"
+CTL="python3 $REMOTE_HOME/.claude/skills/slack-autoreply/scripts/slackctl.py"
+STATE="$REMOTE_HOME/.slack-autoreply"
+LOCAL_STATE="$HOME/.slack-autoreply"
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+on_node() { ssh "$NODE" "$@"; }
+
+case "${1:-status}" in
+  logs)
+    shift
+    # -f follows; default shows the last 40 lines
+    if [ "${1:-}" = "-f" ]; then on_node "tail -f $STATE/listen.log"
+    else on_node "tail -n ${1:-40} $STATE/listen.log"; fi
+    ;;
+
+  restart)
+    on_node "launchctl kickstart -k gui/\$(id -u)/com.slack-autoreply" >/dev/null
+    sleep 4
+    on_node "grep 'listening as' $STATE/listen.log | tail -1"
+    ;;
+
+  voice)
+    on_node "cat $STATE/VOICE.md"
+    ;;
+
+  pull)
+    # Bring the node's voice and dossiers here so they can be read or edited.
+    mkdir -p "$LOCAL_STATE/people"
+    rsync -a "$NODE:$STATE/VOICE.md" "$LOCAL_STATE/VOICE.md"
+    rsync -a "$NODE:$STATE/people/" "$LOCAL_STATE/people/"
+    rsync -a "$NODE:$STATE/voice_samples.json" "$LOCAL_STATE/voice_samples.json" 2>/dev/null || true
+    echo "pulled VOICE.md ($(grep -c . "$LOCAL_STATE/VOICE.md") lines) and $(ls -1 "$LOCAL_STATE/people" | wc -l | tr -d ' ') dossiers from $NODE"
+    echo "edit $LOCAL_STATE/VOICE.md, then: solo push"
+    ;;
+
+  push)
+    [ -f "$LOCAL_STATE/VOICE.md" ] || die "no $LOCAL_STATE/VOICE.md — run: solo pull"
+    # Never push .env from here; tokens are the node's business and may differ.
+    rsync -a "$LOCAL_STATE/VOICE.md" "$NODE:$STATE/VOICE.md"
+    rsync -a "$LOCAL_STATE/people/" "$NODE:$STATE/people/"
+    echo "pushed VOICE.md and dossiers to $NODE"
+    "$0" restart
+    ;;
+
+  train)
+    # Training must run where the state is, or the node and this machine diverge.
+    mode="${2:-review}"
+    case "$mode" in review|setup|status|run) ;; *) die "solo train [review|setup|run|status]";; esac
+    echo "running /slack-autoreply $mode on $NODE (this is interactive — answer in place)"
+    ssh -t "$NODE" "cd /Users/barada/Sandbox && claude \"/slack-autoreply $mode\""
+    ;;
+
+  ssh)
+    shift; ssh -t "$NODE" "${@:-bash -l}"
+    ;;
+
+  -h|--help|help)
+    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+
+  *)
+    # Everything else is a slackctl subcommand, run against the node's state.
+    on_node "$CTL $(printf '%q ' "$@")"
+    ;;
+esac
