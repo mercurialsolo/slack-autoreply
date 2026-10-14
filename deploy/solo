@@ -23,7 +23,10 @@
 # without changing this file.
 set -euo pipefail
 
-NODE="${SOLO_NODE:-mini}"
+# `mini` resolves through an ssh Match-exec rule that shells out to ping; when ping is blocked
+# that rule errors and ssh aborts entirely. `mini-ts` is the direct tailnet entry with no such
+# rule, so it keeps working. Override with SOLO_NODE.
+NODE="${SOLO_NODE:-mini-ts}"
 REMOTE_HOME="${SOLO_REMOTE_HOME:-/Users/baradas}"
 CTL="python3 $REMOTE_HOME/.claude/skills/slack-autoreply/scripts/slackctl.py"
 STATE="$REMOTE_HOME/.slack-autoreply"
