@@ -42,7 +42,16 @@ else
     cp -R "$SRC/tests"   "$DEST/tests"
     cp -R "$SRC/docs"    "$DEST/docs"
     find "$DEST" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
-    say "copied  $SRC -> $DEST"
+    # The `solo` skill is installed SEPARATELY, as its own top-level skill, so that any Claude Code
+  # session on this machine can discover it — not just one already running the slack-autoreply
+  # skill. That is the point: a coding agent that just finished something should be able to decide
+  # whether a person needs telling, and reach the owner's voice without inventing one.
+  if [ -d "$SRC/skills/solo" ]; then
+    mkdir -p "$SKILLS_DIR/solo"
+    cp "$SRC/skills/solo/SKILL.md" "$SKILLS_DIR/solo/SKILL.md"
+    say "skill   solo -> $SKILLS_DIR/solo (any session can use it)"
+  fi
+  say "copied  $SRC -> $DEST"
   else
     say "already installed at $DEST"
   fi
