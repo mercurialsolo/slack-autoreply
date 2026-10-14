@@ -38,7 +38,13 @@ Mode: **$0**. Argument: **$1**. If no mode was given, treat it as `status`.
    This conversation's Claude session persists across messages for a few days, so you may already remember earlier turns; the tools are for what you don't.
 3. Decide the route, starting from triage:
    - `ignore` — nothing needed. `act --action ignore`
-   - `ack` — seen, no answer expected yet. `act --action ack` leaves a reaction and says nothing.
+   - **Do the small thing instead of acknowledging it.** Before reaching for `ack`, ask whether the
+     ask is small enough to just handle. A request about how to communicate or track — "post updates
+     in the thread", "use this channel", "keep me posted", "bullets when you report blockers" — is
+     honoured by *doing it* and saying so in one short line, then `note @them` so it sticks. An emoji
+     that could have been the answer is noise, and the owner reads every message in that conversation.
+   - `ack` — a last resort: nothing to say, nothing doable, but silence would be wrong.
+     `act --action ack` leaves a reaction and says nothing.
      **Pick the emoji that fits** with `--emoji <name>`: `+1` for "got it / agreed", `eyes` for "looking",
      `tada` or `raised_hands` for someone's good news, `white_check_mark` for "done", `pray` for thanks.
      Omit it and you get the default 👀. Use the name (`+1`), never the character. A reaction is often the

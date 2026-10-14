@@ -74,9 +74,9 @@ def questions(me: str) -> dict:
             "instructions": f"How should {me} handle this latest message right now?",
             "criteria": {
                 "ignore": f"Nothing is expected back. Say ignore for anything informational: an FYI, a shared link or document, a status broadcast or numbers posted for the record, a heads-up that asks nothing, thanks or an acknowledgement, a bot or system message, something aimed at someone else, or something already answered in the thread. Informational counts as ignore even when it is addressed to {me} — if there is no question and nothing to do, the right action is no action.",
-                "ack": f"Nothing to answer, but {me} going silent would be wrong: the sender is handing something over, assigning {me} something to pick up later, or waiting to know the message landed before they move. Only when a visible 'seen' genuinely changes what they do next.",
+                "ack": f"A last resort. There is genuinely nothing to say and nothing that can be done, but {me} going silent would be wrong — the sender is handing something over or waiting to know the message landed before they move. Say ack ONLY if neither ignore nor reply fits: if there is any small thing that can simply be done or answered right now, that is reply. An emoji that could have been the answer is noise.",
                 "hold": f"The sender needs an answer, decision, or piece of work that takes real effort, judgment, or information {me} would have to go and get. The right move is a time-bound 'I'll get back to you by X'.",
-                "reply": f"A direct, low-stakes answer is appropriate and can be given from the conversation plus {me}'s own documents, files, or accounts: a link, a status, a date, a number, a yes on something routine.",
+                "reply": f"The ask is small enough to simply handle now. Two kinds. (a) An answer that can be given from the conversation plus {me}'s own documents, files or accounts: a link, a status, a date, a number, a yes on something routine. (b) A small request about how {me} communicates or tracks things — post it in the thread, use this channel, add it to the list, keep me posted, format it this way — which is honoured by doing it and saying so in one line. Prefer reply over ack whenever the ask is this small; acknowledging a thing you could have just done floods the conversation.",
                 "escalate": "Too sensitive or high-stakes to answer automatically: money, pricing, contracts, legal, hiring or people issues, investors, health, personal matters, complaints, conflict, anything confidential. A human must look first.",
                 "other": "None of the above fits.",
             },
@@ -120,7 +120,9 @@ def questions(me: str) -> dict:
                 f"Yes for: run a script or command, deploy, restart, install, change a setting or config, "
                 f"grant or revoke access, create, edit or delete a file, record, account or ticket, send "
                 f"something on to a third party. No for: asking a question, asking for a status, a number, "
-                f"a link, a document, or an opinion."
+                f"a link, a document, or an opinion — and no for how {me} should communicate or "
+                f"track things (reply in the thread, use this channel, keep me posted, format it "
+                f"this way, add it to the list), which costs nothing and is simply honoured."
             ),
         },
         "in_scope": {
@@ -179,7 +181,10 @@ class Policy:
         if t.asks_to_execute >= self.max_execute:
             t.route, t.forced = "escalate", f"asks for an action, not an answer ({t.asks_to_execute:.2f})"
             return t
-        if t.in_scope < self.min_in_scope:
+        # Scope only matters when Solo would SAY something. Ignoring an out-of-scope message
+        # leaks nothing, and a bare FYI with little context scores low on scope for want of
+        # signal rather than because it is off-limits — escalating those just moves the flood.
+        if t.in_scope < self.min_in_scope and t.route in ("reply", "hold", "ack"):
             t.route, t.forced = "escalate", f"outside this workspace's work ({t.in_scope:.2f})"
             return t
         if t.sensitivity >= self.sensitivity_escalate:
@@ -190,8 +195,11 @@ class Policy:
                 t.route, t.forced = "hold", f"low confidence {t.confidence:.2f}"
             elif t.route == "ignore":
                 t.route, t.forced = "ack", f"low confidence {t.confidence:.2f}"
-        elif t.route == "reply" and t.can_answer < self.min_answerable:
-            # Confident it deserves an answer, but we haven't got what the answer needs.
+        elif t.route == "reply" and t.can_answer < self.min_answerable and t.needs_context >= 0.5:
+            # Confident it deserves an answer, but the answer needs something we have to go and
+            # get. Only then is a hold right: when nothing needs looking up (a small ask about how
+            # to communicate, say) "can_answer" reads low simply because there is nothing to
+            # answer, and demoting that to a hold would promise a callback for a two-word job.
             t.route, t.forced = "hold", f"not answerable yet {t.can_answer:.2f}"
         return t
 

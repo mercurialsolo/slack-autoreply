@@ -129,8 +129,16 @@ check("policy: low confidence ignore→ack", pol.apply(triage.Triage("ignore", 0
 check("policy: unknown route→hold", pol.apply(triage.Triage("bogus", 0.9, 2, 2, 0, 0, "t")).route == "hold")
 check("triage asks Jev for topic + answerability",
       {"topic", "can_answer_now"} <= set(triage.questions("me")))
-check("policy: confident reply but not answerable→hold",
-      pol.apply(triage.Triage("reply", 0.9, 2, 2, 0, 0, "t", can_answer=0.2)).route == "hold")
+# A hold is only right when the answer needs something we must go and fetch. When nothing needs
+# looking up, "not answerable" just means there was nothing to look up — a small ask about how to
+# communicate reads that way, and promising a callback for a two-word job floods the conversation.
+check("policy: unanswerable AND needs their files → hold",
+      pol.apply(triage.Triage("reply", 0.9, 2, 2, 0.9, 0, "t", can_answer=0.2)).route == "hold")
+check("policy: nothing to look up → just reply, no hold",
+      pol.apply(triage.Triage("reply", 0.9, 2, 2, 0.1, 0, "t", can_answer=0.2)).route == "reply")
+# Saying nothing leaks nothing, so scope only gates routes that actually speak.
+check("policy: an out-of-scope message that deserved silence stays ignored",
+      pol.apply(triage.Triage("ignore", 0.9, 2, 2, 0, 0, "t", in_scope=0.2)).route == "ignore")
 check("policy: confident reply and answerable stays reply",
       pol.apply(triage.Triage("reply", 0.9, 2, 2, 0, 0, "t", can_answer=0.9)).route == "reply")
 check("triage defaults keep positional construction working",
