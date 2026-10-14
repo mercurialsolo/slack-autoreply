@@ -214,6 +214,23 @@ class Slack:
         self.names: dict[str, str] = {self.me: self.me_name}
         self.handles: dict[str, str] = {self.me: self.me_handle}
         self.channel_names: dict[str, str] = {}
+        # Optional bot, used for exactly one thing: telling you a draft is waiting.
+        # Slack never notifies you about your own messages, and every draft is posted as YOU,
+        # so the self-DM cannot badge no matter what we do to its read cursor. A message from
+        # the bot is a different identity, so it notifies like any other DM. The bot never
+        # replies to anyone — the reply itself still goes out on your user token.
+        self.bot = None
+        self.bot_dm: str | None = None
+        bot_token = config.env("SLACK_BOT_TOKEN")
+        if bot_token.startswith("xoxb-"):
+            try:
+                self.bot = WebClient(token=bot_token)
+                self.bot_dm = self.bot.conversations_open(users=self.me)["channel"]["id"]
+            except Exception as e:  # noqa: BLE001 - a missing nudge must never stop a draft
+                log.warning("bot token present but unusable (%s) — drafts will not notify", e)
+                self.bot, self.bot_dm = None, None
+        elif bot_token:
+            log.warning("SLACK_BOT_TOKEN is set but is not a bot token (xoxb-…) — ignoring it")
 
     def name_of(self, uid: str) -> str:
         if uid not in self.names:
@@ -351,8 +368,27 @@ class Slack:
         The summary is passed as one extra argument.
         """
         ts = self.post(self.self_dm, text)
+        self._nudge(text, ts)
         self._ping(text)
         return ts
+
+    def _nudge(self, text: str, ts: str) -> None:
+        """Have the bot DM you that something is waiting, with a link straight to it.
+
+        The draft itself stays in the self-DM, where ✅ / ❌ already work — this only makes it
+        findable. One line plus a permalink, because the detail is one tap away.
+        """
+        if not (self.bot and self.bot_dm):
+            return
+        try:
+            first = next((l for l in text.splitlines() if l.strip()), "Something needs you")
+            try:
+                link = self.client.chat_getPermalink(channel=self.self_dm, message_ts=ts)["permalink"]
+            except Exception:  # noqa: BLE001 - the nudge is still useful without a link
+                link = ""
+            self.bot.chat_postMessage(channel=self.bot_dm, text=f"{first}\n{link}".strip())
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not send the bot nudge (%s) — the draft is still in your self-DM", e)
 
     def _ping(self, text: str) -> None:
         cmd = CFG["notify_cmd"]

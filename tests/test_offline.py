@@ -86,6 +86,7 @@ class FakeClient:
 def fake_init(self):
     self.client = FakeClient(); self.me = "UME"; self.team = "T1"; self.me_handle = "barada"; self.me_name = "Barada"; self.self_dm = "DSELF"
     self.names = {"UME": "Barada"}; self.handles = {"UME": "barada"}; self.channel_names = {}
+    self.bot = None; self.bot_dm = None
 
 
 S.Slack.__init__ = fake_init
@@ -264,6 +265,26 @@ def _notify_survives_a_broken_cmd():
         S.CFG["notify_cmd"] = ""
 
 check("a failed ping never loses the draft", _notify_survives_a_broken_cmd())
+
+# With a bot token the owner gets a real notification: the draft stays in the self-DM where
+# ✅/❌ work, and the bot DMs a one-liner plus a permalink so it is findable.
+def _bot_nudge():
+    d = S.Slack()
+    d.bot = FakeClient(); d.bot_dm = "DBOT"
+    d.notify("*Draft hold → DM with Sri* — react :white_check_mark: to send\nChecking")
+    sent = d.bot.posted
+    return len(sent) == 1 and sent[0][0] == "DBOT" and "Draft hold" in sent[0][1]
+
+check("the bot nudges you so a draft actually notifies", _bot_nudge())
+
+def _nudge_failure_is_survivable():
+    d = S.Slack()
+    class Broken:
+        def chat_postMessage(self, **k): raise RuntimeError("bot revoked")
+    d.bot = Broken(); d.bot_dm = "DBOT"
+    return bool(d.notify("draft"))   # the self-DM post must still happen
+
+check("a broken bot never costs you the draft", _nudge_failure_is_survivable())
 
 # ------------------------------------------------------------ the daemon
 voice.ensure_voice_file()

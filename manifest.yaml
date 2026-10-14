@@ -7,6 +7,15 @@ display_information:
   description: Replies to my Slack messages from my own account, in my voice
   background_color: "#1f1f1f"
 
+features:
+  # A bot user that exists for exactly one purpose: telling you a draft is waiting.
+  # Slack never notifies you about your own messages, and Solo replies as YOU on the user
+  # token, so the self-DM can never badge. A message from the bot is a different identity,
+  # so it notifies normally. The bot never replies to anyone but you.
+  bot_user:
+    display_name: Solo
+    always_online: false
+
 settings:
   socket_mode_enabled: true
   org_deploy_enabled: false
@@ -24,7 +33,12 @@ settings:
 
 oauth_config:
   scopes:
-    # User scopes only — no bot user, no bot token, no proxy handle.
+    # Bot scopes exist only so Solo can DM YOU that a draft is waiting.
+    bot:
+      - chat:write
+      - im:write
+    # Replies use USER scopes, so they post as you. The bot above never replies to anyone;
+    # it only DMs you that a draft is waiting.
     user:
       - channels:history
       - channels:read
