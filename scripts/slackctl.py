@@ -696,13 +696,26 @@ def pick_session(item: dict, state: "State") -> tuple[str, bool]:
     return str(uuid.uuid4()), False
 
 
+def bash_rules() -> list[str]:
+    """Permission rules letting Claude run this CLI and nothing else.
+
+    Claude Code matches a Bash prefix as `Bash(cmd:*)`. The colon is load-bearing — the space
+    form grants nothing, silently, and the agent simply reports that Bash was denied. Both
+    spellings are emitted so this keeps working if that ever changes.
+    """
+    out = []
+    for s in {SCRIPT, SCRIPT_REAL}:
+        out += [f"Bash(python3 {s}:*)", f"Bash(python3 {s} *)"]
+    return out
+
+
 def claude_command(item: dict, session: tuple[str, bool] | None = None, prompt: str | None = None) -> tuple[list[str], dict, str]:
     """The headless Claude Code invocation for one inbox item."""
     dirs = [str(Path(os.path.expanduser(d)).resolve()) for d in CFG["context_dirs"] if d.strip() and d.strip() != "*"]
     any_dir = any(d.strip() == "*" for d in CFG["context_dirs"])
     cwd = CFG["claude_cwd"] or (dirs[0] if dirs else str(config.STATE_DIR))
     mcp = discover_mcp_names(cwd, CFG["mcp_allow"])
-    allowed = [f"Bash(python3 {SCRIPT} *)"] + ([f"Bash(python3 {SCRIPT_REAL} *)"] if SCRIPT_REAL != SCRIPT else [])
+    allowed = bash_rules()
     allowed += ["Glob", "Grep", "WebFetch", "WebSearch"]
     allowed += ["Read"] if any_dir else [f"Read(//{d.lstrip('/')}/**)" for d in dirs]
     allowed += [f"mcp__{n}__*" for n in mcp]
@@ -710,7 +723,7 @@ def claude_command(item: dict, session: tuple[str, bool] | None = None, prompt: 
            "--output-format", "stream-json", "--verbose",
            "--permission-mode", "dontAsk",
            "--allowedTools", ",".join(allowed),
-           "--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit,Agent",
+           "--disallowedTools", "Write,Edit,NotebookEdit,Agent",
            "--max-turns", str(CFG["claude_max_turns"])]
     for d in dirs:
         cmd += ["--add-dir", d]
@@ -1609,6 +1622,46 @@ def cmd_where(a):
               f"makes routing reliable; keywords alone are weak")
 
 
+
+def cmd_ask(a):
+    """An agent asks a question about Slack and gets an answer back on stdout.
+
+    The read half of the agent interface. `say` lets an agent put something into Slack; `ask`
+    lets it find out what is already there — "any updates from Sri?", "what did we decide about
+    the Thursday go-live?", "is anyone waiting on me?" — in plain language, so the agent needs no
+    knowledge of channels, handles, or the CLI.
+
+    Strictly read-only. It reuses the same tool grant as the writer, which denies Write/Edit and
+    limits Bash to this CLI, and runs with AUTOREPLY_DISPATCH=1, under which every sending
+    subcommand refuses. Nothing it does can post, approve or change anything.
+    """
+    dirs = [str(Path(os.path.expanduser(d)).resolve()) for d in CFG["context_dirs"]
+            if d.strip() and d.strip() != "*"]
+    cwd = CFG["claude_cwd"] or (dirs[0] if dirs else str(config.STATE_DIR))
+    allowed = bash_rules() + ["Glob", "Grep", f"Read(//{str(config.STATE_DIR).lstrip('/')}/**)"]
+    cmd = [CFG["claude_bin"], "-p", f"/slack-autoreply ask {a.question}",
+           "--permission-mode", "dontAsk",
+           "--allowedTools", ",".join(allowed),
+           "--disallowedTools", "Write,Edit,NotebookEdit,Agent,WebFetch,WebSearch",
+           "--max-turns", str(min(CFG["claude_max_turns"], 15))]
+    env = dict(os.environ)
+    env["AUTOREPLY_DISPATCH"] = "1"
+    env["AUTOREPLY_HOME"] = str(config.STATE_DIR)
+    if not CFG["dispatch_use_api_key"]:
+        env.pop("ANTHROPIC_API_KEY", None)
+    try:
+        # stdin must be closed, not inherited: `claude -p` waits on it and then runs with a
+        # degraded context in which the allowlist does not take, so every Bash call is denied.
+        r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=CFG["claude_timeout"])
+    except subprocess.TimeoutExpired:
+        sys.exit(f"timed out after {CFG['claude_timeout']}s")
+    out = (r.stdout or "").strip()
+    if not out:
+        sys.exit(f"no answer{(': ' + r.stderr.strip()[:300]) if r.stderr.strip() else ''}")
+    print(out)
+
+
 def cmd_simulate(a):
     config.ensure_dirs()
     ledger, llm = load_services()
@@ -1839,6 +1892,8 @@ def main():
     p.set_defaults(fn=cmd_learn_channels)
     p = sub.add_parser("where", help="which channel does this belong in?")
     p.add_argument("subject"); p.set_defaults(fn=cmd_where)
+    p = sub.add_parser("ask", help="ask about Slack in plain language; read-only, answers on stdout")
+    p.add_argument("question"); p.set_defaults(fn=cmd_ask)
     p = sub.add_parser("done"); p.add_argument("item"); p.add_argument("--status", default="skipped"); p.set_defaults(fn=cmd_done)
     sub.add_parser("followups").set_defaults(fn=cmd_followups)
     sub.add_parser("drafts").set_defaults(fn=cmd_drafts)

@@ -3,7 +3,7 @@ name: slack-autoreply
 description: Reply to the user's Slack messages from their own account, in their voice, with their context. Modes — setup (pull voice from Slack, write VOICE.md), handle <item> (compose one reply; what the daemon calls), run (drain the inbox), review (learn from corrections, update VOICE.md), simulate <text> (dry run), status.
 argument-hint: setup | handle <item> | run | review | simulate "<text>" [--from Name] | status
 disable-model-invocation: true
-allowed-tools: Bash(python3 ${CLAUDE_SKILL_DIR}/scripts/slackctl.py *) Read Grep Glob WebFetch WebSearch Edit(~/.slack-autoreply/**)
+allowed-tools: Bash(python3 ${CLAUDE_SKILL_DIR}/scripts/slackctl.py:*), Read, Grep, Glob, WebFetch, WebSearch, Edit(~/.slack-autoreply/**)
 ---
 
 # slack-autoreply
@@ -77,6 +77,28 @@ If `show` says triage is unavailable, decide the route yourself with the same de
 4. Seed memory for the people they talk to most: from the examples, pick the 5 most frequent counterparts and the busiest channels; for each run `$SLACKCTL about <user>` (or `history #channel --limit 80`), then write 3–6 lines to the dossier with `$SLACKCTL note <user> "…"`: who they are, what the user works on with them, how the user talks to them, what recurring terms mean. Facts from the messages only.
 5. Dry-run three messages they'd actually get: `$SLACKCTL simulate "…" --from Name` then `handle` each (simulated items never send). Show the user the triage line and your reply for each and adjust VOICE.md once more if something rings false.
 6. Tell them how to start: the daemon (`listen`) in `MODE=learn`, where every reply/hold waits for their ✅ until a (route, sender) pair has earned auto; and that `/slack-autoreply review` is how it learns from what they change.
+
+## `ask` — another agent wants to know what is in Slack
+
+`ask <question>` is the read half of the agent interface. Something asked in plain language —
+"any updates from Sri?", "what did we decide about the Thursday go-live?", "is anyone waiting on
+me?" — and your answer goes back to the agent on stdout. It is **read-only**: you cannot post,
+approve or change anything, and every sending subcommand refuses in this mode.
+
+1. Work out who or what they mean. `$SLACKCTL about @who` resolves a name; `inbox`, `drafts` and
+   `followups` answer "what is waiting / what did I promise" without any searching.
+2. Then the memory commands: `history @who` or `history #channel` for recent traffic,
+   `search "terms"` across the workspace, `history #chan --thread <ts>` for one thread in full.
+   The channel dossiers say what each channel is for, which is usually how you find the right one.
+3. **Answer in plain prose, not a transcript.** The caller is an agent that needs the *substance*:
+   what was decided, what is outstanding, who is waiting. Quote a line only when the wording
+   matters. Lead with the answer; if someone is waiting on the owner, say that first.
+4. **Say what you did not find.** "Nothing from Sri since Tuesday" is a real answer. Never pad a
+   thin result into a confident summary, and never infer a decision nobody made.
+
+Never include a credential, one-time code, password or token in an answer, even verbatim from a
+message — an agent asking for context is not a reason to copy a secret out of Slack. Say that the
+message contains one and leave it there.
 
 ## `compose` — another agent wants something said
 

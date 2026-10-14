@@ -564,6 +564,25 @@ def _replies_are_never_rerouted():
 
 check("a reply always goes back to the channel it arrived in", _replies_are_never_rerouted())
 
+# Claude Code matches a Bash prefix as `Bash(cmd:*)`. The space form silently grants nothing and
+# the agent just reports "Bash denied" — which is exactly how `ask` failed, and why the daemon's
+# own allowlist was quietly wrong too.
+check("bash permission rules use the colon prefix form",
+      any(r.endswith(":*)") for r in S.bash_rules()))
+check("every bash rule is scoped to this CLI, never bare python3",
+      all("slackctl.py" in r for r in S.bash_rules()))
+
+# `ask` is the read half of the agent interface and must not be able to send.
+def _ask_is_read_only():
+    src = (ROOT / "scripts" / "slackctl.py").read_text()
+    body = src[src.index("def cmd_ask"):src.index("def cmd_simulate")]
+    return ("AUTOREPLY_DISPATCH" in body                 # sending subcommands refuse
+            and "Write,Edit" in body                      # file writes denied
+            and "stdin=subprocess.DEVNULL" in body        # or the allowlist does not take
+            and "chat_postMessage" not in body)
+
+check("ask cannot send anything", _ask_is_read_only())
+
 # Typing to Solo in its own DM is an instruction to Solo — never something to reply to, and never
 # material to learn the owner's voice from.
 def _console(text):

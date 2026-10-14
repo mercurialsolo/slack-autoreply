@@ -23,6 +23,23 @@ confidently it asks the owner rather than guessing.
 
 `--from` is you — your agent or task name. It appears on the draft so the owner knows who asked.
 
+## Asking what is in Slack
+
+The other half: you can ask, in plain language, and get prose back.
+
+```
+solo ask "any updates from Sri?"
+solo ask "what did we decide about the Thursday go-live?"
+solo ask "is anyone waiting on me?"
+```
+
+Read-only — it cannot post or change anything. Use it when Slack holds context you need before
+doing the work: what was decided, whether someone already answered, what the owner promised and
+to whom. You do not need to know channels or handles; ask for what you want to know.
+
+It answers with substance, and says so when it found nothing — "nothing from Sri since Tuesday"
+is a real answer, so do not re-ask it a different way hoping for more.
+
 ## What makes a good report
 
 Facts you have actually verified, in plain terms, with the thing that matters first:
