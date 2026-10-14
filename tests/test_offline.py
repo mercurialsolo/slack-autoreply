@@ -198,6 +198,50 @@ check("ignore covers informational messages",
 check("ack no longer claims every shared heads-up",
       "sharing something or giving a heads-up" not in _routes["ack"].lower())
 
+# Hard boundaries: Solo answers questions about this workspace's work. Anything asking it to act
+# on a system, or asking about work outside this workspace, goes to the owner — never auto.
+_q = triage.questions("me")
+check("triage asks Jev about actions and scope",
+      {"asks_to_execute", "in_scope"} <= set(_q))
+check("a request to execute escalates even when it looks routine",
+      pol.apply(triage.Triage("reply", 0.95, 1, 1, 0, 0, "t", asks_to_execute=0.9)).route == "escalate")
+check("an out-of-scope question escalates",
+      pol.apply(triage.Triage("reply", 0.95, 1, 1, 0, 0, "t", in_scope=0.1)).route == "escalate")
+check("in-scope question asking nothing of systems is untouched",
+      pol.apply(triage.Triage("reply", 0.95, 1, 1, 0, 0, "t", can_answer=0.9,
+                              asks_to_execute=0.0, in_scope=1.0)).route == "reply")
+# A Jev response that omits the two safety answers must parse as "wants an action, out of scope",
+# so a malformed or truncated reply escalates to the owner instead of sailing through as routine.
+def _jev_fails_closed():
+    import types
+    saved = sys.modules.get("httpx")
+    class _Err(Exception):
+        def __init__(self, m, request=None, response=None): super().__init__(m); self.response = response
+    class _Resp:
+        status_code = 200
+        def json(self): return {"model": "jev-1", "answers": {"route": {"choice": "reply", "confidence": 0.99}}}
+        def raise_for_status(self): pass
+    fake = types.SimpleNamespace(HTTPStatusError=_Err, TransportError=OSError, post=lambda url, **k: _Resp())
+    sys.modules["httpx"] = fake
+    try:
+        t = triage.jev({"message": "hi"}, "me", "k")
+        return t.asks_to_execute == 1.0 and t.in_scope == 0.0 and pol.apply(t).route == "escalate"
+    finally:
+        if saved is not None: sys.modules["httpx"] = saved
+        else: sys.modules.pop("httpx", None)
+
+check("a jev answer missing the safety fields escalates, not replies", _jev_fails_closed())
+
+# The drafting agent holds Bash(python3 slackctl.py *). It must not be able to send or self-approve.
+check("sending subcommands are forbidden to the drafting agent",
+      {"approve", "drop", "listen", "pause", "resume"} <= S.DISPATCH_FORBIDDEN)
+check("the agent can still record a decision and research",
+      not ({"act", "show", "history", "search", "about", "note"} & S.DISPATCH_FORBIDDEN))
+_env = dict(os.environ); _env["AUTOREPLY_DISPATCH"] = "1"
+_r = subprocess.run([sys.executable, str(SCRIPTS / "slackctl.py"), "approve", "x"], capture_output=True, text=True, env=_env)
+check("approve is refused in a dispatched run", _r.returncode != 0 and "refused" in (_r.stdout + _r.stderr))
+check("CONTEXT_MCP_ALLOW=none grants no mcp servers", S.discover_mcp_names(None, ["none"]) == [])
+
 # ------------------------------------------------------------ the daemon
 voice.ensure_voice_file()
 voice.save_samples([{"text": "yep on it", "channel": D, "ts": "1000", "prompt": "can you look?", "reply_to_user": U}])

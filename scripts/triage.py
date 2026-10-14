@@ -113,6 +113,25 @@ def questions(me: str) -> dict:
                 f"else holds."
             ),
         },
+        "asks_to_execute": {
+            "type": "noul",
+            "instructions": (
+                f"Is the sender asking {me} to DO something to a system, rather than asking for information? "
+                f"Yes for: run a script or command, deploy, restart, install, change a setting or config, "
+                f"grant or revoke access, create, edit or delete a file, record, account or ticket, send "
+                f"something on to a third party. No for: asking a question, asking for a status, a number, "
+                f"a link, a document, or an opinion."
+            ),
+        },
+        "in_scope": {
+            "type": "noul",
+            "instructions": (
+                f"Is this message strictly about the work of THIS Slack workspace — its own projects, "
+                f"customers, systems, schedules and people? Answer no if it asks about another company, "
+                f"another client or team {me} works with elsewhere, {me}'s other projects, personal matters, "
+                f"or what {me} has been working on outside this workspace."
+            ),
+        },
     }
 
 
@@ -128,6 +147,8 @@ class Triage:
     # Added after `source` so existing positional construction keeps working.
     topic: str = "other"       # what the message is about (TOPIC_CRITERIA key)
     can_answer: float = 0.5    # 0..1: is everything needed to answer well already at hand
+    asks_to_execute: float = 0.0  # 0..1: wants an action on a system, not an answer
+    in_scope: float = 1.0      # 0..1: is about this workspace's own work
     forced: str | None = None  # why policy overrode the model's route
     raw: dict = field(default_factory=dict)
 
@@ -135,7 +156,8 @@ class Triage:
         f = f" (forced: {self.forced})" if self.forced else ""
         return (f"{self.route}{f} · {self.topic} · conf {self.confidence:.2f} · sens {self.sensitivity:.1f} · "
                 f"urg {self.urgency:.1f} · ctx {self.needs_context:.2f} · answerable {self.can_answer:.2f} · "
-                f"share {self.asks_for_content:.2f} · {self.source}")
+                f"share {self.asks_for_content:.2f} · exec {self.asks_to_execute:.2f} · "
+                f"scope {self.in_scope:.2f} · {self.source}")
 
 
 @dataclass
@@ -144,10 +166,22 @@ class Policy:
     sensitivity_escalate: float = 4.0
     # Below this, we don't have what we'd need to answer — promise a time instead of guessing.
     min_answerable: float = 0.5
+    # Solo answers questions. It never performs actions, and never speaks outside this workspace's
+    # work. Both of these force escalate — the owner sees it and decides; nothing is auto-approved.
+    max_execute: float = 0.5
+    min_in_scope: float = 0.5
 
     def apply(self, t: Triage) -> Triage:
         if t.route not in ROUTES:
             t.route, t.forced = "hold", f"unknown route {t.route!r}"
+        # These two come first: they are hard boundaries, not preferences, so they outrank
+        # every other reason a message might have looked routine.
+        if t.asks_to_execute >= self.max_execute:
+            t.route, t.forced = "escalate", f"asks for an action, not an answer ({t.asks_to_execute:.2f})"
+            return t
+        if t.in_scope < self.min_in_scope:
+            t.route, t.forced = "escalate", f"outside this workspace's work ({t.in_scope:.2f})"
+            return t
         if t.sensitivity >= self.sensitivity_escalate:
             # Even an "ignore" is worth a heads-up when it's this sensitive; the draft may still be NO_REPLY.
             t.route, t.forced = "escalate", f"sensitivity {t.sensitivity:.1f}"
@@ -233,6 +267,8 @@ def jev(state: dict, me: str, api_key: str, timeout: float = 8.0, attempts: int 
     share = _lookup(resp, "asks_for_content") or {}
     topic = _lookup(resp, "topic") or {}
     answerable = _lookup(resp, "can_answer_now") or {}
+    execute = _lookup(resp, "asks_to_execute") or {}
+    scope = _lookup(resp, "in_scope") or {}
 
     choice = str(route.get("choice", "hold"))
     conf = route.get("confidence")
@@ -247,6 +283,10 @@ def jev(state: dict, me: str, api_key: str, timeout: float = 8.0, attempts: int 
         asks_for_content=float(share.get("noul", 0.0)),
         topic=str(topic.get("choice", "other")),
         can_answer=float(answerable.get("noul", 0.5)),
+        # Fail closed: an unreadable answer must look like "wants an action" / "out of scope",
+        # so a malformed Jev response escalates to the owner rather than sailing through.
+        asks_to_execute=float(execute.get("noul", 1.0)),
+        in_scope=float(scope.get("noul", 0.0)),
         source=f"jev:{resp.get('model', JEV_MODEL)}",
         raw=resp,
     )
@@ -266,6 +306,8 @@ def claude(state: dict, me: str, client, model: str) -> Triage:
         "asks_for_content": "0..1 probability",
         "topic": "one of " + ", ".join(TOPIC_CRITERIA),
         "can_answer_now": "0..1 probability",
+        "asks_to_execute": "0..1 probability",
+        "in_scope": "0..1 probability",
     }
     prompt = (
         "You are a triage classifier for incoming Slack messages. Answer the questions about the STATE "
@@ -286,6 +328,8 @@ def claude(state: dict, me: str, client, model: str) -> Triage:
         asks_for_content=float(data.get("asks_for_content", 0.0)),
         topic=str(data.get("topic", "other")),
         can_answer=float(data.get("can_answer_now", 0.5)),
+        asks_to_execute=float(data.get("asks_to_execute", 1.0)),
+        in_scope=float(data.get("in_scope", 0.0)),
         source=f"claude:{model}",
         raw=data,
     )
