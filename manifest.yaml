@@ -15,6 +15,14 @@ features:
   bot_user:
     display_name: Solo
     always_online: false
+  # The bot's DM is the console: drafts arrive there and ✅/❌ approve them. Turning the messages
+  # tab on also lets the owner TYPE there — `pause`, `status`, or a correction — from their phone,
+  # without a terminal. Off by default in Slack, which is why it read "sending messages to this
+  # app has been turned off".
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
 
 settings:
   socket_mode_enabled: true
@@ -30,6 +38,9 @@ settings:
       - message.channels
       - message.groups
       - reaction_added
+    # Bot events: only the owner typing to Solo in its own DM.
+    bot_events:
+      - message.im
 
 oauth_config:
   scopes:
@@ -37,6 +48,7 @@ oauth_config:
     bot:
       - chat:write
       - im:write
+      - im:history        # read what the owner types to Solo in its DM
     # Replies use USER scopes, so they post as you. The bot above never replies to anyone;
     # it only DMs you that a draft is waiting.
     user:

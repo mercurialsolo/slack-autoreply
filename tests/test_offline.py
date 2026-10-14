@@ -564,6 +564,29 @@ def _replies_are_never_rerouted():
 
 check("a reply always goes back to the channel it arrived in", _replies_are_never_rerouted())
 
+# Typing to Solo in its own DM is an instruction to Solo — never something to reply to, and never
+# material to learn the owner's voice from.
+def _console(text):
+    d.bot = FakeClient(); d.bot_dm = "DBOT"
+    before = len(voice.load_samples())
+    d.on_event({"type": "message", "user": "UME", "channel": "DBOT", "channel_type": "im",
+                "ts": f"{time.time():.6f}", "text": text})
+    answers = [p[1] for p in d.bot.posted]
+    return (answers[-1] if answers else ""), len(voice.load_samples()) == before
+
+ans, no_sample = _console("status")
+check("`status` in the console answers", "MODE=" in ans)
+check("console chatter is never learned as the owner's voice", no_sample)
+ans, _ = _console("pause 90m")
+check("`pause 90m` pauses from Slack", "paused until" in ans and d.state.pause_info() is not None)
+ans, _ = _console("resume")
+check("`resume` lifts it from Slack", "resumed" in ans and d.state.pause_info() is None)
+ans, _ = _console("pause banana")
+check("a bad duration is explained, not swallowed", "duration" in ans.lower())
+ans, _ = _console("too formal — keep it shorter with Sri")
+check("free text is kept as feedback for review", "noted" in ans.lower()
+      and "shorter with Sri" in (S.config.p("console_feedback.jsonl").read_text()))
+
 # "approve everything" has to include the reaction, or the one unapproved thing is the one that
 # goes wrong. ignore stays automatic because it sends nothing at all.
 check("MODE=draft makes even an ack wait",

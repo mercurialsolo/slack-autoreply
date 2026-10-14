@@ -872,6 +872,12 @@ class Daemon(Slack):
         sender, channel = ev.get("user"), ev.get("channel")
         if not sender or not channel or ev.get("bot_id") or sender == "USLACKBOT":
             return
+        # The bot's DM is a console, not a conversation: what the owner types there is an
+        # instruction to Solo, never material to learn their voice from or reply to.
+        if self.bot_dm and channel == self.bot_dm:
+            if sender == self.me:
+                self.on_console_message(ev)
+            return
         if sender == self.me:
             self.on_owner_message(ev)
             return
@@ -984,6 +990,69 @@ class Daemon(Slack):
             log.info(approve_draft(self, item, self.ledger, self.followups, self.state, draft_ts))
         elif r in DROP_REACTIONS:
             log.info(drop_draft(self, item, self.ledger, self.state, draft_ts))
+
+    # ------------------------------------------------------------ console
+
+    CONSOLE_HELP = ("`pause` / `pause 2h` / `resume` · `status` · `mode learn|draft|auto`\n"
+                    "anything else is kept as feedback on how I write, and folded in at the next review")
+
+    def on_console_message(self, ev: dict) -> None:
+        """The owner typed to Solo in its DM. Commands first, everything else is feedback."""
+        said = clean_text(ev.get("text", ""), self.name_of).strip()
+        if not said:
+            return
+        low = said.lower()
+        reply = None
+        try:
+            if low in ("help", "?", "commands"):
+                reply = self.CONSOLE_HELP
+            elif low.startswith("pause"):
+                rest = said[5:].strip()
+                until = None
+                if rest:
+                    try:
+                        secs = parse_duration(rest)
+                        until = (datetime.now() + timedelta(seconds=secs)).isoformat(timespec="seconds")
+                    except ValueError as e:
+                        reply = str(e)
+                if reply is None:
+                    info = self.state.set_pause(until, "paused from Slack")
+                    reply = f"paused {'until ' + info['until'] if until else 'until you say resume'} — nothing drafted or sent"
+            elif low in ("resume", "unpause", "go"):
+                if self.state.pause_info() is None:
+                    reply = "not paused"
+                else:
+                    self.state.clear_pause()
+                    reply = "resumed — drafting again"
+            elif low == "status":
+                st = self.state.read()
+                p = self.state.pause_info()
+                reply = (f"{'PAUSED — ' if p else ''}MODE={CFG['mode']} · {len(st.get('pending', {}))} waiting for you · "
+                         f"{len(list_items({'queued'}))} queued · {len(self.followups.open())} open promises")
+            elif low.startswith("mode "):
+                want = low.split(None, 1)[1].strip()
+                if want not in ("learn", "draft", "auto"):
+                    reply = "mode learn | draft | auto"
+                else:
+                    reply = (f"MODE is set in .env and read at startup, so I can't change it from here. "
+                             f"On the machine running me: `solo ssh` then edit MODE={want} and `solo restart`. "
+                             f"To stop me right now: `pause`.")
+            else:
+                # Not a command: the owner correcting how Solo writes. Keep it verbatim where
+                # `review` will see it, rather than guessing an edit to VOICE.md unprompted.
+                path = config.p("console_feedback.jsonl")
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"at": now_iso(), "said": said}, ensure_ascii=False) + "\n")
+                log.info("console feedback kept: %s", said[:100])
+                reply = "noted — I'll fold that in at the next review"
+        except Exception as e:  # noqa: BLE001 - never let the console crash the daemon
+            log.exception("console command failed")
+            reply = f"that failed: {e}"
+        if reply:
+            try:
+                self.bot.chat_postMessage(channel=self.bot_dm, text=reply)
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not answer in the console (%s)", e)
 
     # ------------------------------------------------------------ inbound
 
