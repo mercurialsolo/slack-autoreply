@@ -339,7 +339,31 @@ class Slack:
         self.client.chat_update(channel=channel, ts=ts, text=text)
 
     def notify(self, text: str) -> str:
-        return self.post(self.self_dm, text)
+        """Post to the owner's self-DM, and ping them outside Slack if they asked for it.
+
+        Slack will not notify you about your own messages, and Solo posts as you — so a draft
+        lands in a conversation that never badges. `conversations.mark` does not help: it moves
+        `unread_count` but not `unread_count_display`, which is the one that drives the badge and
+        which excludes your own messages. Measured, not assumed.
+
+        So the ping has to come from outside your own Slack identity. NOTIFY_CMD is whatever
+        reaches you — `node-notify blocked`, a phone push, `osascript -e 'display notification'`.
+        The summary is passed as one extra argument.
+        """
+        ts = self.post(self.self_dm, text)
+        self._ping(text)
+        return ts
+
+    def _ping(self, text: str) -> None:
+        cmd = CFG["notify_cmd"]
+        if not cmd:
+            return
+        summary = " ".join(text.split())[:180]
+        try:
+            subprocess.run(shlex.split(cmd) + [summary], timeout=20,
+                           capture_output=True, check=False)
+        except Exception as e:  # noqa: BLE001 - a failed ping must never lose the draft
+            log.warning("NOTIFY_CMD failed (%s) — the draft is still in your self-DM", e)
 
 
 # ------------------------------------------------------------------ core

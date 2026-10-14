@@ -95,6 +95,9 @@ CFG = dict(
     triage_fallback_model=env("TRIAGE_FALLBACK_MODEL", "claude-haiku-5-5"),
     triage_min_confidence=env_float("TRIAGE_MIN_CONFIDENCE", 0.6),
     sensitivity_escalate=env_float("SENSITIVITY_ESCALATE", 4),
+    # Slack never notifies you about your own messages, and Solo posts as you — so a draft
+    # in the self-DM cannot badge. This is how you get told: any command that reaches you.
+    notify_cmd=env("NOTIFY_CMD", ""),
     ack_style=env("ACK_STYLE", "reaction").strip().lower(),
     ack_emoji=env("ACK_EMOJI", "eyes").strip().strip(":"),
     # follow-ups

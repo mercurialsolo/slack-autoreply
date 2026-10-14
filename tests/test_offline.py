@@ -242,6 +242,29 @@ _r = subprocess.run([sys.executable, str(SCRIPTS / "slackctl.py"), "approve", "x
 check("approve is refused in a dispatched run", _r.returncode != 0 and "refused" in (_r.stdout + _r.stderr))
 check("CONTEXT_MCP_ALLOW=none grants no mcp servers", S.discover_mcp_names(None, ["none"]) == [])
 
+# Slack cannot badge a self-DM that holds only your own messages (unread_count_display excludes
+# them), so the ping that tells you a draft is waiting has to come from outside Slack.
+def _notify_cmd_runs():
+    import tempfile
+    marker = Path(tempfile.mkdtemp()) / "pinged.txt"
+    S.CFG["notify_cmd"] = f"/bin/sh -c 'printf %s \"$1\" > {marker}' --"
+    try:
+        S.Slack().notify("Draft hold → DM with Sri — react ✅ to send")
+        return marker.exists() and "Draft hold" in marker.read_text()
+    finally:
+        S.CFG["notify_cmd"] = ""
+
+check("a waiting draft pings you outside Slack when NOTIFY_CMD is set", _notify_cmd_runs())
+
+def _notify_survives_a_broken_cmd():
+    S.CFG["notify_cmd"] = "/nonexistent/ping"
+    try:
+        return bool(S.Slack().notify("draft"))   # must still post
+    finally:
+        S.CFG["notify_cmd"] = ""
+
+check("a failed ping never loses the draft", _notify_survives_a_broken_cmd())
+
 # ------------------------------------------------------------ the daemon
 voice.ensure_voice_file()
 voice.save_samples([{"text": "yep on it", "channel": D, "ts": "1000", "prompt": "can you look?", "reply_to_user": U}])
