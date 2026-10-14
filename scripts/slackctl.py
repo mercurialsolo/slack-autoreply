@@ -605,6 +605,13 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
 
 def approve_draft(slack: Slack, item: dict, ledger: Ledger, followups: Followups, state: State, draft_ts: str) -> str:
     d = item["decision"]
+    if item.get("simulated"):
+        # `simulate` must never reach a real conversation, by any route. The dry-run path already
+        # refuses, but a simulated item that somehow became a pending draft would otherwise be
+        # sent for real by a ✅ — the one gesture that is supposed to be safe to try.
+        state.update(lambda s: s["pending"].pop(draft_ts, None))
+        slack.console_update(draft_ts, f"🧪 Simulated — nothing sent\n{quote(d.get('text', ''))}")
+        return f"[simulated] approval ignored for {item['id']} — nothing sent"
     ts = slack.post(item["channel"], d["text"], item.get("reply_thread_ts"))
     if item.get("followup"):
         fu = dict(item["followup"])

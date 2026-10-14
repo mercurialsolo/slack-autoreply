@@ -314,6 +314,24 @@ def _falls_back_without_a_bot():
 
 check("without a bot it still works, in the self-DM", _falls_back_without_a_bot())
 
+# ✅ is the gesture you are meant to be able to try. A simulated item must never reach a real
+# conversation through it — found by probing the bot-DM approval path with a fake item.
+def _simulated_approval_sends_nothing():
+    d = S.Slack(); d.bot = FakeClient(); d.bot_dm = "DBOT"
+    st = S.State()
+    sim = {"id": "sim-approve", "created": S.now_iso(), "status": "decided", "simulated": True,
+           "channel": "DREAL", "channel_type": "im", "sender": "U9", "sender_name": "Probe",
+           "text": "x", "reply_thread_ts": None,
+           "decision": {"action": "reply", "text": "must not send", "sources": [], "used_context": False,
+                        "note": "", "urgency": 2, "at": S.now_iso()}}
+    S.save_item(sim)
+    before = len(d.client.posted)
+    # the simulated guard returns before the ledger or follow-ups are touched
+    out = S.approve_draft(d, sim, None, None, st, "9999.0")
+    return "simulated" in out.lower() and len(d.client.posted) == before
+
+check("approving a simulated draft sends nothing", _simulated_approval_sends_nothing())
+
 # ------------------------------------------------------------ the daemon
 voice.ensure_voice_file()
 voice.save_samples([{"text": "yep on it", "channel": D, "ts": "1000", "prompt": "can you look?", "reply_to_user": U}])
