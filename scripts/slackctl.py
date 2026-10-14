@@ -515,12 +515,18 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
     item["decision"] = decision
     item["status"] = "done"
     item["decided"] = now_iso()
-    channel, thread_ts, sender, who = item["channel"], item.get("reply_thread_ts"), item["sender"], item["sender_name"]
+    channel, sender, who = item["channel"], item["sender"], item["sender_name"]
+    # Threading is a choice Solo makes per message, not a property of the channel type:
+    # `--thread` starts one on the message it is answering, which keeps a busy DM tidy and
+    # keeps a long channel thread in one place. Default stays whatever the conversation implied.
+    thread_ts = item["ts"] if decision.get("thread") else item.get("reply_thread_ts")
+    # The emoji is Solo's to pick — 👀 is only the fallback when it has no opinion.
+    emoji = (decision.get("emoji") or CFG["ack_emoji"]).strip().strip(":")
 
     if item.get("simulated"):
         mode, why = ledger.effective_mode(action, sender, channel, CFG["mode"])
         gate = used_context and not (sender in share_trusted or ledger.share_ok(sender))
-        verdict = {"ignore": "nothing", "ack": f":{CFG['ack_emoji']}: reaction",
+        verdict = {"ignore": "nothing", "ack": f":{emoji}: reaction",
                    "escalate": "⚠️ alert + draft in your self-DM",
                    "hold": f"{'SEND' if mode == 'auto' and not gate else 'DRAFT'} (hold)",
                    "reply": f"{'SEND' if mode == 'auto' and not gate else 'DRAFT'} (reply)"}[action]
@@ -537,11 +543,11 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
 
     if action == "ack":
         if CFG["ack_style"] == "reaction" or not text:
-            slack.react(channel, item["ts"], CFG["ack_emoji"])
-            item["outcome"] = {"status": "acked", "emoji": CFG["ack_emoji"]}
+            slack.react(channel, item["ts"], emoji)
+            item["outcome"] = {"status": "acked", "emoji": emoji}
             save_item(item)
             audit(item=item["id"], counterpart=who, status="ack_reaction", trigger=item["text"][:120])
-            return f"acked {who} with :{CFG['ack_emoji']}:"
+            return f"acked {who} with :{emoji}:"
         ts = slack.post(channel, text, thread_ts)
         item["outcome"] = {"status": "sent", "ts": ts}
         save_item(item)
@@ -1287,8 +1293,12 @@ def cmd_act(a):
         text = Path(a.text_file).read_text(encoding="utf-8").strip()
     if a.action in ("hold", "reply") and not text:
         sys.exit("--text is required for hold/reply")
+    emoji = (a.emoji or "").strip().strip(":")
+    if emoji and not re.fullmatch(r"[a-z0-9_+-]{1,64}", emoji):
+        sys.exit(f"--emoji {a.emoji!r}: use a Slack emoji NAME like +1, tada, eyes — not the character itself")
     decision = {"action": a.action, "text": text, "sources": [s for s in (a.sources or "").split(",") if s],
-                "used_context": bool(a.sources), "note": a.note or "", "urgency": a.urgency, "at": now_iso()}
+                "used_context": bool(a.sources), "note": a.note or "", "urgency": a.urgency,
+                "emoji": emoji, "thread": bool(a.thread), "at": now_iso()}
     item["decision"] = decision
     if os.getenv("AUTOREPLY_DISPATCH") == "1":
         item["status"] = "decided"
@@ -1460,7 +1470,10 @@ def main():
     p = sub.add_parser("deadline"); p.add_argument("--urgency", type=float, required=True); p.set_defaults(fn=cmd_deadline)
     p = sub.add_parser("act"); p.add_argument("item"); p.add_argument("--action", required=True, choices=["ignore", "ack", "hold", "reply", "escalate"])
     p.add_argument("--text", help="message text; use \\n for new lines"); p.add_argument("--text-file"); p.add_argument("--sources", help="comma list of where you looked: fs,notion,drive,github,calendar,web …")
-    p.add_argument("--note", help="for escalate: why it needs them"); p.add_argument("--urgency", type=float); p.set_defaults(fn=cmd_act)
+    p.add_argument("--note", help="for escalate: why it needs them"); p.add_argument("--urgency", type=float)
+    p.add_argument("--emoji", help="for ack: the reaction to leave, e.g. +1, tada, eyes. Default ACK_EMOJI")
+    p.add_argument("--thread", action="store_true", help="reply in a thread on their message instead of in the channel/DM")
+    p.set_defaults(fn=cmd_act)
     p = sub.add_parser("done"); p.add_argument("item"); p.add_argument("--status", default="skipped"); p.set_defaults(fn=cmd_done)
     sub.add_parser("followups").set_defaults(fn=cmd_followups)
     sub.add_parser("drafts").set_defaults(fn=cmd_drafts)

@@ -453,5 +453,31 @@ check("pause cli", out.returncode == 0 and "paused until" in out.stdout)
 out = ctl("resume")
 check("resume cli", out.returncode == 0 and "resumed" in out.stdout.lower())
 
+
+# An emoji is often the most in-voice reply there is, so Solo picks which one — 👀 is only the
+# fallback. And threading is a per-message choice, not a property of the channel type.
+out = ctl("act", sim, "--action", "ack", "--emoji", "tada")
+check("act accepts a chosen emoji", out.returncode == 0)
+out = ctl("act", sim, "--action", "ack", "--emoji", "\U0001F389")
+check("act rejects a raw emoji character, asking for the name",
+      out.returncode != 0 and "name" in (out.stdout + out.stderr).lower())
+
+iid_e = msg(d, U, D, "3000.000100", "shipped it")
+S.execute_decision(d, S.load_item(iid_e), {"action": "ack", "text": "", "emoji": "tada"},
+                   d.ledger, d.followups, set(), state=d.state)
+check("ack leaves the emoji Solo chose", fc.reactions[-1][2] == "tada")
+
+iid_t = msg(d, U, D, "3000.000200", "two questions for you")
+before = len(fc.posted)
+S.execute_decision(d, S.load_item(iid_t), {"action": "reply", "text": "answering here", "thread": True},
+                   d.ledger, d.followups, set(), state=d.state)
+check("--thread replies in a thread on their message",
+      any(th == "3000.000200" for _c, _x, th, _ts in fc.posted[before:]))
+
+check("without --thread a DM reply stays flat",
+      (lambda i: (S.execute_decision(d, S.load_item(i), {"action": "reply", "text": "flat"},
+                                     d.ledger, d.followups, set(), state=d.state),
+                  fc.posted[-1][2] is None)[1])(msg(d, U, D, "3000.000300", "one question")))
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{passed} checks passed")
