@@ -58,6 +58,7 @@ NAMES = {"UME": ("barada", "Barada"), U: ("priya", "Priya"), U2: ("ana", "Ana")}
 class FakeClient:
     def __init__(self):
         self.posted, self.reactions, self.updates, self.history, self.counter = [], [], [], {}, 0
+        self.marks = []
 
     def auth_test(self): return {"user_id": "UME", "team": "T1", "user": "barada"}
     def users_info(self, user):
@@ -79,6 +80,7 @@ class FakeClient:
         self.counter += 1; ts = f"{2000000000 + self.counter}.000000"; self.posted.append((channel, text, thread_ts, ts)); return {"ts": ts}
     def reactions_add(self, channel, timestamp, name): self.reactions.append((channel, timestamp, name)); return {}
     def chat_update(self, channel, ts, text): self.updates.append((channel, ts, text)); return {}
+    def conversations_mark(self, channel, ts): self.marks.append((channel, ts)); return {}
     def search_messages(self, query, **k):
         return {"messages": {"matches": [{"ts": "1699000000.000", "user": U, "text": "the series A deck v3 is final", "channel": {"id": D, "is_im": True}, "permalink": "https://slack/x"}], "paging": {"pages": 1}}}
 
@@ -241,6 +243,16 @@ _env = dict(os.environ); _env["AUTOREPLY_DISPATCH"] = "1"
 _r = subprocess.run([sys.executable, str(SCRIPTS / "slackctl.py"), "approve", "x"], capture_output=True, text=True, env=_env)
 check("approve is refused in a dispatched run", _r.returncode != 0 and "refused" in (_r.stdout + _r.stderr))
 check("CONTEXT_MCP_ALLOW=none grants no mcp servers", S.discover_mcp_names(None, ["none"]) == [])
+
+# Solo posts as the owner, so Slack never badges their own self-DM: a draft lands in a conversation
+# that always looks read. notify() moves the read cursor back so the draft shows unread.
+def _notify_marks_unread():
+    d = S.Slack()
+    ts = d.notify("draft for you")
+    marks = d.client.marks
+    return bool(marks) and marks[-1][0] == d.self_dm and float(marks[-1][1]) < float(ts)
+
+check("a self-DM draft is left unread so it notifies", _notify_marks_unread())
 
 # ------------------------------------------------------------ the daemon
 voice.ensure_voice_file()

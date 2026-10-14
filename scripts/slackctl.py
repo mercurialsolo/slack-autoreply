@@ -339,7 +339,26 @@ class Slack:
         self.client.chat_update(channel=channel, ts=ts, text=text)
 
     def notify(self, text: str) -> str:
-        return self.post(self.self_dm, text)
+        ts = self.post(self.self_dm, text)
+        self.mark_unread(ts)
+        return ts
+
+    def mark_unread(self, ts: str) -> None:
+        """Make the self-DM badge.
+
+        Solo posts as you, on your own user token, so every draft is — to Slack — a message you
+        sent yourself. Slack never notifies anyone about their own messages, so drafts land in a
+        conversation that always looks read: no badge, no unread, no notification. Moving the read
+        cursor to just before this message leaves it unread, which is what makes it show up on the
+        desktop and on your phone.
+
+        Best effort: if the workspace or token won't allow it, a silent draft is still better than
+        a failed post, so this never raises.
+        """
+        try:
+            self.client.conversations_mark(channel=self.self_dm, ts=f"{float(ts) - 0.000001:.6f}")
+        except Exception as e:  # noqa: BLE001 - never let a read-cursor tweak break a draft
+            log.debug("could not mark the self-DM unread (%s); drafts will not badge", e)
 
 
 # ------------------------------------------------------------------ core
