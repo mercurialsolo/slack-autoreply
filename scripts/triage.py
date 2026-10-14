@@ -374,3 +374,42 @@ class Triager:
         if t is None:
             t = Triage("hold", 0.0, 3.0, 2.0, 0.5, 0.0, "default", forced="triage unavailable")
         return self.policy.apply(t)
+
+
+def pick_channel(subject: str, catalogue: dict[str, str], api_key: str = "",
+                 timeout: float = 8.0) -> tuple[str, str, float]:
+    """Which conversation does this belong in? → (id, why, confidence).
+
+    A typed choice over the channels actually learned from the workspace — exactly the shape Jev
+    is for, and the reason agents never need to know the channel map: they say what happened,
+    Solo decides where it goes.
+
+    Without a Jev key this returns ("", "no triage model", 0.0) so the caller asks the owner
+    rather than guessing a channel, which is the expensive mistake.
+    """
+    api_key = api_key or config.env("TYPESAFE_API_KEY")
+    if not api_key or not catalogue:
+        return "", "no triage model configured" if not api_key else "nothing learned yet", 0.0
+    import httpx
+    questions = {"channel": {"type": "choice",
+                             "instructions": "Which of these conversations does this belong in? "
+                                             "Pick the one whose regular traffic it would sit among "
+                                             "naturally. If none of them fits, say other.",
+                             "criteria": {**catalogue, "other": "None of these is the right place."}}}
+    body = {"model": JEV_MODEL, "state": {"to_be_said": subject}, "questions": questions}
+    try:
+        r = httpx.post(f"{TYPESAFE_BASE_URL}/systemone", json=body,
+                       headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                       timeout=timeout)
+        r.raise_for_status()
+        ans = _lookup(r.json(), "channel") or {}
+    except Exception as e:  # noqa: BLE001 - a failed pick must ask, never guess
+        log.warning("channel pick failed (%s)", e)
+        return "", f"could not decide ({type(e).__name__})", 0.0
+    choice = str(ans.get("choice", "other"))
+    conf = ans.get("confidence")
+    if conf is None and isinstance(ans.get("probabilities"), dict):
+        conf = max(float(p) for p in ans["probabilities"].values())
+    if choice == "other":
+        return "", "none of the learned channels fits", float(conf or 0.0)
+    return choice, catalogue.get(choice, ""), float(conf if conf is not None else 0.5)

@@ -32,7 +32,7 @@ import sys
 import threading
 import time
 import uuid
-from collections import OrderedDict, defaultdict, deque
+from collections import Counter, OrderedDict, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -45,7 +45,7 @@ import voice  # noqa: E402
 from config import CFG, DROP_REACTIONS, OK_SUBTYPES, SEND_REACTIONS  # noqa: E402
 from followups import Followup, Followups, hold_deadline  # noqa: E402
 from learning import Ledger  # noqa: E402
-from triage import Policy, Triager  # noqa: E402
+from triage import Policy, Triager, pick_channel  # noqa: E402
 
 log = logging.getLogger("slackctl")
 SCRIPT = os.path.abspath(__file__)                 # as installed (may be a symlink into a repo)
@@ -1275,8 +1275,27 @@ def cmd_say(a):
     """
     config.ensure_dirs()
     s = Slack()
-    kind, tid, name = recall.resolve_target(s, a.target)
-    channel = s.client.conversations_open(users=tid)["channel"]["id"] if kind == "people" else tid
+    if a.target:
+        kind, tid, name = recall.resolve_target(s, a.target)
+        channel = s.client.conversations_open(users=tid)["channel"]["id"] if kind == "people" else tid
+        routed = f"you named {name}"
+    else:
+        # Agents report what they did; where it belongs is Solo's problem, not theirs. They have
+        # no view of the channel map and should not grow one — that is how a reporting agent ends
+        # up quietly deciding who hears what.
+        cat = channel_catalogue()
+        if not cat:
+            sys.exit(f"no channel dossiers yet — run: python3 {SCRIPT} learn-channels  (or pass --to)")
+        cid, why, conf = pick_channel(a.intent, cat)
+        if not cid or conf < CHANNEL_MIN_CONFIDENCE:
+            sys.exit(f"could not place this confidently ({conf:.2f}) — tell the owner, or pass --to.\n"
+                     f"   best guess was: {why[:120]}\n"
+                     f"   routing gets reliable once each channel's **For:** line is filled in "
+                     f"({recall.CHANNELS_DIR}) — learned keywords alone are a weak signal.")
+        kind, tid, channel = "channels", cid, cid
+        name = cat[cid].split(".", 1)[0].strip().lstrip("#")
+        routed = f"Solo placed it in #{name} ({conf:.2f})"
+    print(f"→ {routed}")
     item = {"id": f"say-{uuid.uuid4().hex[:8]}", "created": now_iso(), "status": "queued",
             "simulated": False, "outbound": True, "origin": f"agent:{a.from_}",
             "channel": channel, "channel_type": "im" if kind == "people" else "channel",
@@ -1300,6 +1319,146 @@ def cmd_say(a):
     ledger, _ = load_services()
     fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
     print(execute_decision(s, item, item["decision"], ledger, fus, set(), state=State()))
+
+
+
+def cmd_learn_channels(a):
+    """Learn the channel setup: what each channel is for, and who talks in it.
+
+    Solo knowing the owner's voice is not enough — a message in the wrong channel is wrong
+    however well it is written. This writes one dossier per channel the owner is actually in,
+    from Slack's own topic/purpose plus a sample of real traffic, so the writer can tell
+    #adair-homes (internal coordination about a customer) from a channel that faces anyone.
+
+    Facts only: Slack's declared purpose, who posts most, and real recent lines. What a channel
+    is *for* is then obvious to a reader, and the owner can correct it in the wiki.
+    """
+    s = Slack()
+    config.ensure_dirs()
+    chans, cursor = [], None
+    while True:
+        res = s.client.conversations_list(types="public_channel,private_channel",
+                                          exclude_archived=True, limit=200, cursor=cursor)
+        chans += [c for c in res["channels"] if c.get("is_member")]
+        cursor = (res.get("response_metadata") or {}).get("next_cursor")
+        if not cursor:
+            break
+    if not chans:
+        sys.exit("you are not a member of any channel this token can see")
+    print(f"{len(chans)} channels you are in — sampling {a.limit} messages each (rate limited)…")
+    for i, c in enumerate(chans, 1):
+        cid = c["id"]
+        name = c.get("name") or cid
+        try:
+            msgs = s.client.conversations_history(channel=cid, limit=a.limit)["messages"]
+        except Exception as e:  # noqa: BLE001 - one unreadable channel must not stop the sweep
+            print(f"  {i}/{len(chans)} #{name}: skipped ({e})")
+            continue
+        human = [m for m in msgs if m.get("user") and not m.get("bot_id") and m.get("text")]
+        who = Counter(s.name_of(m["user"]) for m in human)
+        purpose = (c.get("purpose") or {}).get("value", "").strip()
+        topic = (c.get("topic") or {}).get("value", "").strip()
+        mine = sum(1 for m in human if m["user"] == s.me)
+        path = recall.dossier_path("channels", cid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # The words that actually separate this channel from the others. Raw recent lines are
+        # too noisy to route on — "Fix deploying now" could be any engineering channel — so
+        # keep the lines for a human reader and give the router distinguishing terms instead.
+        STOP = set("""the a an and or but if then of to in on for with at by from is are was were be been
+            it its this that these those we you they i he she them us our your their not no yes do does did
+            have has had will would can could should may might must about into over under out up down so
+            just now new get got need want like see look make made go going come came know think said say
+            says there here what when where who why how all any some more most other same than too very
+            per via etc ok okay thanks please cc fyi am pm today tomorrow yesterday""".split())
+        words = Counter()
+        for m in human:
+            for w in re.findall(r"[a-z][a-z0-9/._-]{2,}", clean_text(m["text"], s.name_of).lower()):
+                if w not in STOP and not w.startswith(("http", "www")):
+                    words[w] += 1
+        terms = [w for w, n in words.most_common(14) if n > 1][:10]
+        lines = [f"# #{name} ({cid})", ""]
+        lines.append(f"**For:** {purpose or topic or ''}".rstrip())
+        lines.append("<!-- `For:` is what the router reads. If Solo keeps putting the wrong thing here,"
+                     " fix this line — it wins over everything learned below. -->")
+        lines.append("")
+        if purpose: lines.append(f"**Purpose (set in Slack):** {purpose}")
+        if topic:   lines.append(f"**Topic:** {topic}")
+        if terms:   lines.append(f"**Recurring terms:** {', '.join(terms)}")
+        lines += [
+            f"**Members:** {c.get('num_members', '?')} · **private:** {'yes' if c.get('is_private') else 'no'}",
+            f"**Who posts here** (last {len(human)} human messages): "
+            + ", ".join(f"{n} {k}" for n, k in who.most_common(6)),
+            f"**My share:** {mine}/{len(human)} messages",
+            "",
+            "**Recent, to show what it is actually used for:**",
+        ]
+        for m in human[:12]:
+            who_ = s.name_of(m["user"])
+            txt = " ".join(clean_text(m["text"], s.name_of).split())[:150]
+            lines.append(f"- {who_}: {txt}")
+        lines += ["", "<!-- Learned by `slackctl learn-channels`. Correct it by hand; it is not overwritten",
+                  "     unless you re-run with --refresh. -->", ""]
+        if path.exists() and not a.refresh:
+            print(f"  {i}/{len(chans)} #{name}: kept (already has a dossier; --refresh to rewrite)")
+            continue
+        path.write_text("\n".join(lines), encoding="utf-8")
+        print(f"  {i}/{len(chans)} #{name}: {len(human)} msgs, top {who.most_common(1)[0][0] if who else '—'}")
+    print(f"\nwrote dossiers to {recall.CHANNELS_DIR}")
+    print("review them, then Solo can pick the right channel: slackctl where \"<what it is about>\"")
+
+
+CHANNEL_MIN_CONFIDENCE = 0.7   # below this, ask rather than place
+
+
+def channel_catalogue() -> dict[str, str]:
+    """{channel_id: one-line description} from the learned dossiers — Jev's choice list."""
+    out = {}
+    for f in sorted(recall.CHANNELS_DIR.glob("*.md")):
+        text = f.read_text(encoding="utf-8")
+        head = text.splitlines()[0].lstrip("# ").strip()
+        name = head.split(" (")[0]
+
+        def field(prefix: str) -> str:
+            # Lines are "**Label:** value" or "**Label** (aside): value" — take whatever
+            # follows the first colon that comes after the bold label.
+            for l in text.splitlines():
+                if l.startswith(prefix):
+                    _, sep, rest = l.partition(":")
+                    if sep:
+                        return rest.strip().lstrip("*").strip()
+            return ""
+
+        # `For:` is the owner's line and wins; everything else only characterises the traffic.
+        parts = [name]
+        for_ = field("**For:")
+        if for_:
+            parts.append(for_)
+        terms = field("**Recurring terms:")
+        if terms:
+            parts.append(f"recurring topics: {terms}")
+        who = field("**Who posts here")
+        if who:
+            parts.append(f"mostly: {', '.join(w.strip().split(' ')[0] for w in who.split(',')[:3])}")
+        out[f.stem] = ". ".join(parts)[:300]
+    return out
+
+
+def cmd_where(a):
+    """Which channel does this belong in? Jev picks from the learned catalogue."""
+    cat = channel_catalogue()
+    if not cat:
+        sys.exit(f"no channel dossiers yet — run: python3 {SCRIPT} learn-channels")
+    cid, why, conf = pick_channel(a.subject, cat)
+    name = cat[cid].split(".", 1)[0].strip() if cid in cat else cid
+    print(f"{name}  ({cid})  confidence {conf:.2f}")
+    print(f"  because: {why}")
+    if conf < CHANNEL_MIN_CONFIDENCE:
+        print(f"  below {CHANNEL_MIN_CONFIDENCE:.2f} — Solo would ask you rather than place this")
+    blank = [f.stem for f in sorted(recall.CHANNELS_DIR.glob("*.md"))
+             if not next((l for l in f.read_text().splitlines() if l.startswith("**For:") and l.strip() != "**For:**"), None)]
+    if blank:
+        print(f"  {len(blank)} of {len(cat)} channels have no **For:** line yet — filling those in is what "
+              f"makes routing reliable; keywords alone are weak")
 
 
 def cmd_simulate(a):
@@ -1520,12 +1679,18 @@ def main():
     p.add_argument("--thread", action="store_true", help="reply in a thread on their message instead of in the channel/DM")
     p.set_defaults(fn=cmd_act)
     p = sub.add_parser("say", help="another agent asks Solo to send something, in your voice")
-    p.add_argument("target", help="@handle, #channel, or an ID")
-    p.add_argument("intent", help="WHAT you want said and why — not finished prose; Solo writes it")
+    p.add_argument("intent", help="WHAT happened / what you want said — not finished prose; Solo writes it")
+    p.add_argument("--to", dest="target", help="optional: @handle, #channel or ID. Omit it and Solo decides where it belongs")
     p.add_argument("--from", dest="from_", required=True, help="which agent is asking, e.g. scout")
     p.add_argument("--why", help="context for the owner, shown on the draft")
     p.add_argument("--thread-ts", dest="thread_ts", help="reply inside this thread")
     p.set_defaults(fn=cmd_say)
+    p = sub.add_parser("learn-channels", help="learn what each channel you are in is for")
+    p.add_argument("--limit", type=int, default=60, help="messages to sample per channel")
+    p.add_argument("--refresh", action="store_true", help="rewrite dossiers that already exist")
+    p.set_defaults(fn=cmd_learn_channels)
+    p = sub.add_parser("where", help="which channel does this belong in?")
+    p.add_argument("subject"); p.set_defaults(fn=cmd_where)
     p = sub.add_parser("done"); p.add_argument("item"); p.add_argument("--status", default="skipped"); p.set_defaults(fn=cmd_done)
     sub.add_parser("followups").set_defaults(fn=cmd_followups)
     sub.add_parser("drafts").set_defaults(fn=cmd_drafts)

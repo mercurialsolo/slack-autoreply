@@ -496,6 +496,29 @@ def _agent_origin_never_auto_sends():
 
 check("an agent-requested message always waits for the owner", _agent_origin_never_auto_sends())
 
+# Routing must fail toward asking. Learned keywords alone put a Facebook-accounts report in
+# #engineering-team at 0.60 — above a 0.5 bar — so the bar is 0.70 and the owner's `For:` line
+# is what actually makes it reliable (the same three reports went to 1.00 once it was filled).
+check("the channel bar is high enough to refuse a confident-looking wrong answer",
+      S.CHANNEL_MIN_CONFIDENCE >= 0.7)
+
+def _catalogue_prefers_the_owners_line():
+    import tempfile
+    d = Path(tempfile.mkdtemp())
+    (d / "C1.md").write_text("# #acme (C1)\n\n**For:** everything about the Acme account\n"
+                             "**Recurring terms:** noise, noise, noise\n")
+    import recall as _r
+    old_dir = _r.CHANNELS_DIR
+    _r.CHANNELS_DIR = d
+    try:
+        desc = S.channel_catalogue()["C1"]
+        # the owner's line leads; the scraped keywords trail behind it
+        return desc.startswith("acme. everything about the Acme account") and "noise" in desc
+    finally:
+        _r.CHANNELS_DIR = old_dir
+
+check("a channel's For: line drives routing, not the scraped keywords", _catalogue_prefers_the_owners_line())
+
 # "approve everything" has to include the reaction, or the one unapproved thing is the one that
 # goes wrong. ignore stays automatic because it sends nothing at all.
 check("MODE=draft makes even an ack wait",
