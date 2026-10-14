@@ -18,7 +18,8 @@ Trust (MODE=learn): a (route, sender) pair starts in draft and graduates to auto
 once it has TRUST_PROMOTE_N outcomes with a smoothed success rate ≥ TRUST_PROMOTE_SCORE
 and fewer than TRUST_DEMOTE_BAD_IN_LAST5 bad outcomes among the last five. A route
 can also graduate for everyone once it has TRUST_PROMOTE_N_GLOBAL outcomes at
-≥ TRUST_PROMOTE_SCORE_GLOBAL. Escalations never auto-send; acks always do.
+≥ TRUST_PROMOTE_SCORE_GLOBAL. Escalations never auto-send. Acks auto-send too, except in MODE=draft, where a
+reaction waits like everything else.
 """
 from __future__ import annotations
 
@@ -120,8 +121,13 @@ class Ledger:
         """(auto|draft, reason). base_mode is MODE from .env: learn | draft | auto."""
         if route == "escalate":
             return "draft", "escalations never auto-send"
-        if route in ("ack", "ignore"):
-            return "auto", "harmless"
+        if route == "ignore":
+            return "auto", "nothing is sent"
+        if route == "ack":
+            # A reaction is visible in the other person's Slack, so it is not free. In MODE=draft
+            # it waits like everything else — "approve everything" has to mean everything, or the
+            # one unapproved thing is the one that goes wrong.
+            return ("draft", "MODE=draft — even a reaction waits") if base_mode == "draft" else ("auto", "harmless")
         if base_mode in ("auto", "draft"):
             return base_mode, f"MODE={base_mode}"
         c = self.cfg

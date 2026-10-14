@@ -496,6 +496,15 @@ def _agent_origin_never_auto_sends():
 
 check("an agent-requested message always waits for the owner", _agent_origin_never_auto_sends())
 
+# "approve everything" has to include the reaction, or the one unapproved thing is the one that
+# goes wrong. ignore stays automatic because it sends nothing at all.
+check("MODE=draft makes even an ack wait",
+      d.ledger.effective_mode("ack", U, D, "draft")[0] == "draft")
+check("MODE=learn leaves a bare reaction automatic",
+      d.ledger.effective_mode("ack", U, D, "learn")[0] == "auto")
+check("ignore is automatic in every mode — it sends nothing",
+      d.ledger.effective_mode("ignore", U, D, "draft")[0] == "auto")
+
 check("without --thread a DM reply stays flat",
       (lambda i: (S.execute_decision(d, S.load_item(i), {"action": "reply", "text": "flat"},
                                      d.ledger, d.followups, set(), state=d.state),
