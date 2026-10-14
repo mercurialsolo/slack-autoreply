@@ -13,9 +13,9 @@
 #   solo note @who "fact"                         teach it something durable
 #   solo logs [-n N] [-f]                         the daemon log
 #   solo restart                                  restart the service on the node
-#   solo voice                                    print VOICE.md as the node has it
-#   solo pull                                     copy VOICE.md + dossiers here to edit
-#   solo push                                     send your edits back, then restart
+#   solo voice                                    print the voice guide as the node has it
+#   solo pull                                     bring the wiki's solo/ up to date from the node
+#   solo push                                     send wiki edits to the node (live, no restart)
 #   solo train [review|setup]                     run the training skill ON the node
 #   solo ssh                                      a shell there
 #
@@ -28,6 +28,10 @@ REMOTE_HOME="${SOLO_REMOTE_HOME:-/Users/baradas}"
 CTL="python3 $REMOTE_HOME/.claude/skills/slack-autoreply/scripts/slackctl.py"
 STATE="$REMOTE_HOME/.slack-autoreply"
 LOCAL_STATE="$HOME/.slack-autoreply"
+# Solo's knowledge base (voice + dossiers) lives in the wiki, not the state dir. On the node
+# the daemon reads it through symlinks, so an edit here is live on the next message.
+WIKI_SOLO="${SOLO_WIKI:-$HOME/Sandbox/business-wiki/solo}"
+REMOTE_WIKI="${SOLO_REMOTE_WIKI:-/Users/barada/Sandbox/business-wiki/solo}"
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 on_node() { ssh "$NODE" "$@"; }
@@ -51,22 +55,20 @@ case "${1:-status}" in
     ;;
 
   pull)
-    # Bring the node's voice and dossiers here so they can be read or edited.
-    mkdir -p "$LOCAL_STATE/people"
-    rsync -a "$NODE:$STATE/VOICE.md" "$LOCAL_STATE/VOICE.md"
-    rsync -a "$NODE:$STATE/people/" "$LOCAL_STATE/people/"
-    rsync -a "$NODE:$STATE/voice_samples.json" "$LOCAL_STATE/voice_samples.json" 2>/dev/null || true
-    echo "pulled VOICE.md ($(grep -c . "$LOCAL_STATE/VOICE.md") lines) and $(ls -1 "$LOCAL_STATE/people" | wc -l | tr -d ' ') dossiers from $NODE"
-    echo "edit $LOCAL_STATE/VOICE.md, then: solo push"
+    # Solo's knowledge base lives in the wiki; on the node the daemon reads it through symlinks.
+    # Pull brings back what Solo has learned (it appends to people/ as it works).
+    [ -d "$WIKI_SOLO" ] || die "no wiki at $WIKI_SOLO — set SOLO_WIKI"
+    rsync -a "$NODE:$REMOTE_WIKI/" "$WIKI_SOLO/"
+    echo "pulled into $WIKI_SOLO — voice.md ($(grep -c . "$WIKI_SOLO/voice.md") lines), $(ls -1 "$WIKI_SOLO/people" | wc -l | tr -d ' ') dossiers"
+    git -C "$(dirname "$WIKI_SOLO")" status --short -- "$(basename "$WIKI_SOLO")" | head -10
     ;;
 
   push)
-    [ -f "$LOCAL_STATE/VOICE.md" ] || die "no $LOCAL_STATE/VOICE.md — run: solo pull"
-    # Never push .env from here; tokens are the node's business and may differ.
-    rsync -a "$LOCAL_STATE/VOICE.md" "$NODE:$STATE/VOICE.md"
-    rsync -a "$LOCAL_STATE/people/" "$NODE:$STATE/people/"
-    echo "pushed VOICE.md and dossiers to $NODE"
-    "$0" restart
+    [ -f "$WIKI_SOLO/voice.md" ] || die "no $WIKI_SOLO/voice.md — run: solo pull"
+    # Never push .env; tokens are the node's business. voice.md is read per message,
+    # so this takes effect on the next DM without restarting anything.
+    rsync -a "$WIKI_SOLO/" "$NODE:$REMOTE_WIKI/"
+    echo "pushed $WIKI_SOLO → $NODE — live on the next message, no restart"
     ;;
 
   train)

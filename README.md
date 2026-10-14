@@ -143,8 +143,24 @@ second copy of the state — every command runs against the node's:
 | `solo approve <item>` · `solo drop <item>` | same as ✅ / ❌ |
 | `solo about @who` · `history` · `search` · `note @who "…"` | memory, and teaching it |
 | `solo logs [-f]` · `solo restart` · `solo ssh` | the daemon |
-| `solo voice` · `solo pull` · `solo push` | read VOICE.md, edit it here, send it back |
+| `solo voice` · `solo pull` · `solo push` | read the voice guide, edit it in the wiki, send it back |
 | `solo train [review\|setup]` | run the training skill **on the node**, interactively |
+
+### The knowledge base lives in a wiki, not in the state dir
+
+`VOICE.md` and the dossiers are the only things a human needs to read and edit, so they live in a
+markdown wiki (`business-wiki/solo/`) rather than buried in `~/.slack-autoreply`. On the node the
+daemon reads them through symlinks:
+
+```
+~/.slack-autoreply/VOICE.md  ->  <wiki>/solo/voice.md
+~/.slack-autoreply/people    ->  <wiki>/solo/people/
+```
+
+Both directions are live. `voice.md` is read fresh for **every** message, so an edit changes the
+next reply with no restart; and `slackctl note` writes straight into `solo/people/`, so what Solo
+learns shows up in the wiki as a normal file change you can read in a diff. Point `SOLO_WIKI` /
+`SOLO_REMOTE_WIKI` elsewhere if your wiki lives somewhere else.
 
 Training runs on the node on purpose — VOICE.md, the samples and the outcomes live there, and
 running `setup` or `review` locally would quietly fork them. `pull` and `push` are for hand edits.
