@@ -16,6 +16,8 @@
 #   solo voice                                    print the voice guide as the node has it
 #   solo pull                                     bring the wiki's solo/ up to date from the node
 #   solo push                                     send wiki edits to the node (live, no restart)
+#   solo deploy                                   ship this repo to the node: push, test, restart, verify
+#   solo sync-check                               is the node running what this repo says?
 #   solo train [review|setup]                     run the training skill ON the node
 #   solo ssh                                      a shell there
 #
@@ -23,10 +25,9 @@
 # without changing this file.
 set -euo pipefail
 
-# `mini` resolves through an ssh Match-exec rule that shells out to ping; when ping is blocked
-# that rule errors and ssh aborts entirely. `mini-ts` is the direct tailnet entry with no such
-# rule, so it keeps working. Override with SOLO_NODE.
-NODE="${SOLO_NODE:-mini-ts}"
+# `mini` tries LAN mDNS, then MagicDNS, then the tailnet address. Those probes must not die by
+# signal or ssh aborts the whole config — see the note in ~/.ssh/config. Override with SOLO_NODE.
+NODE="${SOLO_NODE:-mini}"
 REMOTE_HOME="${SOLO_REMOTE_HOME:-/Users/baradas}"
 CTL="python3 $REMOTE_HOME/.claude/skills/slack-autoreply/scripts/slackctl.py"
 STATE="$REMOTE_HOME/.slack-autoreply"
@@ -35,6 +36,12 @@ LOCAL_STATE="$HOME/.slack-autoreply"
 # the daemon reads it through symlinks, so an edit here is live on the next message.
 WIKI_SOLO="${SOLO_WIKI:-$HOME/Sandbox/business-wiki/solo}"
 REMOTE_WIKI="${SOLO_REMOTE_WIKI:-/Users/barada/Sandbox/business-wiki/solo}"
+
+# This script is normally invoked through a symlink in ~/.local/bin, so $0 is not in the repo.
+# Resolve the link before deriving the repo root, or `solo deploy` runs git in ~/.local.
+_self="$0"
+while [ -L "$_self" ]; do _t="$(readlink "$_self")"; case "$_t" in /*) _self="$_t";; *) _self="$(dirname "$_self")/$_t";; esac; done
+REPO="$(cd "$(dirname "$_self")/.." && pwd)"
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 on_node() { ssh "$NODE" "$@"; }
@@ -72,6 +79,48 @@ case "${1:-status}" in
     # so this takes effect on the next DM without restarting anything.
     rsync -a "$WIKI_SOLO/" "$NODE:$REMOTE_WIKI/"
     echo "pushed $WIKI_SOLO → $NODE — live on the next message, no restart"
+    ;;
+
+  deploy)
+    # One way to ship, so the node is never guessing which version it is running.
+    #
+    # The node's checkout is a mirror of this repo, .git included. Push with uncommitted work
+    # here and the node ends up holding files that match no commit — which is exactly how
+    # `node-push` came to refuse a later deploy, saying the node had work this machine did not.
+    # So: refuse a dirty tree, then prove afterwards that the node is on the same commit.
+    cd "$REPO"
+    dirty=$(git status --porcelain)
+    if [ -n "$dirty" ] && [ "${2:-}" != "--allow-dirty" ]; then
+      printf '%s\n' "$dirty" >&2
+      die "uncommitted changes — commit them first, or: solo deploy --allow-dirty (the node will then hold an uncommitted state)"
+    fi
+    here=$(git rev-parse HEAD)
+    echo "→ deploying $(git log --oneline -1)"
+    node-push -n "$NODE" >/dev/null || die "push refused — run: node-push -n $NODE   and read why"
+    ssh "$NODE" "cd /Users/barada/Sandbox/Personal/slack-autoreply && ./install.sh >/dev/null 2>&1 && python3 tests/test_offline.py 2>&1 | tail -1" \
+      || die "tests failed on $NODE — not restarting; the old daemon is still running"
+    ssh "$NODE" "launchctl kickstart -k gui/\$(id -u)/com.slack-autoreply" >/dev/null 2>&1
+    sleep 5
+    there=$(ssh "$NODE" "cd /Users/barada/Sandbox/Personal/slack-autoreply && git rev-parse HEAD")
+    [ "$here" = "$there" ] || die "node is on $there, expected $here — deploy did not take"
+    ssh "$NODE" "grep 'listening as' $STATE/listen.log | tail -1" \
+      || die "daemon did not come back — check: solo logs"
+    echo "✓ $NODE is on $(git rev-parse --short HEAD), tests green, daemon up"
+    ;;
+
+  sync-check)
+    # Is the node running what this repo says it should be?
+    cd "$REPO"
+    here=$(git rev-parse HEAD); there=$(ssh "$NODE" "cd /Users/barada/Sandbox/Personal/slack-autoreply && git rev-parse HEAD" 2>/dev/null || echo "?")
+    dirty=$(git status --porcelain | wc -l | tr -d ' ')
+    nodedirty=$(ssh "$NODE" "cd /Users/barada/Sandbox/Personal/slack-autoreply && git status --porcelain | wc -l" 2>/dev/null | tr -d ' ')
+    echo "here: $(git rev-parse --short HEAD) ($dirty uncommitted)"
+    echo "node: ${there:0:7} (${nodedirty:-?} uncommitted)"
+    if [ "$here" = "$there" ] && [ "$dirty" = "0" ] && [ "${nodedirty:-1}" = "0" ]; then
+      echo "✓ in sync"
+    else
+      echo "✗ out of sync — run: solo deploy"; exit 1
+    fi
     ;;
 
   train)
