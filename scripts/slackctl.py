@@ -367,28 +367,42 @@ class Slack:
         reaches you — `node-notify blocked`, a phone push, `osascript -e 'display notification'`.
         The summary is passed as one extra argument.
         """
-        ts = self.post(self.self_dm, text)
-        self._nudge(text, ts)
+        ts = self.console_post(text)
         self._ping(text)
         return ts
 
-    def _nudge(self, text: str, ts: str) -> None:
-        """Have the bot DM you that something is waiting, with a link straight to it.
+    # ---- the console: the one conversation Solo talks to you in.
+    # With a bot token that is the bot's DM, because Slack will not notify you about a message
+    # you sent yourself and every draft is posted as you. Without one it falls back to your
+    # self-DM, which works but never badges.
 
-        The draft itself stays in the self-DM, where ✅ / ❌ already work — this only makes it
-        findable. One line plus a permalink, because the detail is one tap away.
+    @property
+    def console(self) -> str:
+        return self.bot_dm or self.self_dm
+
+    def console_post(self, text: str) -> str:
+        """Post to the console, falling back to the self-DM if the bot is gone.
+
+        A revoked or rotated bot token must cost you the notification, never the draft — so a
+        failed bot post lands in the self-DM instead. Reactions are accepted in either
+        conversation precisely so a fallen-back draft can still be approved.
         """
-        if not (self.bot and self.bot_dm):
-            return
-        try:
-            first = next((l for l in text.splitlines() if l.strip()), "Something needs you")
+        if self.bot and self.bot_dm:
             try:
-                link = self.client.chat_getPermalink(channel=self.self_dm, message_ts=ts)["permalink"]
-            except Exception:  # noqa: BLE001 - the nudge is still useful without a link
-                link = ""
-            self.bot.chat_postMessage(channel=self.bot_dm, text=f"{first}\n{link}".strip())
-        except Exception as e:  # noqa: BLE001
-            log.warning("could not send the bot nudge (%s) — the draft is still in your self-DM", e)
+                return self.bot.chat_postMessage(channel=self.bot_dm, text=text)["ts"]
+            except Exception as e:  # noqa: BLE001
+                log.warning("bot post failed (%s) — falling back to your self-DM, which will not notify", e)
+        return self.post(self.self_dm, text)
+
+    def console_update(self, ts: str, text: str) -> None:
+        """Edit a console message. A message posted by the bot can only be edited by the bot."""
+        try:
+            if self.bot and self.bot_dm:
+                self.bot.chat_update(channel=self.bot_dm, ts=ts, text=text)
+            else:
+                self.update(self.self_dm, ts, text)
+        except Exception as e:  # noqa: BLE001 - the outcome is already recorded; the edit is cosmetic
+            log.warning("could not update the console message (%s)", e)
 
     def _ping(self, text: str) -> None:
         cmd = CFG["notify_cmd"]
@@ -601,7 +615,7 @@ def approve_draft(slack: Slack, item: dict, ledger: Ledger, followups: Followups
     state.update(lambda d_: (d_["pending"].pop(draft_ts, None), d_["sent"].__setitem__(ts, {"item": item["id"], "channel": item["channel"], "at": now_iso(), "text": d["text"]})))
     ledger.record(item=item, outcome="approved")
     try:
-        slack.update(slack.self_dm, draft_ts, f"✅ Sent to {item['sender_name']}\n{quote(d['text'])}")
+        slack.console_update(draft_ts, f"✅ Sent to {item['sender_name']}\n{quote(d['text'])}")
     except Exception:
         pass
     audit(item=item["id"], counterpart=item["sender_name"], status="sent_from_draft", reply=d["text"])
@@ -614,7 +628,7 @@ def drop_draft(slack: Slack, item: dict, ledger: Ledger, state: State, draft_ts:
     state.update(lambda d_: d_["pending"].pop(draft_ts, None))
     ledger.record(item=item, outcome="dropped", correction={"draft": item["decision"].get("text"), "actual": None})
     try:
-        slack.update(slack.self_dm, draft_ts, f"❌ Dropped\n{quote(item['decision'].get('text', ''))}")
+        slack.console_update(draft_ts, f"❌ Dropped\n{quote(item['decision'].get('text', ''))}")
     except Exception:
         pass
     audit(item=item["id"], counterpart=item["sender_name"], status="dropped", reply=item["decision"].get("text"))
@@ -868,7 +882,7 @@ class Daemon(Slack):
             self.state.update(lambda d: d["pending"].pop(draft_ts, None))
             self.ledger.record(item=item, outcome="replaced", correction={"draft": item["decision"].get("text"), "actual": text})
             try:
-                self.update(self.self_dm, draft_ts, f"↩️ You replied yourself to {item['sender_name']} — learned from it\n{quote(item['decision'].get('text', ''))}")
+                self.console_update(draft_ts, f"↩️ You replied yourself to {item['sender_name']} — learned from it\n{quote(item['decision'].get('text', ''))}")
             except Exception:
                 pass
             log.info("draft for %s replaced by your own reply", item["sender_name"])
@@ -893,7 +907,7 @@ class Daemon(Slack):
                 pass
             self.state.update(lambda d: d["last_auto"].pop(channel, None))
         # fresh voice sample
-        if channel != self.self_dm and voice.usable(text) and ev.get("channel_type") in ("im", "mpim", "channel", "group"):
+        if channel not in (self.self_dm, self.bot_dm) and voice.usable(text) and ev.get("channel_type") in ("im", "mpim", "channel", "group"):
             prev = self.previous_other_message(channel, ts)
             sample = {"text": text, "channel": channel, "ts": ts,
                       "channel_name": self.channel_name(channel) if ev.get("channel_type") in ("channel", "group") else None}
@@ -939,7 +953,8 @@ class Daemon(Slack):
 
     def on_reaction(self, ev: dict) -> None:
         item_ref = ev.get("item") or {}
-        if ev.get("user") != self.me or item_ref.get("type") != "message" or item_ref.get("channel") != self.self_dm:
+        consoles = {c for c in (self.bot_dm, self.self_dm) if c}
+        if ev.get("user") != self.me or item_ref.get("type") != "message" or item_ref.get("channel") not in consoles:
             return
         draft_ts = item_ref.get("ts")
         st = self.state.read()
@@ -1076,7 +1091,7 @@ class Daemon(Slack):
                 self.state.update(lambda d: d["pending"].pop(draft_ts, None))
                 self.ledger.record(item=item, outcome="expired")
                 try:
-                    self.update(self.self_dm, draft_ts, f"⌛ Expired (no decision in {CFG['draft_expire_hours']:.0f}h)\n{quote(item['decision'].get('text', ''))}")
+                    self.console_update(draft_ts, f"⌛ Expired (no decision in {CFG['draft_expire_hours']:.0f}h)\n{quote(item['decision'].get('text', ''))}")
                 except Exception:
                     pass
 

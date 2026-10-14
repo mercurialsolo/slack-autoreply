@@ -282,9 +282,37 @@ def _nudge_failure_is_survivable():
     class Broken:
         def chat_postMessage(self, **k): raise RuntimeError("bot revoked")
     d.bot = Broken(); d.bot_dm = "DBOT"
-    return bool(d.notify("draft"))   # the self-DM post must still happen
+    ts = d.notify("draft")
+    # the draft must land somewhere approvable: the self-DM, not nowhere
+    return bool(ts) and d.client.posted[-1][0] == "DSELF"
 
-check("a broken bot never costs you the draft", _nudge_failure_is_survivable())
+check("a revoked bot costs the notification, never the draft", _nudge_failure_is_survivable())
+
+def _console_is_the_bot_dm():
+    d = S.Slack(); d.bot = FakeClient(); d.bot_dm = "DBOT"
+    ts = d.notify("*Draft reply → DM with Priya* — react :white_check_mark: to send")
+    # the draft goes to the bot DM, not the self-DM, so Slack will actually notify
+    return (d.console == "DBOT" and len(d.bot.posted) == 1 and d.bot.posted[0][0] == "DBOT"
+            and not any(c == "DSELF" for c, *_ in d.client.posted))
+
+check("with a bot, the draft itself goes to the bot DM", _console_is_the_bot_dm())
+
+def _console_update_uses_the_bot():
+    d = S.Slack(); d.bot = FakeClient(); d.bot_dm = "DBOT"
+    ts = d.notify("draft")
+    d.console_update(ts, "✅ Sent to Priya")
+    # a bot's message can only be edited by the bot
+    return d.bot.updates and d.bot.updates[-1][0] == "DBOT" and not d.client.updates
+
+check("a bot-posted draft is edited by the bot", _console_update_uses_the_bot())
+
+def _falls_back_without_a_bot():
+    d = S.Slack(); d.bot = None; d.bot_dm = None
+    ts = d.notify("draft")
+    d.console_update(ts, "✅ Sent")
+    return d.console == "DSELF" and d.client.posted[-1][0] == "DSELF" and d.client.updates[-1][0] == "DSELF"
+
+check("without a bot it still works, in the self-DM", _falls_back_without_a_bot())
 
 # ------------------------------------------------------------ the daemon
 voice.ensure_voice_file()
