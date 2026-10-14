@@ -519,6 +519,51 @@ def _catalogue_prefers_the_owners_line():
 
 check("a channel's For: line drives routing, not the scraped keywords", _catalogue_prefers_the_owners_line())
 
+# Routing must not file a report in a room nobody reads, or a temporary one that gets archived.
+# #dev was dormant 148 days and still took "production is throwing errors" at 1.00 confidence.
+def _routable_excludes_dead_and_temporary():
+    import tempfile
+    d = Path(tempfile.mkdtemp())
+    (d / "LIVE.md").write_text("# #live (LIVE)\n\n**For:** the live one\n"
+                               "**Activity:** active — last message 1d ago\n**Temporary:** no\n")
+    (d / "DEAD.md").write_text("# #dead (DEAD)\n\n**For:** nobody reads this\n"
+                               "**Activity:** dormant — last message 148d ago\n**Temporary:** no\n")
+    (d / "TMP.md").write_text("# #tmp-thing (TMP)\n\n**For:** one-off\n"
+                              "**Activity:** active — last message 0d ago\n**Temporary:** yes — spun up\n")
+    import recall as _r
+    old_dir = _r.CHANNELS_DIR
+    _r.CHANNELS_DIR = d
+    try:
+        allc, routable = S.channel_catalogue(), S.channel_catalogue(routable_only=True)
+        return len(allc) == 3 and set(routable) == {"LIVE"}
+    finally:
+        _r.CHANNELS_DIR = old_dir
+
+check("dormant and temporary channels are not routing targets", _routable_excludes_dead_and_temporary())
+
+# A refresh re-learns the traffic but must never clobber the owner's For: line — losing it
+# silently drops routing back to keyword guessing, which was measured wrong.
+def _refresh_keeps_the_owners_line():
+    src = (ROOT / "scripts" / "slackctl.py").read_text()
+    i = src.index("def cmd_learn_channels")
+    body = src[i:src.index("def channel_meta")]
+    return "existing_for" in body and body.index("existing_for or purpose") > body.index('if l.startswith("**For:**")')
+
+check("re-learning a channel preserves the owner's For: line", _refresh_keeps_the_owners_line())
+
+# Replies go back where the message came from. Routing exists only for agent-originated reports;
+# an inbound reply must never be re-placed into a channel a model picked.
+def _replies_are_never_rerouted():
+    src = (ROOT / "scripts" / "slackctl.py").read_text()
+    for fn in ("def on_inbound", "def execute_decision", "def approve_draft"):
+        i = src.index(fn)
+        body = src[i:i + 4000]
+        if "pick_channel" in body:
+            return False
+    return True
+
+check("a reply always goes back to the channel it arrived in", _replies_are_never_rerouted())
+
 # "approve everything" has to include the reaction, or the one unapproved thing is the one that
 # goes wrong. ignore stays automatic because it sends nothing at all.
 check("MODE=draft makes even an ack wait",

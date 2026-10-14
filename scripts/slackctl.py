@@ -45,7 +45,7 @@ import voice  # noqa: E402
 from config import CFG, DROP_REACTIONS, OK_SUBTYPES, SEND_REACTIONS  # noqa: E402
 from followups import Followup, Followups, hold_deadline  # noqa: E402
 from learning import Ledger  # noqa: E402
-from triage import Policy, Triager, pick_channel  # noqa: E402
+from triage import Policy, Triager, pick_channel, score_channel  # noqa: E402
 
 log = logging.getLogger("slackctl")
 SCRIPT = os.path.abspath(__file__)                 # as installed (may be a symlink into a repo)
@@ -1283,10 +1283,22 @@ def cmd_say(a):
         # Agents report what they did; where it belongs is Solo's problem, not theirs. They have
         # no view of the channel map and should not grow one — that is how a reporting agent ends
         # up quietly deciding who hears what.
-        cat = channel_catalogue()
+        cat = channel_catalogue(routable_only=True)
         if not cat:
-            sys.exit(f"no channel dossiers yet — run: python3 {SCRIPT} learn-channels  (or pass --to)")
+            sys.exit(f"no live channel to route to — run: python3 {SCRIPT} learn-channels  (or pass --to)")
+        # Sensitive things are the owner's to place. A report can be perfectly true and still be
+        # wrong in a room — exposure is about who reads it, not whether the words are accurate.
+        sens = sensitivity_of(a.intent)
         cid, why, conf = pick_channel(a.intent, cat)
+        meta = channel_meta().get(cid, {})
+        # 3.5, not 4: "renegotiating the contract value and may drop the price" scores 3.9, and a
+        # hard 4 let it straight through. Near-misses on a leak gate should ask, not pass.
+        if sens >= 3.5:
+            sys.exit(f"this reads as sensitive ({sens:.1f}/5) — not placing it. Tell the owner, "
+                     f"or pass --to if you are certain.")
+        if sens >= 2.5 and meta.get("exposure", 0) >= 3:
+            sys.exit(f"sensitive-ish ({sens:.1f}/5) for a channel this exposed "
+                     f"(#{meta.get('name')} at {meta['exposure']:.1f}/5) — the owner should place this.")
         if not cid or conf < CHANNEL_MIN_CONFIDENCE:
             sys.exit(f"could not place this confidently ({conf:.2f}) — tell the owner, or pass --to.\n"
                      f"   best guess was: {why[:120]}\n"
@@ -1359,6 +1371,24 @@ def cmd_learn_channels(a):
         purpose = (c.get("purpose") or {}).get("value", "").strip()
         topic = (c.get("topic") or {}).get("value", "").strip()
         mine = sum(1 for m in human if m["user"] == s.me)
+
+        # Is anyone still here? A dossier that cannot tell a live channel from an abandoned one
+        # will cheerfully route a report into a room nobody reads.
+        newest = float(human[0]["ts"]) if human else 0.0
+        oldest = float(human[-1]["ts"]) if human else 0.0
+        days_idle = (time.time() - newest) / 86400 if newest else 999
+        span_days = max((newest - oldest) / 86400, 0.01) if human else 0
+        # Only meaningful once the sample spans a real period; 12 messages in an hour is
+        # not "200 a day".
+        cadence = (len(human) / span_days) if span_days >= 1 and len(human) >= 10 else 0
+        status = ("active" if days_idle <= 7 else "quiet" if days_idle <= 30 else "dormant") if human else "dormant"
+
+        # Temporary rooms: spun up for one thing, and a durable report does not belong in one
+        # that will be archived next week.
+        created = float(c.get("created") or 0)
+        age_days = (time.time() - created) / 86400 if created else 999
+        temporary = bool(re.match(r"^(tmp|temp|x|adhoc|scratch|test)[-_]", name)) or (
+            age_days < 30 and c.get("is_private") and (c.get("num_members") or 0) <= 4)
         path = recall.dossier_path("channels", cid)
         path.parent.mkdir(parents=True, exist_ok=True)
         # The words that actually separate this channel from the others. Raw recent lines are
@@ -1376,14 +1406,32 @@ def cmd_learn_channels(a):
                 if w not in STOP and not w.startswith(("http", "www")):
                     words[w] += 1
         terms = [w for w, n in words.most_common(14) if n > 1][:10]
+        # Scored after `terms`, which is often the only real description a channel has.
+        exposure, exposure_word = score_channel(
+            f"#{name}", purpose or topic or ", ".join(terms[:8]) or name, c.get("num_members") or 0)
+        # `For:` is the owner's line and the single thing that makes routing reliable. A refresh
+        # re-learns everything else and must never clobber it — losing it silently degrades
+        # routing to the keyword guessing it was written to replace.
+        existing_for = ""
+        if path.exists():
+            for l in path.read_text(encoding="utf-8").splitlines():
+                if l.startswith("**For:**"):
+                    existing_for = l[len("**For:**"):].strip()
+                    break
         lines = [f"# #{name} ({cid})", ""]
-        lines.append(f"**For:** {purpose or topic or ''}".rstrip())
+        lines.append(f"**For:** {existing_for or purpose or topic or ''}".rstrip())
         lines.append("<!-- `For:` is what the router reads. If Solo keeps putting the wrong thing here,"
                      " fix this line — it wins over everything learned below. -->")
         lines.append("")
         if purpose: lines.append(f"**Purpose (set in Slack):** {purpose}")
         if topic:   lines.append(f"**Topic:** {topic}")
         if terms:   lines.append(f"**Recurring terms:** {', '.join(terms)}")
+        lines.append(f"**Activity:** {status} — last message "
+                     + ("never" if not human else f"{days_idle:.0f}d ago")
+                     + (f", about {cadence:.1f} messages/day" if cadence else ""))
+        lines.append(f"**Temporary:** {'yes — spun up for one thing; do not file durable reports here' if temporary else 'no'}")
+        if exposure:
+            lines.append(f"**Exposure:** {exposure:.1f}/5 ({exposure_word}) — how far something said here travels")
         lines += [
             f"**Members:** {c.get('num_members', '?')} · **private:** {'yes' if c.get('is_private') else 'no'}",
             f"**Who posts here** (last {len(human)} human messages): "
@@ -1410,8 +1458,8 @@ def cmd_learn_channels(a):
 CHANNEL_MIN_CONFIDENCE = 0.7   # below this, ask rather than place
 
 
-def channel_catalogue() -> dict[str, str]:
-    """{channel_id: one-line description} from the learned dossiers — Jev's choice list."""
+def channel_meta() -> dict[str, dict]:
+    """{channel_id: {name, desc, status, temporary, exposure}} from the learned dossiers."""
     out = {}
     for f in sorted(recall.CHANNELS_DIR.glob("*.md")):
         text = f.read_text(encoding="utf-8")
@@ -1439,15 +1487,46 @@ def channel_catalogue() -> dict[str, str]:
         who = field("**Who posts here")
         if who:
             parts.append(f"mostly: {', '.join(w.strip().split(' ')[0] for w in who.split(',')[:3])}")
-        out[f.stem] = ". ".join(parts)[:300]
+        act = field("**Activity:")
+        out[f.stem] = {
+            "name": name,
+            "desc": ". ".join(parts)[:300],
+            "status": act.split(" ")[0] if act else "unknown",
+            "temporary": field("**Temporary:").startswith("yes"),
+            "exposure": float((field("**Exposure:").split("/")[0] or 0) or 0),
+        }
     return out
+
+
+def channel_catalogue(routable_only: bool = False) -> dict[str, str]:
+    """{channel_id: description} — Jev's choice list.
+
+    `routable_only` drops the rooms a report must not be filed in: dormant ones nobody has
+    posted in for a month (the message would simply never be read) and temporary ones spun up
+    for a single thing. Both were in the first version's choice list, which is how "production
+    is throwing errors" was confidently filed in #dev — dormant for 148 days.
+    """
+    meta = channel_meta()
+    return {cid: m["desc"] for cid, m in meta.items()
+            if not routable_only or (m["status"] in ("active", "quiet") and not m["temporary"])}
+
+
+def sensitivity_of(text: str) -> float:
+    """Jev's sensitivity read on something we are about to say (1..5). 0 if it cannot score."""
+    try:
+        t = Triager(os.getenv("ME_NAME") or "the owner", Policy(), None, "").run(
+            {"latest_message": text, "recent_conversation": "(outbound — an agent asked for this)"})
+        return t.sensitivity if t.source != "default" else 0.0
+    except Exception as e:  # noqa: BLE001 - unscored is not the same as safe; caller decides
+        log.warning("could not score sensitivity (%s)", e)
+        return 0.0
 
 
 def cmd_where(a):
     """Which channel does this belong in? Jev picks from the learned catalogue."""
-    cat = channel_catalogue()
+    cat = channel_catalogue(routable_only=True)
     if not cat:
-        sys.exit(f"no channel dossiers yet — run: python3 {SCRIPT} learn-channels")
+        sys.exit(f"no live channel dossiers yet — run: python3 {SCRIPT} learn-channels")
     cid, why, conf = pick_channel(a.subject, cat)
     name = cat[cid].split(".", 1)[0].strip() if cid in cat else cid
     print(f"{name}  ({cid})  confidence {conf:.2f}")

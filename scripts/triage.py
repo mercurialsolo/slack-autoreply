@@ -413,3 +413,43 @@ def pick_channel(subject: str, catalogue: dict[str, str], api_key: str = "",
     if choice == "other":
         return "", "none of the learned channels fits", float(conf or 0.0)
     return choice, catalogue.get(choice, ""), float(conf if conf is not None else 0.5)
+
+
+# How exposed a channel is. Routing a sensitive report into a broad room is a leak even when
+# every word of it is true, so this is scored per channel and compared against the report.
+CHANNEL_EXPOSURE_LEVELS = [
+    "Closed: a couple of people working one thing together. Little blast radius.",
+    "Team: one team's working channel. Internal detail is normal here.",
+    "Cross-team: several teams or functions read it. Assume people outside the work see it.",
+    "Company-wide: announcements, everyone. Treat as published internally.",
+    "Shared or external: customers, partners or contractors are in it, or it is a customer-named "
+    "room where a customer could be added. Assume the subject of the message may read it.",
+]
+
+
+def score_channel(name: str, description: str, members: int, api_key: str = "",
+                  timeout: float = 8.0) -> tuple[float, str]:
+    """(exposure 1..5, one-line read). Jev scores how public a channel effectively is."""
+    api_key = api_key or config.env("TYPESAFE_API_KEY")
+    if not api_key:
+        return 0.0, "no triage model configured"
+    import httpx
+    qs = {"exposure": {"type": "score",
+                       "instructions": "How exposed is this Slack channel — how far does something "
+                                       "said here travel, and who might read it?",
+                       "criteria": CHANNEL_EXPOSURE_LEVELS}}
+    body = {"model": JEV_MODEL,
+            "state": {"channel": name, "what_it_is_for": description, "members": members},
+            "questions": qs}
+    try:
+        r = httpx.post(f"{TYPESAFE_BASE_URL}/systemone", json=body,
+                       headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                       timeout=timeout)
+        r.raise_for_status()
+        ans = _lookup(r.json(), "exposure") or {}
+    except Exception as e:  # noqa: BLE001
+        log.warning("channel exposure scoring failed for %s (%s)", name, e)
+        return 0.0, f"could not score ({type(e).__name__})"
+    return _score_1_to_n(ans, len(CHANNEL_EXPOSURE_LEVELS)), CHANNEL_EXPOSURE_LEVELS[
+        max(0, min(len(CHANNEL_EXPOSURE_LEVELS) - 1,
+                   int(round(_score_1_to_n(ans, len(CHANNEL_EXPOSURE_LEVELS)))) - 1))].split(":")[0]
