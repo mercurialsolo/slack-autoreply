@@ -170,6 +170,28 @@ Set `SOLO_NODE` / `SOLO_REMOTE_HOME` if your node's ssh alias or home differs. N
 `CONTEXT_DIRS` must be **absolute paths that exist on the node** — a path twin like
 `/Users/you/Sandbox` is not the same as the service account's `~/Sandbox`.
 
+## Other agents, one voice
+
+Solo is the only thing that writes as you. Anything else that wants to reach a person goes through
+it, so a workspace never ends up with one name and five registers:
+
+```
+slackctl say @sri "the overnight warmup finished, 4 accounts active, 2 still pending" --from scout
+solo say '#adair-homes' "flag that Thursday's E2E run is clean" --from validator --why "gate for go-live"
+```
+
+The agent supplies the **intent**, never finished prose — Solo reads the recipient's dossier and the
+voice guide and writes it, then `compose` (SKILL.md) puts it through the same rules as any reply.
+
+Two properties that make this safe to hand to an autonomous agent:
+
+- **It can never auto-send.** The trust ledger graduates routes a *person* earned by being replied
+  to well; an agent has no such history and cannot accrue one, so an agent-requested message always
+  waits for your ✅ — even for a sender who has otherwise earned auto.
+- **The boundaries do not move.** Credentials, dates, money, people, anything outside this
+  workspace's work still escalate. An agent asking does not make a thing allowed; the limits are
+  about what reaches the recipient, not who requested it.
+
 ## Notes and limits
 
 - **Jev** is in early access (console.typesafe.ai). `triage.py` calls `POST /v1/systemone` with `{model, state, questions}` and reads answers keyed by question name, per the public guides; if the shape differs, the adapter is ~40 lines. Any Jev error falls back for that message.

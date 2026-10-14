@@ -579,6 +579,10 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
         return f"no reply (from {who})"
     mode, why = ledger.effective_mode(action, sender, channel, CFG["mode"])
     gate = used_context and not (sender in share_trusted or ledger.share_ok(sender))
+    if item.get("origin", "").startswith("agent:"):
+        # The ledger graduates routes a PERSON earned by replying well to them. An agent asking
+        # Solo to speak has no such history and cannot accrue one, so it never auto-sends.
+        mode, why, gate = "draft", f"requested by {item['origin']} — always yours to approve", False
     item["policy"] = {"effective": "draft" if gate else mode, "reason": ("share gate: " + why) if gate else why, "used_context": used_context}
     fu = None
     if action == "hold":
@@ -692,7 +696,7 @@ def pick_session(item: dict, state: "State") -> tuple[str, bool]:
     return str(uuid.uuid4()), False
 
 
-def claude_command(item: dict, session: tuple[str, bool] | None = None) -> tuple[list[str], dict, str]:
+def claude_command(item: dict, session: tuple[str, bool] | None = None, prompt: str | None = None) -> tuple[list[str], dict, str]:
     """The headless Claude Code invocation for one inbox item."""
     dirs = [str(Path(os.path.expanduser(d)).resolve()) for d in CFG["context_dirs"] if d.strip() and d.strip() != "*"]
     any_dir = any(d.strip() == "*" for d in CFG["context_dirs"])
@@ -702,7 +706,7 @@ def claude_command(item: dict, session: tuple[str, bool] | None = None) -> tuple
     allowed += ["Glob", "Grep", "WebFetch", "WebSearch"]
     allowed += ["Read"] if any_dir else [f"Read(//{d.lstrip('/')}/**)" for d in dirs]
     allowed += [f"mcp__{n}__*" for n in mcp]
-    cmd = [CFG["claude_bin"], "-p", f"/slack-autoreply handle {item_path(item['id'])}",
+    cmd = [CFG["claude_bin"], "-p", prompt or f"/slack-autoreply handle {item_path(item['id'])}",
            "--output-format", "stream-json", "--verbose",
            "--permission-mode", "dontAsk",
            "--allowedTools", ",".join(allowed),
@@ -723,11 +727,11 @@ def claude_command(item: dict, session: tuple[str, bool] | None = None) -> tuple
     return cmd, env, cwd
 
 
-def run_claude(item: dict, state: "State | None" = None) -> tuple[list[str], dict | None, str]:
+def run_claude(item: dict, state: "State | None" = None, prompt: str | None = None) -> tuple[list[str], dict | None, str]:
     """Run Claude Code on an item in that conversation's session. Returns (tools used, result object, stderr tail)."""
     state = state or State()
     session = pick_session(item, state)
-    tools, result, err = _run_claude_once(item, session)
+    tools, result, err = _run_claude_once(item, session, prompt)
     if result is None and session[1]:
         log.warning("resume of session %s failed (%s) — starting a fresh one", session[0][:8], err[:120])
         session = (str(uuid.uuid4()), False)
@@ -747,8 +751,8 @@ def run_claude(item: dict, state: "State | None" = None) -> tuple[list[str], dic
     return tools, result, err
 
 
-def _run_claude_once(item: dict, session: tuple[str, bool]) -> tuple[list[str], dict | None, str]:
-    cmd, env, cwd = claude_command(item, session)
+def _run_claude_once(item: dict, session: tuple[str, bool], prompt: str | None = None) -> tuple[list[str], dict | None, str]:
+    cmd, env, cwd = claude_command(item, session, prompt)
     log.info("dispatch %s → %s (%s session %s)", item["id"], shlex.join(cmd[:3]) + " …", "resume" if session[1] else "new", session[0][:8])
     tools: list[str] = []
     result = None
@@ -1257,6 +1261,47 @@ def cmd_show(a):
         save_item(item)
 
 
+def cmd_say(a):
+    """An agent asks Solo to say something. Solo writes it, in the owner's voice.
+
+    This is the only door other agents go through, and it exists so there is exactly one thing
+    that speaks as the owner. An agent supplies the INTENT — what it wants said and why — never
+    finished prose, because an agent writing its own message is how a workspace ends up with five
+    different voices wearing one name.
+
+    Agent-originated messages always draft for the owner's ✅, whatever the trust ledger says. The
+    ledger graduates routes that a *person* asked for; nothing here was asked for by a person, so
+    there is no track record that could earn an automatic send.
+    """
+    config.ensure_dirs()
+    s = Slack()
+    kind, tid, name = recall.resolve_target(s, a.target)
+    channel = s.client.conversations_open(users=tid)["channel"]["id"] if kind == "people" else tid
+    item = {"id": f"say-{uuid.uuid4().hex[:8]}", "created": now_iso(), "status": "queued",
+            "simulated": False, "outbound": True, "origin": f"agent:{a.from_}",
+            "channel": channel, "channel_type": "im" if kind == "people" else "channel",
+            "channel_name": name, "ts": f"{time.time():.6f}", "thread_ts": a.thread_ts,
+            "reply_thread_ts": a.thread_ts,
+            "sender": tid, "sender_name": name, "sender_handle": name.lower().replace(" ", ""),
+            "intent": a.intent, "why": a.why or "",
+            "text": f"[{a.from_} wants to tell {name}]: {a.intent}",
+            "permalink": None,
+            "context": f"(nothing — this is outbound; {a.from_} asked for it"
+                       + (f" because: {a.why}" if a.why else "") + ")"}
+    save_item(item)
+    print(f"queued {item['id']} → {name} (asked by {a.from_})")
+    if CFG["dispatch"] != "claude":
+        print(f"compose it with: claude -p '/slack-autoreply compose {item_path(item['id'])}'")
+        return
+    tools, result, err = run_claude(item, State(), prompt=f"/slack-autoreply compose {item_path(item['id'])}")
+    item = load_item(item["id"])
+    if not item.get("decision"):
+        sys.exit(f"Solo could not compose it: {err or (result or {}).get('subtype') or 'no decision'}")
+    ledger, _ = load_services()
+    fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
+    print(execute_decision(s, item, item["decision"], ledger, fus, set(), state=State()))
+
+
 def cmd_simulate(a):
     config.ensure_dirs()
     ledger, llm = load_services()
@@ -1474,6 +1519,13 @@ def main():
     p.add_argument("--emoji", help="for ack: the reaction to leave, e.g. +1, tada, eyes. Default ACK_EMOJI")
     p.add_argument("--thread", action="store_true", help="reply in a thread on their message instead of in the channel/DM")
     p.set_defaults(fn=cmd_act)
+    p = sub.add_parser("say", help="another agent asks Solo to send something, in your voice")
+    p.add_argument("target", help="@handle, #channel, or an ID")
+    p.add_argument("intent", help="WHAT you want said and why — not finished prose; Solo writes it")
+    p.add_argument("--from", dest="from_", required=True, help="which agent is asking, e.g. scout")
+    p.add_argument("--why", help="context for the owner, shown on the draft")
+    p.add_argument("--thread-ts", dest="thread_ts", help="reply inside this thread")
+    p.set_defaults(fn=cmd_say)
     p = sub.add_parser("done"); p.add_argument("item"); p.add_argument("--status", default="skipped"); p.set_defaults(fn=cmd_done)
     sub.add_parser("followups").set_defaults(fn=cmd_followups)
     sub.add_parser("drafts").set_defaults(fn=cmd_drafts)

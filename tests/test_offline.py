@@ -482,6 +482,20 @@ S.execute_decision(d, S.load_item(iid_t), {"action": "reply", "text": "answering
 check("--thread replies in a thread on their message",
       any(th == "3000.000200" for _c, _x, th, _ts in fc.posted[before:]))
 
+# Other agents reach Solo through `say`, so one thing speaks as the owner. Whatever the ledger
+# says, an agent-requested message waits for the owner — the ledger graduates what a PERSON earned.
+def _agent_origin_never_auto_sends():
+    iid = msg(d, U, D, "3000.000400", "placeholder")
+    it = S.load_item(iid); it["origin"] = "agent:scout"; S.save_item(it)
+    # Priya has earned auto by this point in the suite; the agent origin must override that
+    S.execute_decision(d, S.load_item(iid), {"action": "reply", "text": "from the scout"},
+                       d.ledger, d.followups, set(), state=d.state)
+    pol_ = S.load_item(iid).get("policy")
+    # "draft" is the mode in which nothing auto-sends, whatever the sender has earned
+    return pol_ and pol_["effective"] == "draft" and "agent:scout" in pol_["reason"]
+
+check("an agent-requested message always waits for the owner", _agent_origin_never_auto_sends())
+
 check("without --thread a DM reply stays flat",
       (lambda i: (S.execute_decision(d, S.load_item(i), {"action": "reply", "text": "flat"},
                                      d.ledger, d.followups, set(), state=d.state),
