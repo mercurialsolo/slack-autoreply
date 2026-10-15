@@ -50,6 +50,14 @@ else
     mkdir -p "$SKILLS_DIR/solo"
     cp "$SRC/skills/solo/SKILL.md" "$SKILLS_DIR/solo/SKILL.md"
     say "skill   solo -> $SKILLS_DIR/solo (any session can use it)"
+    # Codex reads skills from ~/.codex/skills as drop-in directories, same SKILL.md frontmatter.
+    # Installed from the same source file so the two cannot drift: an agent reporting through Solo
+    # should behave identically whichever runtime it is running under.
+    if [ -d "$HOME/.codex/skills" ]; then
+      mkdir -p "$HOME/.codex/skills/solo"
+      cp "$SRC/skills/solo/SKILL.md" "$HOME/.codex/skills/solo/SKILL.md"
+      say "skill   solo -> $HOME/.codex/skills/solo (codex sessions too)"
+    fi
   fi
   say "copied  $SRC -> $DEST"
   else

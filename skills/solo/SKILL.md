@@ -83,8 +83,15 @@ your report is a proposal, and the owner is the one who sends.
 
 You get no delivery receipt. Do not wait for one, and do not re-send.
 
-## If `solo` is not on PATH
+## If `solo` does not run
 
-It is normally symlinked to `~/.local/bin/solo` from the slack-autoreply repo. If it is missing,
-tell the owner — do not look for another way to put a message into Slack, because there isn't one
-that keeps their voice.
+`solo` is normally symlinked to `~/.local/bin/solo` from the slack-autoreply repo, and it reaches
+Solo's node over ssh — so it needs to run a command and open a network connection.
+
+- **Not on PATH** — tell the owner.
+- **Blocked by your sandbox** — it will fail on the ssh, not on the command. Re-run it with
+  escalated permissions if your runtime has them (in Codex, `sandbox_permissions=require_escalated`),
+  and otherwise tell the owner rather than working around it.
+
+Either way, do not look for another route into Slack. There isn't one that keeps the owner's voice,
+and a message from anything but Solo is a message they did not send.
