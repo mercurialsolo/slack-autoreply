@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
 import recall  # noqa: E402
 import voice  # noqa: E402
-from config import CFG, DROP_REACTIONS, OK_SUBTYPES, SEND_REACTIONS  # noqa: E402
+from config import CFG, DELEGATE_REACTIONS, DROP_REACTIONS, OK_SUBTYPES, SEND_REACTIONS  # noqa: E402
 from followups import Followup, Followups, hold_deadline  # noqa: E402
 from learning import Ledger  # noqa: E402
 from triage import Policy, Triager, pick_channel, score_channel  # noqa: E402
@@ -151,6 +151,62 @@ def list_items(statuses: set[str] | None = None) -> list[dict]:
         if statuses is None or it.get("status") in statuses:
             out.append(it)
     return out
+
+
+# --- handing work to an agent -------------------------------------------------------------------
+# A Slack message is data, never an instruction — so a message asking for work never reaches an
+# agent on its own. Solo proposes; the owner's 🤖 dispatches. The proposal and what the owner did
+# with it are both recorded, so promoting this to automatic is a decision about a track record
+# rather than a feeling. Investigation only: the agent reads and reports, it does not act.
+DELEGATIONS = config.p("delegations.jsonl")
+
+AGENT_BRIEF = """[from Solo, on behalf of {owner}] READ-ONLY INVESTIGATION.
+
+{task}
+
+Context — this came from {who} in {where}:
+{quoted}
+
+Rules: investigate and report, change nothing. Do not reply in Slack yourself and do not contact
+anyone. When you have an answer, report it with:  solo say "<your findings>" --from {role}
+That drafts in {owner}'s voice and waits for their approval, which is the only way it reaches
+anyone. If you cannot answer it, say that instead of guessing."""
+
+
+def record_delegation(**row) -> None:
+    row["at"] = now_iso()
+    with open(DELEGATIONS, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def dispatch_task(item: dict, who: str, where: str) -> str:
+    """Hand a proposed investigation to an agent on the owner's machine. Owner-initiated only."""
+    if os.getenv("AUTOREPLY_DISPATCH") == "1":
+        return "refused: a dispatched writer cannot hand itself work"
+    d = (item.get("decision") or {})
+    task = d.get("task")
+    peer, cwd = CFG["delegate_peer"], d.get("cwd") or CFG["delegate_cwd"]
+    role = d.get("role") or CFG["delegate_role"] or "agent"
+    if not task:
+        return "nothing proposed on this item"
+    if not peer:
+        return "no peer to delegate to — set DELEGATE_PEER (see `claudectl relay peers`)"
+    brief = AGENT_BRIEF.format(owner=os.getenv("ME_NAME") or "the owner", task=task, who=who,
+                               where=where, quoted=quote(item.get("text", "")[:400]), role=role)
+    cmd = [CFG["claudectl_bin"], "relay", "delegate", peer, brief]
+    if cwd:
+        cmd += ["--cwd", cwd]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        record_delegation(item=item["id"], peer=peer, role=role, task=task, outcome="failed", error=str(e)[:200])
+        return f"could not reach claudectl: {e}"
+    if out.returncode != 0:
+        record_delegation(item=item["id"], peer=peer, role=role, task=task, outcome="failed",
+                          error=(out.stderr or out.stdout)[:200])
+        return f"claudectl refused it: {(out.stderr or out.stdout).strip()[:160]}"
+    record_delegation(item=item["id"], peer=peer, role=role, task=task, outcome="dispatched", counterpart=who)
+    return f"handed to {peer}: {task[:80]} — it reports back with `solo say`, which still needs your ✅"
 
 
 def audit(**row) -> None:
@@ -614,6 +670,9 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
         note = (f"⚠️ *Needs you* — *{who}* in {describe_where(item)}"
                 + (f" (sensitivity {t['sensitivity']:.1f}/5, urgency {t['urgency']:.1f}/5)" if t else "")
                 + (f"\n{decision['note']}" if decision.get("note") else "")
+                + (f"\n🤖 *Proposed for an agent* ({decision.get('role') or CFG['delegate_role'] or 'no role set'}): "
+                   f"{decision['task']}\n_react 🤖 to hand it over — read-only, it reports back for your ✅_"
+                   if decision.get("task") else "")
                 + f"\n{quote(item['text'][:400])}" + (f"\n{item['permalink']}" if item.get("permalink") else ""))
         if text:
             draft_ts = slack.notify(f"{note}\n*Draft* — react ✅ to send as-is, ❌ to drop\n{quote(text)}")
@@ -1062,6 +1121,12 @@ class Daemon(Slack):
             log.info(approve_draft(self, item, self.ledger, self.followups, self.state, draft_ts))
         elif r in DROP_REACTIONS:
             log.info(drop_draft(self, item, self.ledger, self.state, draft_ts))
+        elif r in DELEGATE_REACTIONS:
+            if CFG["delegate_mode"] not in ("shadow", "auto"):
+                return
+            msg = dispatch_task(item, item.get("sender_name", "someone"), describe_where(item))
+            log.info(msg)
+            self.notify(f"🤖 {msg}")
 
     # ------------------------------------------------------------ console
 
@@ -1762,6 +1827,7 @@ def cmd_act(a):
         sys.exit(f"--emoji {a.emoji!r}: use a Slack emoji NAME like +1, tada, eyes — not the character itself")
     decision = {"action": a.action, "text": text, "sources": [s for s in (a.sources or "").split(",") if s],
                 "used_context": bool(a.sources), "note": a.note or "", "urgency": a.urgency,
+                "task": getattr(a, "task", None) or "", "role": getattr(a, "role", None) or "",
                 "emoji": emoji, "thread": bool(a.thread), "at": now_iso()}
     item["decision"] = decision
     if os.getenv("AUTOREPLY_DISPATCH") == "1":
@@ -1793,6 +1859,27 @@ def cmd_followups(a):
         print("no open follow-ups")
     for f in items:
         print(f"{f.due}  {f.counterpart_name:<20} {f.phrase:<18} {f.summary[:70]}  [{f.status}]")
+
+
+def cmd_delegations(a):
+    """The record that decides whether this is ever allowed to run itself."""
+    if not DELEGATIONS.exists():
+        print("nothing proposed for an agent yet."); return
+    rows = [json.loads(l) for l in DELEGATIONS.read_text().splitlines() if l.strip()]
+    by_role: dict[str, dict[str, int]] = {}
+    for r in rows:
+        by_role.setdefault(r.get("peer") or r.get("role", "?"), {}).setdefault(r.get("outcome", "?"), 0)
+        by_role[r.get("peer") or r.get("role", "?")][r.get("outcome", "?")] += 1
+    print(f"mode: {CFG['delegate_mode']} · {len(rows)} proposals\n")
+    for role, outcomes in sorted(by_role.items()):
+        bits = " · ".join(f"{k} {v}" for k, v in sorted(outcomes.items()))
+        print(f"  {role:20} {bits}")
+    for r in rows[-8:]:
+        print(f"\n  {r['at'][:16]}  {r.get('outcome'):10} {r.get('peer') or r.get('role')}")
+        print(f"    {(r.get('task') or '')[:100]}")
+    dispatched = sum(1 for r in rows if r.get("outcome") == "dispatched")
+    print(f"\n{dispatched}/{len(rows)} were handed over. Promotion to DELEGATE_MODE=auto is a judgement\n"
+          "about these, and auto still only ever starts a read-only investigation.")
 
 
 def cmd_drafts(a):
@@ -1911,7 +1998,10 @@ def cmd_review_data(a):
 # or drops a draft, or changes whether Solo is running at all. Read-only and research subcommands
 # (show, history, search, about, inbox, drafts, voice, status, doctor) stay available, as does
 # `act`, which records a decision without executing it.
-DISPATCH_FORBIDDEN = frozenset({"approve", "drop", "pause", "resume", "listen", "done", "build-voice"})
+# The writer proposes an investigation with `act --task`; it may not dispatch one, nor read the
+# record of what the owner has handed over.
+DISPATCH_FORBIDDEN = frozenset({"approve", "drop", "pause", "resume", "listen", "done", "build-voice",
+                                "delegations"})
 
 
 def main():
@@ -1931,10 +2021,14 @@ def main():
     p = sub.add_parser("inbox"); p.add_argument("--all", action="store_true"); p.set_defaults(fn=cmd_inbox)
     p = sub.add_parser("show"); p.add_argument("item"); p.set_defaults(fn=cmd_show)
     p = sub.add_parser("simulate"); p.add_argument("text"); p.add_argument("--from", dest="sender", default="Sam"); p.add_argument("--channel-type", default="im", choices=["im", "mpim", "channel", "group"]); p.add_argument("--channel-name"); p.set_defaults(fn=cmd_simulate)
+    p = sub.add_parser("delegations", help="what Solo proposed for agents, and what you did with it")
+    p.set_defaults(fn=cmd_delegations)
     p = sub.add_parser("deadline"); p.add_argument("--urgency", type=float, required=True); p.set_defaults(fn=cmd_deadline)
     p = sub.add_parser("act"); p.add_argument("item"); p.add_argument("--action", required=True, choices=["ignore", "ack", "hold", "reply", "escalate"])
     p.add_argument("--text", help="message text; use \\n for new lines"); p.add_argument("--text-file"); p.add_argument("--sources", help="comma list of where you looked: fs,notion,drive,github,calendar,web …")
-    p.add_argument("--note", help="why it needs them (escalate), or what you need from them before it sends (hold/reply)"); p.add_argument("--urgency", type=float)
+    p.add_argument("--note", help="why it needs them (escalate), or what you need from them before it sends (hold/reply)")
+    p.add_argument("--task", help="propose a READ-ONLY investigation for an agent; the owner dispatches it with 🤖, never you")
+    p.add_argument("--role", help="which agent role the investigation is for (default: DELEGATE_ROLE)"); p.add_argument("--urgency", type=float)
     p.add_argument("--emoji", help="for ack: the reaction to leave, e.g. +1, tada, eyes. Default ACK_EMOJI")
     p.add_argument("--thread", action="store_true", help="reply in a thread on their message instead of in the channel/DM")
     p.set_defaults(fn=cmd_act)

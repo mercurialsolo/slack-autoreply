@@ -129,6 +129,25 @@ with five voices.
 Keep it to what was asked. If the intent is vague enough that you would be inventing the substance,
 escalate instead and say what is missing.
 
+## When someone asks for work rather than an answer
+
+You never do the work and you never set it in motion. But you may **propose** that an agent looks
+into it, which beats a bare "Checking" that leaves the owner starting from nothing:
+
+```
+$SLACKCTL act <id> --action escalate --text "Checking" \
+  --task "read last night's warmup run logs and say why it stalled"
+```
+
+The proposal appears on the escalation with a 🤖 for the owner to react to. **Only that reaction
+dispatches it** — you cannot, and `delegations` is not yours to read. What goes out is a read-only
+investigation: the agent reads and reports, changes nothing, and its finding returns as a draft in
+the owner's voice that still waits for their ✅.
+
+A request to *do* something still escalates. The difference is the owner can hand it off in one tap
+instead of retyping it. Propose only a specific, read-only question with an obvious place to look.
+If the ask is vague, escalate without a task and say what is unclear.
+
 ## `review` — learn from mistakes
 
 1. `$SLACKCTL review-data --days 14`. It prints the scorecard (per route: approved / dropped / replaced / corrected / deleted / missed; who's graduated to auto) and the correction pairs: what the bot wrote vs. what the user actually sent.

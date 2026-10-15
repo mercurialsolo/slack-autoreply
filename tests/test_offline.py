@@ -635,6 +635,38 @@ check("without --thread a DM reply stays flat",
                                      d.ledger, d.followups, set(), state=d.state),
                   fc.posted[-1][2] is None)[1])(msg(d, U, D, "3000.000300", "one question")))
 
+# Handing work to an agent is the one place a Slack message could start something on the owner's
+# machines, so it is gated the same way sending is: Solo proposes, the owner's 🤖 dispatches, and
+# the record of both is what a later promotion to automatic would have to rest on.
+def _writer_cannot_dispatch():
+    i = msg(d, U, D, "3000.000500", "can you restart the warmup job")
+    it = S.load_item(i); it["decision"] = {"action": "escalate", "task": "find out why it stalled", "role": "r"}
+    os.environ["AUTOREPLY_DISPATCH"] = "1"
+    try:
+        return S.dispatch_task(it, "Sri", "a DM")
+    finally:
+        os.environ.pop("AUTOREPLY_DISPATCH", None)
+
+
+def _proposal_is_shown_with_how_to_act():
+    i = msg(d, U, D, "3000.000501", "why did the overnight run stall?")
+    S.execute_decision(d, S.load_item(i), {"action": "escalate", "text": "Checking",
+                                           "task": "read last night's run logs", "role": "scout"},
+                       d.ledger, d.followups, set(), state=d.state)
+    return next((p[1] for p in d.bot.posted if "Proposed for an agent" in (p[1] or "")), "")
+
+
+check("the drafting agent cannot hand itself work",
+      "refused" in _writer_cannot_dispatch())
+check("a proposal with no task dispatches nothing",
+      "nothing proposed" in S.dispatch_task({"id": "x", "decision": {}, "text": ""}, "Sri", "a DM"))
+check("a proposal with nowhere to send refuses rather than guessing a machine",
+      "no peer" in S.dispatch_task({"id": "x", "decision": {"task": "look"}, "text": ""}, "Sri", "a DM"))
+_shown = _proposal_is_shown_with_how_to_act()
+check("the owner sees the proposed investigation", "read last night's run logs" in _shown)
+check("the owner is told the reaction that hands it over", "react 🤖" in _shown)
+check("the owner is told the agent only reads", "read-only" in _shown)
+
 # Inbound <@U123> is flattened to "@Sri" for the writer to read, so a draft that mirrored the name
 # it had just read went out as literal grey text that pinged nobody. Slack renders a mention only
 # from <@ID> and will not linkify a bare @name posted through the API.

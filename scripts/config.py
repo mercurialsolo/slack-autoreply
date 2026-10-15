@@ -127,8 +127,18 @@ CFG = dict(
     session_max_runs=env_int("SESSION_MAX_RUNS", 20),
     context_dirs=env_list("CONTEXT_DIRS"),
     mcp_allow=env_list("CONTEXT_MCP_ALLOW", "*"),
+    # Handing work to an agent starts in shadow: Solo proposes, the owner dispatches. "auto" is
+    # earned later, from the record in delegations.jsonl, not switched on by hope.
+    delegate_mode=env("DELEGATE_MODE", "shadow"),
+    delegate_role=env("DELEGATE_ROLE", ""),
+    # Solo runs on the node; the owner's agents run on their laptop. Mailboxes are per-machine —
+    # a `bus send` here queues here and is never seen there — so crossing machines is relay's job.
+    delegate_peer=env("DELEGATE_PEER", ""),
+    delegate_cwd=env("DELEGATE_CWD", ""),
+    claudectl_bin=env("CLAUDECTL_BIN", "claudectl"),
 )
 
 SEND_REACTIONS = {"white_check_mark", "heavy_check_mark", "ballot_box_with_check", "+1", "thumbsup"}
 DROP_REACTIONS = {"x", "negative_squared_cross_mark", "no_entry_sign", "-1", "thumbsdown", "wastebasket"}
+DELEGATE_REACTIONS = {"robot_face", "robot"}   # 🤖 on a proposal hands it to an agent
 OK_SUBTYPES = {None, "file_share"}
