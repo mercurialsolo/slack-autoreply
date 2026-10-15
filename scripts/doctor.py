@@ -45,7 +45,14 @@ def check_python(r: Report):
     if v < (3, 10):
         r.add(FAIL, f"python {v.major}.{v.minor}", "needs 3.10+ (str | None syntax, dataclasses)")
     else:
-        r.add(OK, f"python {v.major}.{v.minor}.{v.micro}")
+        # Which interpreter, not just which version. A Homebrew minor-version bump once left the
+        # daemon running on an interpreter whose modules had moved, and the version line alone
+        # looked perfectly healthy while every new invocation failed.
+        import config as _cfg
+        own = str(_cfg.STATE_DIR / "venv") in sys.prefix
+        r.add(OK, f"python {v.major}.{v.minor}.{v.micro} — "
+                  + ("Solo's own venv" if own else f"{sys.executable} (not Solo's venv — "
+                                                   "run install.sh so a python upgrade cannot break it)"))
     for mod, pkg in (("slack_sdk", "slack_sdk"), ("dotenv", "python-dotenv"), ("httpx", "httpx")):
         try:
             __import__(mod)

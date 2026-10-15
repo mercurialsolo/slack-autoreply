@@ -58,6 +58,29 @@ else
 fi
 chmod +x "$DEST/scripts/slackctl.py" "$DEST/install.sh" "$DEST/deploy/install-service.sh" 2>/dev/null || true
 
+# --- interpreter
+# Solo owns its interpreter. Homebrew upgraded python3 3.14 -> 3.15 under a running daemon once:
+# site-packages do not cross a minor version, so every new `slackctl` invocation died on
+# ModuleNotFoundError while the already-running process kept working off its loaded modules —
+# invisible until the next restart, which would then have failed to come up at all.
+# --copies rather than symlinks so the venv survives the old formula being cleaned up.
+VENV="$STATE/venv"
+if [ -z "${AUTOREPLY_NO_VENV:-}" ]; then
+  if [ ! -x "$VENV/bin/python3" ] || ! "$VENV/bin/python3" -c '' 2>/dev/null; then
+    [ -e "$VENV" ] && rm -rf "$VENV"
+    mkdir -p "$STATE"
+    if "$PY" -m venv --copies "$VENV" 2>/dev/null; then
+      say "venv    created at $VENV ($("$VENV/bin/python3" -V))"
+    else
+      say "venv    could not be created — falling back to $PY"
+    fi
+  fi
+  [ -x "$VENV/bin/python3" ] && PY="$VENV/bin/python3"
+fi
+# install-service.sh derives both the service program and its PATH from PYTHON, so the daemon and
+# the dispatched agent's bare `python3 slackctl.py` resolve to the same interpreter as this one.
+export PYTHON="$PY"
+
 # --- deps
 if "$PY" -m pip --version >/dev/null 2>&1; then
   "$PY" -m pip install -q --user -r "$SRC/requirements.txt" 2>/dev/null \
