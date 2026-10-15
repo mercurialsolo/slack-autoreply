@@ -10,7 +10,14 @@ voice corpus was built from, so the samples in VOICE.md cannot contain them.
 `run` drafts through the real writer with simulated=True, so nothing reaches Slack.
 Scoring has two legs, deliberately: mechanical stylometrics against the owner's
 own measured habits, and the three chase-rules that only apply to some messages.
-A judge is not asked "does this sound like him" — it cannot see its own style.
+A judge is not asked "does this sound like you" — it cannot see its own style.
+
+Known limitation — the mechanical legs are sound, the substance is not. The writer can call
+`slackctl history`, and these inbounds are real messages from real threads, so at draft time it
+can read the reply the owner actually sent and everything that came after it. "Held out" is true
+of the voice corpus, not of the writer's reach. Trust the style scores; do not read the drafts as
+evidence the substance was reached unaided. Fixing it means passing the pre-`ts` thread as
+item["context"] and telling the writer not to call `history`.
 """
 import argparse, json, os, re, sys, time, uuid
 from datetime import datetime, timezone
@@ -136,7 +143,7 @@ def main() -> None:
         with RUNS.open("a") as fh:
             fh.write(json.dumps({"pair": q, "route": route, "text": text}) + "\n")
         print(f"[{i}] {q['when']} {q['sender']}: {q['inbound'][:66]}")
-        print(f"    he wrote : {q['actual'][:100]!r} ({sc['actual_words']}w)")
+        print(f"    they wrote: {q['actual'][:100]!r} ({sc['actual_words']}w)")
         print(f"    solo     : {text[:100]!r} ({sc['words']}w, route={route})")
         print(f"    {'clean' if sc['clean'] else 'FAILS: ' + ', '.join(sc['failed'])}\n")
 
@@ -147,7 +154,7 @@ def report(results: list, bar: float) -> None:
     for i, (q, route, text, sc) in enumerate(results, 1):
         if not sc["clean"]:
             print(f"[{i}] {q['when']} {q['sender']}: {q['inbound'][:60]}")
-            print(f"    he wrote : {q['actual'][:90]!r}")
+            print(f"    they wrote: {q['actual'][:90]!r}")
             print(f"    solo     : {text[:90]!r} (route={route})")
             print(f"    FAILS: {', '.join(sc['failed'])}\n")
     clean = sum(1 for *_, sc in results if sc["clean"])

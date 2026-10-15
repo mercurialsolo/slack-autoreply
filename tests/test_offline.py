@@ -635,6 +635,19 @@ check("without --thread a DM reply stays flat",
                                      d.ledger, d.followups, set(), state=d.state),
                   fc.posted[-1][2] is None)[1])(msg(d, U, D, "3000.000300", "one question")))
 
+# VOICE.md tells Solo to write the bare hold and flag that the draft needs a time from the owner.
+# That note was rendered only on the escalate branch, so on a hold it went into the item and
+# nowhere the owner would ever read it — the instruction pointed at a dead channel.
+def _hold_note_is_shown():
+    i = msg(d, U, D, "3000.000400", "when will the handover note be ready?")
+    S.execute_decision(d, S.load_item(i), {"action": "hold", "text": "Checking",
+                                           "note": "needs a time from you before it sends"},
+                       d.ledger, d.followups, set(), state=d.state)
+    return any("needs a time from you" in (p[1] or "") for p in d.bot.posted)
+
+
+check("a hold's note reaches the owner, not just the item file", _hold_note_is_shown())
+
 # The voice harness scores drafts against what the owner actually wrote. An empty draft passed
 # every regex at first — no greeting and no full stop because it has nothing — so silence in reply
 # to a direct question scored perfect. That is the one failure the harness exists to catch.
@@ -645,11 +658,11 @@ check("an empty draft fails when they actually asked something",
       not vscore("", {"inbound": "Can you share the OTP?", "actual": "Checking"})["clean"])
 check("an empty draft is fine on a statement with no ask",
       vscore("", {"inbound": "these are test users fyi", "actual": "Cool"})["clean"])
-check("a greeting fails — there are zero in 200 of his messages",
+check("a greeting fails — there are zero in 200 of their messages",
       not vscore("Hi Sri! Thanks for reaching out.", {"inbound": "when?", "actual": "morrow"})["clean"])
 check("an invented time fails — Solo has no calendar and must not promise one",
       not vscore("Checking, back by 3pm", {"inbound": "when will it be done?", "actual": "Checking"})["clean"])
-check("the bare hold passes — it is what he actually writes",
+check("the bare hold passes — it is what they actually write",
       vscore("Checking", {"inbound": "when will it be done?", "actual": "Checking"})["clean"])
 
 shutil.rmtree(TMP, ignore_errors=True)

@@ -605,6 +605,10 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
 
     where = describe_where(item)
     note = f"*Draft {action} → {where}* — react ✅ to send, ❌ to drop\n_{'needs your ok: pulled from ' + ', '.join(decision.get('sources') or ['your context']) if gate else why}_"
+    # A note on a hold was only ever rendered for escalate, so VOICE.md's instruction to flag
+    # "this draft needs a time from you" wrote into a field the owner never saw.
+    if decision.get("note"):
+        note += f"\n{decision['note']}"
     draft_ts = slack.notify(f"{note}\n{quote(text)}")
     item["outcome"] = {"status": "drafted", "draft_ts": draft_ts, "at": now_iso()}
     save_item(item)
@@ -1875,7 +1879,7 @@ def main():
     p = sub.add_parser("deadline"); p.add_argument("--urgency", type=float, required=True); p.set_defaults(fn=cmd_deadline)
     p = sub.add_parser("act"); p.add_argument("item"); p.add_argument("--action", required=True, choices=["ignore", "ack", "hold", "reply", "escalate"])
     p.add_argument("--text", help="message text; use \\n for new lines"); p.add_argument("--text-file"); p.add_argument("--sources", help="comma list of where you looked: fs,notion,drive,github,calendar,web …")
-    p.add_argument("--note", help="for escalate: why it needs them"); p.add_argument("--urgency", type=float)
+    p.add_argument("--note", help="why it needs them (escalate), or what you need from them before it sends (hold/reply)"); p.add_argument("--urgency", type=float)
     p.add_argument("--emoji", help="for ack: the reaction to leave, e.g. +1, tada, eyes. Default ACK_EMOJI")
     p.add_argument("--thread", action="store_true", help="reply in a thread on their message instead of in the channel/DM")
     p.set_defaults(fn=cmd_act)
