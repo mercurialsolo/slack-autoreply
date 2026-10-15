@@ -564,6 +564,21 @@ def _replies_are_never_rerouted():
 
 check("a reply always goes back to the channel it arrived in", _replies_are_never_rerouted())
 
+# The app now subscribes to message.channels/message.groups, so Slack streams every channel
+# message. Acting only on the ones that tag the owner is entirely this guard's job — untested
+# until now, and the whole reason subscribing to channels is affordable.
+def _channel_guard(text, ctype="channel"):
+    before = len(S.list_items())
+    msg(d, U, C, f"{time.time():.6f}", text, ctype=ctype)
+    return len(S.list_items()) > before
+
+check("a channel message that tags you is picked up",
+      _channel_guard("<@UME> can you check the zip code file?"))
+check("a channel message that does not tag you is ignored",
+      not _channel_guard("deploy finished, all green"))
+check("a private group message that tags you is picked up",
+      _channel_guard("<@UME> need you on this", ctype="group"))
+
 # Claude Code matches a Bash prefix as `Bash(cmd:*)`. The space form silently grants nothing and
 # the agent just reports "Bash denied" — which is exactly how `ask` failed, and why the daemon's
 # own allowlist was quietly wrong too.
