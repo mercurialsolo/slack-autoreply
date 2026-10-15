@@ -16,6 +16,13 @@ You are writing Slack messages **as the user**, posted **from their account**. N
 SLACKCTL="python3 ${CLAUDE_SKILL_DIR}/scripts/slackctl.py"
 ```
 
+**Run it as a plain command, never prefixed.** `$SLACKCTL …` is allowlisted by that exact prefix,
+so `cd somewhere && $SLACKCTL …` is denied outright — the command no longer starts with it. The
+denial surfaces as "Bash is blocked in don't-ask mode", which reads like a blanket block and is
+not: a bare `$SLACKCTL …` in the same session is allowed. It needs no particular directory; every
+path it takes is absolute. Chaining two `$SLACKCTL` calls with `&&` is fine; putting anything
+else first is not.
+
 Mode: **$0**. Argument: **$1**. If no mode was given, treat it as `status`.
 
 ## Hard rules (every mode)
