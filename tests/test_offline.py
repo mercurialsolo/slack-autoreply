@@ -635,5 +635,22 @@ check("without --thread a DM reply stays flat",
                                      d.ledger, d.followups, set(), state=d.state),
                   fc.posted[-1][2] is None)[1])(msg(d, U, D, "3000.000300", "one question")))
 
+# The voice harness scores drafts against what the owner actually wrote. An empty draft passed
+# every regex at first — no greeting and no full stop because it has nothing — so silence in reply
+# to a direct question scored perfect. That is the one failure the harness exists to catch.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+from voice_eval import score as vscore  # noqa: E402
+
+check("an empty draft fails when they actually asked something",
+      not vscore("", {"inbound": "Can you share the OTP?", "actual": "Checking"})["clean"])
+check("an empty draft is fine on a statement with no ask",
+      vscore("", {"inbound": "these are test users fyi", "actual": "Cool"})["clean"])
+check("a greeting fails — there are zero in 200 of his messages",
+      not vscore("Hi Sri! Thanks for reaching out.", {"inbound": "when?", "actual": "morrow"})["clean"])
+check("an invented time fails — Solo has no calendar and must not promise one",
+      not vscore("Checking, back by 3pm", {"inbound": "when will it be done?", "actual": "Checking"})["clean"])
+check("the bare hold passes — it is what he actually writes",
+      vscore("Checking", {"inbound": "when will it be done?", "actual": "Checking"})["clean"])
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{passed} checks passed")
