@@ -635,6 +635,27 @@ check("without --thread a DM reply stays flat",
                                      d.ledger, d.followups, set(), state=d.state),
                   fc.posted[-1][2] is None)[1])(msg(d, U, D, "3000.000300", "one question")))
 
+# Inbound <@U123> is flattened to "@Sri" for the writer to read, so a draft that mirrored the name
+# it had just read went out as literal grey text that pinged nobody. Slack renders a mention only
+# from <@ID> and will not linkify a bare @name posted through the API.
+_names = {"sri": "U0SRI", "srivatsan": "U0SRI", "nick": "U0NICK"}
+_look = lambda n: _names.get(n.lower())
+
+check("a bare @name is restored to a real mention",
+      S.restore_mentions("@Sri on the 3", _look) == "<@U0SRI> on the 3")
+check("an email address is not mistaken for a mention",
+      S.restore_mentions("mail me at barada@kubric.io", _look) == "mail me at barada@kubric.io")
+check("an @name inside a URL is left alone",
+      S.restore_mentions("see https://x.com/@sri", _look) == "see https://x.com/@sri")
+check("a possessive keeps its apostrophe",
+      S.restore_mentions("ask @Sri's team", _look) == "ask <@U0SRI>'s team")
+check("a name nobody answers to stays plain text",
+      S.restore_mentions("@Nobody there", _look) == "@Nobody there")
+check("@here is left inert rather than made to blast",
+      S.restore_mentions("@here please", _look) == "@here please")
+check("an already-formed mention is untouched",
+      S.restore_mentions("already <@U0SRI> tagged", _look) == "already <@U0SRI> tagged")
+
 # VOICE.md tells Solo to write the bare hold and flag that the draft needs a time from the owner.
 # That note was rendered only on the escalate branch, so on a hold it went into the item and
 # nowhere the owner would ever read it — the instruction pointed at a dead channel.

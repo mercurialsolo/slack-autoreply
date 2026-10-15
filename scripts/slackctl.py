@@ -71,6 +71,33 @@ def in_quiet_hours(spec: str, now: datetime | None = None) -> bool:
     return (a <= h < b) if a < b else (h >= a or h < b)
 
 
+# Inbound text is flattened for the writer to read: clean_text turns <@U123> into "@Sri". Nothing
+# put it back on the way out, so a draft that mirrored the name it had just read posted "@Sri" as
+# literal grey text that never pinged anyone. Slack only renders a mention from <@ID>; it does not
+# linkify a bare @name posted through the API, and "Sri" is a display name rather than the handle
+# (@srivatsan), so link_names would not have caught it either. This is the inverse of that rule.
+# The lookbehind keeps us out of emails (barada@kubric.io) and URLs (x.com/@sri); an apostrophe is
+# allowed inside the name so O'Brien resolves, and a trailing possessive is handed back unchanged.
+MENTION_RE = re.compile(r"(?<![A-Za-z0-9._%+\-/:])@([A-Za-z][A-Za-z0-9._'\u2019-]*[A-Za-z0-9]|[A-Za-z])")
+MENTION_KEEP = {"here", "channel", "everyone"}   # leave these inert rather than make Solo able to blast
+
+
+def restore_mentions(text: str, lookup) -> str:
+    """Turn "@Sri" back into "<@U…>" so it actually pings. Unknown names are left alone."""
+    def sub(m):
+        name, tail = m.group(1), ""
+        if name.lower() in MENTION_KEEP:
+            return m.group(0)
+        uid = lookup(name)
+        if not uid:   # "@Sri's team" — try the name without its possessive, and keep the possessive
+            for suffix in ("'s", "\u2019s", "'", "\u2019"):
+                if name.endswith(suffix):
+                    uid, tail = lookup(name[: -len(suffix)]), suffix
+                    break
+        return f"<@{uid}>{tail}" if uid else m.group(0)
+    return MENTION_RE.sub(sub, text or "")
+
+
 def clean_text(text: str, name_of) -> str:
     text = re.sub(r"<@([UW][A-Z0-9]+)(?:\|[^>]*)?>", lambda m: "@" + name_of(m.group(1)), text or "")
     text = re.sub(r"<#[A-Z0-9]+\|([^>]*)>", r"#\1", text)
@@ -211,6 +238,7 @@ class Slack:
         self.me_handle: str = prof["name"]
         self.me_name: str = (prof.get("profile") or {}).get("display_name") or prof.get("real_name") or self.me_handle
         self.self_dm: str = self.client.conversations_open(users=self.me)["channel"]["id"]
+        self._mentions: dict[str, str] | None = None
         self.names: dict[str, str] = {self.me: self.me_name}
         self.handles: dict[str, str] = {self.me: self.me_handle}
         self.channel_names: dict[str, str] = {}
@@ -346,7 +374,34 @@ class Slack:
                 return m
         return None
 
+    def mention_id(self, name: str) -> str | None:
+        """Display name, real name, handle or an unambiguous first name -> user id."""
+        if self._mentions is None:
+            m, seen_first = {}, {}
+            cursor = None
+            while True:
+                res = self.client.users_list(limit=500, cursor=cursor)
+                for u in res["members"]:
+                    if u.get("deleted") or u.get("is_bot"):
+                        continue
+                    prof = u.get("profile") or {}
+                    for k in {(u.get("name") or ""), (prof.get("display_name") or ""), (u.get("real_name") or "")}:
+                        if k:
+                            m.setdefault(k.lower(), u["id"])
+                    full = (prof.get("display_name") or u.get("real_name") or "").strip()
+                    if " " in full:   # a first name only counts if exactly one person answers to it
+                        seen_first.setdefault(full.split()[0].lower(), set()).add(u["id"])
+                cursor = (res.get("response_metadata") or {}).get("next_cursor")
+                if not cursor:
+                    break
+            for first, ids in seen_first.items():
+                if len(ids) == 1:
+                    m.setdefault(first, next(iter(ids)))
+            self._mentions = m
+        return self._mentions.get(name.lower())
+
     def post(self, channel: str, text: str, thread_ts: str | None = None) -> str:
+        text = restore_mentions(text, self.mention_id)
         return self.client.chat_postMessage(channel=channel, text=text, thread_ts=thread_ts)["ts"]
 
     def react(self, channel: str, ts: str, emoji: str) -> None:
