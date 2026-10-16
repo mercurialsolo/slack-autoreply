@@ -688,6 +688,44 @@ check("@here is left inert rather than made to blast",
 check("an already-formed mention is untouched",
       S.restore_mentions("already <@U0SRI> tagged", _look) == "already <@U0SRI> tagged")
 
+# The owner sends in beats — 53% of 305 real messages are part of a burst, median 14s apart, most
+# often a short beat then the substance ("Yes please" / "go ahead"). The writer could only ever
+# produce one message, so that shape was unreachable no matter what VOICE.md said.
+class _Rec:
+    def __init__(self):
+        self.sent = []
+
+    def chat_postMessage(self, channel, text, thread_ts=None):
+        self.sent.append((channel, text, thread_ts))
+        return {"ts": "%d.0" % len(self.sent)}
+
+
+class _Poster:
+    def __init__(self):
+        self.client = _Rec()
+        self.self_dm = "D0OWNER"
+        self.mention_id = lambda n: None
+
+
+_p = _Poster()
+_first = S.Slack.post(_p, "C1", "Yes please \u23ce go ahead", None)
+check("a beat marker sends two messages, in order",
+      [t for _, t, _ in _p.client.sent] == ["Yes please", "go ahead"])
+check("both beats land in the same thread",
+      {th for _, _, th in _p.client.sent} == {None})
+check("the first beat's ts is what comes back, so outcomes anchor on it",
+      _first == "1.0")
+
+_p2 = _Poster()
+S.Slack.post(_p2, "C1", "just the one thing", None)
+check("a draft with no beat marker is still a single message",
+      [t for _, t, _ in _p2.client.sent] == ["just the one thing"])
+
+_p3 = _Poster()
+S.Slack.post(_p3, "C1", "Yes please \u23ce go ahead", None, split=False)
+check("the console keeps the marker visible, so \u2705 is informed",
+      [t for _, t, _ in _p3.client.sent] == ["Yes please \u23ce go ahead"])
+
 # VOICE.md tells Solo to write the bare hold and flag that the draft needs a time from the owner.
 # That note was rendered only on the escalate branch, so on a hold it went into the item and
 # nowhere the owner would ever read it — the instruction pointed at a dead channel.

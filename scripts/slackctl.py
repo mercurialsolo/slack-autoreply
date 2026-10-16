@@ -82,6 +82,10 @@ MENTION_RE = re.compile(r"(?<![A-Za-z0-9._%+\-/:])@([A-Za-z][A-Za-z0-9._'\u2019-
 MENTION_KEEP = {"here", "channel", "everyone"}   # leave these inert rather than make Solo able to blast
 
 
+# The owner sends in beats. A draft uses this to mean "send what follows as a second message".
+BEAT = "⏎"
+
+
 def restore_mentions(text: str, lookup) -> str:
     """Turn "@Sri" back into "<@U…>" so it actually pings. Unknown names are left alone."""
     def sub(m):
@@ -456,9 +460,26 @@ class Slack:
             self._mentions = m
         return self._mentions.get(name.lower())
 
-    def post(self, channel: str, text: str, thread_ts: str | None = None) -> str:
+    def post(self, channel: str, text: str, thread_ts: str | None = None, *, split: bool = True) -> str:
+        """Send a reply — as two messages when the draft asks for it.
+
+        53% of the owner's messages are part of a burst: two or three to the same channel inside
+        two minutes, median 14s apart, the first beat short and the second carrying the substance
+        ("Yes please" then "go ahead"). Folded into one line with a dash it is not the same voice,
+        so a draft may use `⏎` to mean "this is two messages". Splitting here, not in the writer,
+        keeps it at the one choke point every real send already passes through — the same reason
+        `restore_mentions` lives here.
+
+        The console never splits: the owner has to see the `⏎` to know what ✅ will send.
+        """
         text = restore_mentions(text, self.mention_id)
-        return self.client.chat_postMessage(channel=channel, text=text, thread_ts=thread_ts)["ts"]
+        parts = [p.strip() for p in text.split(BEAT)] if split else [text]
+        parts = [p for p in parts if p] or [text]
+        first = ""
+        for part in parts:
+            ts = self.client.chat_postMessage(channel=channel, text=part, thread_ts=thread_ts)["ts"]
+            first = first or ts
+        return first
 
     def react(self, channel: str, ts: str, emoji: str) -> None:
         self.client.reactions_add(channel=channel, timestamp=ts, name=emoji)
@@ -503,7 +524,7 @@ class Slack:
                 return self.bot.chat_postMessage(channel=self.bot_dm, text=text)["ts"]
             except Exception as e:  # noqa: BLE001
                 log.warning("bot post failed (%s) — falling back to your self-DM, which will not notify", e)
-        return self.post(self.self_dm, text)
+        return self.post(self.self_dm, text, split=False)
 
     def console_update(self, ts: str, text: str) -> None:
         """Edit a console message. A message posted by the bot can only be edited by the bot."""
