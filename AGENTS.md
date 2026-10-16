@@ -170,6 +170,17 @@ claudectl bus role bind <role-name> "/path/to/project*"
 #                              "command": "claudectl bus stop-hook", "timeout": 10 } ] } ]
 ```
 
+**Peek before you bind.** A role is an address, and mail addressed to a name that has no role
+sits `pending` indefinitely. Binding that name **arms everything already queued to it**, which all
+lands in the first agent to finish a turn. Binding `staffai` here surfaced 16 stray dictation
+fragments from a week earlier — ambient speech a dictation daemon had published as tasks. Check,
+and drain the queue yourself if it is not what you want an agent reading:
+
+```bash
+claudectl bus inbox --role <role-name> --peek   # look
+claudectl bus inbox --role <role-name>          # drain it to you, not to an agent
+```
+
 Verify (round trip, no Slack involved):
 
 ```bash
