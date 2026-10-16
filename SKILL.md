@@ -57,6 +57,12 @@ Mode: **$0**. Argument: **$1**. If no mode was given, treat it as `status`.
      Omit it and you get the default 👀. Use the name (`+1`), never the character. A reaction is often the
      most in-voice reply there is — the owner sends plenty of one-word messages, and an emoji is shorter.
    - `hold` — needs real work or a decision. Write **one line** that commits to the printed deadline phrase ("by end of day", "Monday morning") and nothing else. `act --action hold --text "…"`. The promise is tracked and the user gets reminded.
+   - **Propose an agent when what is missing is a lookup you cannot do.** Add
+     `--task "<specific read-only question>"` to a `hold` or an `escalate`. The owner hands it over
+     with a single 🤖 and it comes back as a draft in their voice; you never dispatch it. Reach for
+     this whenever triage says you do not have what a good answer needs and the answer is sitting
+     somewhere definite — a log, a repo, a sheet. "Checking" plus a proposal beats "Checking". See
+     *When someone asks for work rather than an answer* below for the full rule.
    - **Threading.** Add `--thread` to any `reply`/`hold`/`ack`-with-text to answer *in a thread on their
      message* instead of in the main conversation. Use it when the thing you are answering is one of
      several live topics, when your answer is longer than the surrounding chatter, or when they asked

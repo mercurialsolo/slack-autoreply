@@ -9,7 +9,7 @@ Claude Code is the brain; this is the nervous system. It never writes a reply.
                 follow-up reminders, learning signals, keeps your voice samples fresh.
   inbox         queued items (for `/slack-autoreply run` when DISPATCH=none)
   show ID       everything Claude needs to compose: message, thread, triage, policy, voice
-  act ID …      Claude's decision: --action ignore|ack|hold|reply|escalate [--text …] [--sources …]
+  act ID …      Claude's decision: --action ignore|ack|hold|reply|escalate [--text …] [--sources …] [--task …]
   simulate TXT  make a pretend inbound message (nothing is sent) to dry-run the skill
   deadline      --urgency N → the phrase + time a hold should promise
   status / followups / drafts / approve / drop / review-data / build-voice / voice / done
@@ -603,6 +603,15 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
         if float(t.get("can_answer", 0.5)) < 0.5:
             out.append("note: triage says you probably do NOT have what a good answer needs — look it up, "
                        "or promise a time. Do not invent a number, date or status.")
+            # This is exactly where a proposal earns its keep, and the writer was never told so:
+            # `--task` appeared only in `act --help`, which it has no reason to run. Measured — on a
+            # "send me the list" ask it reasoned "I don't have access, so you'll need to pull it
+            # yourself" and still never reached for it.
+            if CFG["delegate_mode"] in ("shadow", "auto"):
+                out.append("      → if what is missing is a specific, read-only lookup somewhere you cannot "
+                           "reach, add --task \"<the question>\" to your act call. It proposes an agent "
+                           "investigation the owner hands over with 🤖; it never runs by itself. A hold "
+                           "carrying a proposal beats a bare hold.")
         phrase, due = hold_deadline(t["urgency"])
         out.append(f"if hold: promise '{phrase}' (due {due:%a %-I:%M%p})")
     else:

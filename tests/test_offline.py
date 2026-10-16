@@ -688,6 +688,43 @@ check("@here is left inert rather than made to blast",
 check("an already-formed mention is untouched",
       S.restore_mentions("already <@U0SRI> tagged", _look) == "already <@U0SRI> tagged")
 
+# `--task` existed, was wired, and rendered on the escalation — and fired zero times in a day of
+# real traffic. It appeared only in `act --help`, which the writer has no reason to run: not in the
+# route menu it follows, and not in what `show` prints at decision time. Measured on the real
+# writer: given "send me the list of appointments", it reasoned "I don't have access here, so
+# you'll need to pull the list yourself" and still never proposed one. Same dead-channel shape as
+# the hold note — an instruction pointing somewhere nobody reads.
+import learning as _learning
+
+
+class _FakeLedger:
+    def stats(self, **kw):
+        return _learning.Stats()
+
+    def corrections(self, limit=50):
+        return []
+
+    def share_ok(self, sender):
+        return False
+
+    def effective_mode(self, route, sender, channel, base_mode):
+        return "draft", "test"
+
+
+def _render(can_answer):
+    item = {"id": "t1", "sender": "U1", "sender_name": "Sri", "sender_handle": "sri", "text": "send me the list",
+            "channel": "C1", "channel_type": "channel", "channel_name": "#x", "created": "now", "context": "",
+            "triage": {"source": "test", "route": "hold", "confidence": 0.6, "topic": "document_request",
+                       "sensitivity": 2.0, "urgency": 3.0, "needs_context": 0.9, "asks_for_content": 0.9,
+                       "can_answer": can_answer}}
+    return S.render_item(item, _FakeLedger(), set())
+
+
+check("the writer is offered a proposal exactly where it is told it lacks the answer",
+      "--task" in _render(0.25))
+check("it is not offered when the writer can answer unaided",
+      "--task" not in _render(0.9))
+
 # `replaced` meant "a draft was pending and you replied yourself", and always scored bad. But the
 # owner answering first is the normal case for a present owner, and 4 of 15 replacements were a
 # correct bare hold they simply beat. Counting those against Solo meant no route could graduate
