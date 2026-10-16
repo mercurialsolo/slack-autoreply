@@ -1933,10 +1933,38 @@ def cmd_followups(a):
 
 
 def cmd_delegations(a):
-    """The record that decides whether this is ever allowed to run itself."""
-    if not DELEGATIONS.exists():
-        print("nothing proposed for an agent yet."); return
-    rows = [json.loads(l) for l in DELEGATIONS.read_text().splitlines() if l.strip()]
+    """The record that decides whether this is ever allowed to run itself.
+
+    It used to read only the dispatch log, so a proposal the owner never reacted to was invisible
+    and the empty case said "nothing proposed for an agent yet" — which was false, and read as
+    "the writer never offers one" when it meant "you never handed one over". Those are opposite
+    problems with opposite fixes, and the wrong one cost a day. Proposals come from the items.
+    """
+    rows = [json.loads(l) for l in DELEGATIONS.read_text().splitlines() if l.strip()] if DELEGATIONS.exists() else []
+    dispatched_items = {r.get("item") for r in rows if r.get("outcome") == "dispatched"}
+    proposed = []
+    for path in sorted(config.p("inbox").glob("*.json")):
+        try:
+            it = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - a half-written item must never break the report
+            continue
+        if it.get("simulated"):
+            continue
+        task = ((it.get("decision") or {}).get("task") or "").strip()
+        if task:
+            proposed.append((it.get("created", ""), it.get("sender_name") or "?", task, it["id"] in dispatched_items))
+    waiting = [p for p in proposed if not p[3]]
+    print(f"mode: {CFG['delegate_mode']} · {len(proposed)} proposed · {len(dispatched_items)} handed over")
+    if not proposed:
+        print("\nthe writer has not offered one yet. It proposes with `act --task`; you hand it over with 🤖.")
+        return
+    for at, who, task, done in sorted(proposed, reverse=True)[:8]:
+        print(f"\n  {at[:16]}  {'handed over' if done else 'awaiting your 🤖'}  — {who}\n    {task[:140]}")
+    if waiting:
+        print(f"\n{len(waiting)} proposal(s) never handed over. Ignoring them is a decision too — if they\n"
+              f"are not worth a tap, the writer is proposing the wrong things and that is the thing to fix.")
+    if not rows:
+        return
     by_role: dict[str, dict[str, int]] = {}
     for r in rows:
         by_role.setdefault(r.get("peer") or r.get("role", "?"), {}).setdefault(r.get("outcome", "?"), 0)
