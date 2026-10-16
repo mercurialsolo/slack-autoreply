@@ -44,7 +44,7 @@ import recall  # noqa: E402
 import voice  # noqa: E402
 from config import CFG, DELEGATE_REACTIONS, DROP_REACTIONS, OK_SUBTYPES, SEND_REACTIONS  # noqa: E402
 from followups import Followup, Followups, hold_deadline  # noqa: E402
-from learning import Ledger  # noqa: E402
+from learning import Ledger, is_bare_hold  # noqa: E402
 from triage import Policy, Triager, pick_channel, score_channel  # noqa: E402
 
 log = logging.getLogger("slackctl")
@@ -1052,12 +1052,18 @@ class Daemon(Slack):
                 continue
             if item["channel"] != channel or (item.get("reply_thread_ts") and item["reply_thread_ts"] != thread_ts):
                 continue
-            item["outcome"] = {**item.get("outcome", {}), "status": "replaced", "actual": text, "at": now_iso()}
+            # A bare hold you answered first is not a bad draft — you were simply there. Counting
+            # it against Solo punished it for you being responsive, and meant no route could ever
+            # graduate while you were active. A draft with substance that you rewrote still counts.
+            drafted = item["decision"].get("text")
+            outcome = "overtaken" if is_bare_hold(drafted) else "replaced"
+            item["outcome"] = {**item.get("outcome", {}), "status": outcome, "actual": text, "at": now_iso()}
             save_item(item)
             self.state.update(lambda d: d["pending"].pop(draft_ts, None))
-            self.ledger.record(item=item, outcome="replaced", correction={"draft": item["decision"].get("text"), "actual": text})
+            self.ledger.record(item=item, outcome=outcome, correction={"draft": drafted, "actual": text})
             try:
-                self.console_update(draft_ts, f"↩️ You replied yourself to {item['sender_name']} — learned from it\n{quote(item['decision'].get('text', ''))}")
+                verb = "answered first" if outcome == "overtaken" else "replaced the draft"
+                self.console_update(draft_ts, f"↩️ You {verb} to {item['sender_name']} — learned from it\n{quote(item['decision'].get('text', ''))}")
             except Exception:
                 pass
             log.info("draft for %s replaced by your own reply", item["sender_name"])

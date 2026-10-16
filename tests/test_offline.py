@@ -688,6 +688,33 @@ check("@here is left inert rather than made to blast",
 check("an already-formed mention is untouched",
       S.restore_mentions("already <@U0SRI> tagged", _look) == "already <@U0SRI> tagged")
 
+# `replaced` meant "a draft was pending and you replied yourself", and always scored bad. But the
+# owner answering first is the normal case for a present owner, and 4 of 15 replacements were a
+# correct bare hold they simply beat. Counting those against Solo meant no route could graduate
+# while the owner was active — the metric punished Solo for the owner being responsive.
+import learning as _L
+
+check("a bare hold the owner beat is not scored against Solo",
+      _L.is_bare_hold("Checking") and _L.is_bare_hold("Yeah am on it") and _L.is_bare_hold("Ok"))
+check("a hold that invented a time is not bare — that one really was replaced",
+      not _L.is_bare_hold("Checking - will update by 11am"))
+check("a draft with substance is not a hold",
+      not _L.is_bare_hold("Yes please") and not _L.is_bare_hold(""))
+check("overtaken is neutral: it neither rewards nor punishes",
+      "overtaken" not in _L.GOOD and "overtaken" not in _L.BAD)
+
+
+def _overtaken_is_excluded():
+    led = _L.Ledger.__new__(_L.Ledger)
+    led.rows = [{"route": "reply", "sender": "U1", "channel": None, "good": None, "outcome": "overtaken"},
+                {"route": "reply", "sender": "U1", "channel": None, "good": True, "outcome": "approved"}]
+    st = led.stats(route="reply", sender="U1")
+    return st.n == 1 and st.good == 1
+
+
+check("an overtaken draft does not drag the trust score down",
+      _overtaken_is_excluded())
+
 # The owner sends in beats — 53% of 305 real messages are part of a burst, median 14s apart, most
 # often a short beat then the substance ("Yes please" / "go ahead"). The writer could only ever
 # produce one message, so that shape was unreachable no matter what VOICE.md said.

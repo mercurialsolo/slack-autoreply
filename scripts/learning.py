@@ -4,11 +4,12 @@ Signals (recorded by the daemon as they happen):
   good   approved      you ✅'d a draft unchanged
          clean         auto-sent and nothing bad happened for OBSERVE_HOURS
   bad    dropped       you ❌'d a draft
-         replaced      a draft was pending and you replied yourself instead
+         replaced      a draft with real content was pending and you wrote something else
          corrected     you edited a message it had sent as you
          deleted       you deleted a message it had sent as you
          missed        it chose "ignore" and you replied to that message yourself within 2h
-  neutral expired      a draft sat for DRAFT_EXPIRE_HOURS
+  neutral overtaken    a bare holding draft was pending and you simply answered first
+          expired      a draft sat for DRAFT_EXPIRE_HOURS
           followed_up  you sent another message in that conversation soon after an auto-reply
 
 Every bad signal that has a before/after is also stored as a correction pair,
@@ -24,6 +25,7 @@ reaction waits like everything else.
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -31,6 +33,28 @@ from pathlib import Path
 
 GOOD = {"approved", "clean"}
 BAD = {"dropped", "replaced", "corrected", "deleted", "missed"}
+
+# VOICE.md's autopilot acks plus the bare agreements. A draft that is *only* one of these is a
+# holding line: it says "I am looking at this" and commits to nothing. If the owner then answers
+# the person themselves, the hold was not wrong — they were simply there first, which is the
+# normal case for a present owner. Scoring that as a failure punishes Solo for the owner being
+# responsive, and means no route can ever graduate while the owner is active. So it is neutral.
+#
+# "Checking - will update by 11am" deliberately does NOT match: the whole string must be the
+# hold. A draft that added a time, or any substance, and was then replaced really was replaced.
+BARE_HOLD = re.compile(
+    r"^\W*(?:"
+    r"(?:yeah|yes|ok|okay|sure|noted)"                      # a bare agreement, nothing more
+    r"|(?:(?:yeah|yes|ok)\W+)?(?:(?:am|i'?m)\s+)?"          # optional "Yeah " / "Am " lead-in
+    r"(?:checking|looking|on it|will check|will do|will revert|working on it)"
+    r")\W*$",
+    re.I,
+)
+
+
+def is_bare_hold(text: str | None) -> bool:
+    """Was this draft nothing but a holding line?"""
+    return bool(BARE_HOLD.match((text or "").strip()))
 
 
 @dataclass
