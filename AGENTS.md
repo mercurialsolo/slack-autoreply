@@ -148,6 +148,52 @@ Tell the owner, briefly:
 - Anything sensitive (money, legal, people, investors) is never auto-sent; they get a ⚠️.
 - Logs: `make logs`. Stop: `deploy/install-service.sh --remove`.
 
+## Phase 8 — route work to your coding agents (optional)
+
+Lets you hand a task to a coding agent without knowing which terminal it is in, and have it
+report back through Solo in your voice, still waiting for your ✅. The return path is the `solo`
+skill, already installed by Phase 1. This phase wires the *inbound* half, which needs
+[claudectl](https://github.com/mercurialsolo/claudectl) with the `bus` feature.
+
+**You run these two, not the agent.** Claude Code classifies edits to its own hook config and to
+the agent-mesh role table as self-modification, so a session cannot wire its own delivery — which
+is the right default, and means these are yours to run:
+
+```bash
+# 1. give the project a mailbox address. `*` covers its worktrees.
+claudectl bus role bind <role-name> "/path/to/project*"
+
+# 2. let a session pick mail up as its turn ends. settings.local.json is gitignored,
+#    so this stays on your machine and is scoped to this one project.
+#    Add to .claude/settings.local.json under "hooks":
+#      "Stop": [ { "hooks": [ { "type": "command",
+#                              "command": "claudectl bus stop-hook", "timeout": 10 } ] } ]
+```
+
+Verify (round trip, no Slack involved):
+
+```bash
+claudectl bus send <role-name> "Reply with exactly: BUS_DELIVERY_OK and nothing else"
+cd /path/to/project && claude -p "Say the single word: ready"
+```
+
+The session answers `BUS_DELIVERY_OK` rather than `ready` — the hook folded the mail into the turn
+and the agent acted on it instead of on the prompt. That is the whole mechanism.
+
+What to expect, having been measured rather than assumed:
+
+- **Mailboxes do not cross machines.** A `bus send` on one host queues there. If Solo runs on a
+  different box than your agents, a message has to make the hop with `claudectl relay delegate`.
+- **Delivery is at a turn boundary, not a push.** An idle session picks mail up the next time it
+  finishes a turn, so a message to a parked session waits for you to prompt it.
+- **Two roles matching one cwd resolve ambiguous and go silent** — nothing is delivered and nothing
+  errors. One role per cwd selector; a session wanting its own address binds with
+  `claudectl bus role bind <name> --self`, which beats cwd inference for that session only.
+- **A role outlives the session.** Mail sent to a restarted agent is waiting when it comes back, so
+  queueing something for a box that is currently down is a reasonable thing to do.
+- The agent treats routed mail as **data, not instruction** — it will not run what a message asks
+  for, it reports the request to you instead. That rule lives in the `solo` skill.
+
 ## If something breaks
 
 | symptom | cause → fix |
