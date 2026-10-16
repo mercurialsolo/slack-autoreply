@@ -1434,14 +1434,26 @@ def cmd_resume(a):
     print("resumed — Solo is drafting again.")
 
 
+# Topics where going and looking could settle it. Not credentials or decisions: those are the
+# owner's whatever the confidence, and an agent must never be pointed at them.
+LOOKUP_TOPICS = {"action_request", "status_request", "document_request"}
+
+
 def proposal_uptake(days: int = 14) -> str | None:
     """How often the writer proposed an agent when it said it could not answer.
 
-    A capability can be wired, documented and still never used — `--task` shipped working and fired
-    zero times in a day of traffic, which no test caught because every test passed. A bare count of
+    A capability can be wired, documented and still barely used — `--task` shipped working and was
+    reached for once in 30, which no test caught because every test passed. A bare count of
     proposals is not the signal either: zero is correct when nothing warranted one. What matters is
-    the conversion — chances taken. A chance is a hold or escalate where triage said the writer
-    probably did not have what a good answer needs, which is exactly when a lookup would help.
+    the conversion — chances taken.
+
+    A chance is a hold or escalate where triage said the writer could not answer AND the topic is
+    one a lookup could settle. That second half was learned by sampling: "can_answer < 0.5" alone
+    counted an apology about a rejected ACH, a purchase request and a statement about social
+    selling, none of which any agent can help with, and a denominator half made of noise is an
+    alarm that cries wolf. Credentials and decisions are excluded on purpose — those are never an
+    agent's to touch, whatever the confidence. A proposal that was actually made always counts,
+    whatever its topic, so the one real use is never invisible.
     """
     if CFG["delegate_mode"] not in ("shadow", "auto"):
         return None
@@ -1457,10 +1469,13 @@ def proposal_uptake(days: int = 14) -> str | None:
         dec, t = it.get("decision") or {}, it.get("triage") or {}
         if dec.get("action") not in ("hold", "escalate") or not t:
             continue
-        if float(t.get("can_answer", 1.0)) >= 0.5:
+        proposed = bool((dec.get("task") or "").strip())
+        lookup_would_help = (float(t.get("can_answer", 1.0)) < 0.5
+                             and t.get("topic") in LOOKUP_TOPICS)
+        if not (lookup_would_help or proposed):
             continue
         chances += 1
-        taken += 1 if (dec.get("task") or "").strip() else 0
+        taken += 1 if proposed else 0
     if not chances:
         return f"agent proposals: no chances in {days} days (a chance is a hold/escalate triage said you could not answer)"
     flag = "" if taken else "  ← never once, with chances available"

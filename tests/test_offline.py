@@ -698,11 +698,12 @@ def _uptake(cases):
     items = TMP / "uptake"
     shutil.rmtree(items, ignore_errors=True)
     items.mkdir(parents=True, exist_ok=True)
-    for n, (action, can_answer, task) in enumerate(cases):
+    for n, (action, can_answer, task, *topic) in enumerate(cases):
         (items / f"i{n}.json").write_text(json.dumps({
             "id": f"i{n}", "created": datetime.now().isoformat(timespec="seconds"),
             "decision": {"action": action, "task": task},
-            "triage": {"can_answer": can_answer}}), encoding="utf-8")
+            "triage": {"can_answer": can_answer, "topic": topic[0] if topic else "action_request"}}),
+            encoding="utf-8")
     real = S.config.p
     S.config.p = lambda name: items if name == "inbox" else real(name)
     try:
@@ -719,6 +720,12 @@ check("a proposal that was made counts as a chance taken",
       "1/2" in _some and "never once" not in _some, _some)
 check("a message the writer could answer itself is not counted as a chance",
       "0/2" in _uptake([("hold", 0.2, ""), ("hold", 0.1, ""), ("reply", 0.1, "")]))
+check("a topic no lookup could settle is not a chance \u2014 an apology is not agent work",
+      "0/1" in _uptake([("hold", 0.2, "", "action_request"), ("escalate", 0.1, "", "problem_report")]))
+check("credentials are never an agent's, however unanswerable",
+      "0/1" in _uptake([("hold", 0.2, "", "status_request"), ("escalate", 0.1, "", "credentials_access")]))
+check("a proposal that was made counts even on an off-list topic",
+      "1/1" in _uptake([("escalate", 0.1, "go read the logs", "problem_report")]))
 
 # Three bugs in two days shared one shape: the mechanism worked, and whoever had to use it never
 # met it. A `hold` note rendered only on the escalate branch, so the owner never read it. `⏎` sat
