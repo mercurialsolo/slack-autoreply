@@ -52,6 +52,11 @@ Make yourself addressable, once, from inside your session:
 claudectl bus role bind <short-name> --self
 ```
 
+If your runtime refuses that — binding a role edits the agent mesh, and some sandboxes class it
+with changing your own configuration — do not work around it. Tell the owner the name you would
+have used and carry on; they can bind it in one command. You stay reachable either way, because a
+role bound to the project's directory already covers you.
+
 Then pick up what is waiting whenever you finish a piece of work:
 
 ```
