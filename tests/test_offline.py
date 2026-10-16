@@ -688,6 +688,65 @@ check("@here is left inert rather than made to blast",
 check("an already-formed mention is untouched",
       S.restore_mentions("already <@U0SRI> tagged", _look) == "already <@U0SRI> tagged")
 
+# The guard above only catches an option shipped undocumented. It would not have caught this one
+# once the skill mentioned it — "the writer can find it and still never uses it" is not a thing a
+# unit test can see. That needs a number from live traffic: of the moments where a proposal was the
+# right move, how many were taken. Zero proposals is fine when nothing warranted one; zero out of
+# twelve is the alarm.
+def _uptake(cases):
+    import importlib
+    items = TMP / "uptake"
+    shutil.rmtree(items, ignore_errors=True)
+    items.mkdir(parents=True, exist_ok=True)
+    for n, (action, can_answer, task) in enumerate(cases):
+        (items / f"i{n}.json").write_text(json.dumps({
+            "id": f"i{n}", "created": datetime.now().isoformat(timespec="seconds"),
+            "decision": {"action": action, "task": task},
+            "triage": {"can_answer": can_answer}}), encoding="utf-8")
+    real = S.config.p
+    S.config.p = lambda name: items if name == "inbox" else real(name)
+    try:
+        return S.proposal_uptake(14)
+    finally:
+        S.config.p = real
+
+
+_none = _uptake([("hold", 0.2, ""), ("escalate", 0.1, ""), ("hold", 0.9, "")])
+check("a chance missed every time is called out, not reported as a clean zero",
+      "0/2" in _none and "never once" in _none, _none)
+_some = _uptake([("hold", 0.2, "go read the logs"), ("escalate", 0.1, "")])
+check("a proposal that was made counts as a chance taken",
+      "1/2" in _some and "never once" not in _some, _some)
+check("a message the writer could answer itself is not counted as a chance",
+      "0/2" in _uptake([("hold", 0.2, ""), ("hold", 0.1, ""), ("reply", 0.1, "")]))
+
+# Three bugs in two days shared one shape: the mechanism worked, and whoever had to use it never
+# met it. A `hold` note rendered only on the escalate branch, so the owner never read it. `⏎` sat
+# in the worked examples with no rule and no way to send two messages. `--task` lived only in
+# `act --help`, which the writer has no reason to run. Each had a test for the part that worked
+# and none for "can the actor find this" — so each shipped green and did nothing.
+#
+# This is the standing guard for the writer's half: every option it may pass to `act` has to be
+# named in the skill it actually follows, or listed below with the reason it is not the writer's
+# to reach for. Adding one without doing either fails here, at commit time.
+import re as _re
+
+_ACT_NOT_THE_WRITERS = {
+    "--help": "argparse's own",
+    "--text-file": "the daemon's path for text too long to pass inline; the writer uses --text",
+    "--urgency": "comes from triage, never chosen by the writer",
+    "--role": "only meaningful beside --task, which the skill does document; defaults to DELEGATE_ROLE",
+}
+_act_help = subprocess.run([sys.executable, str(SCRIPTS / "slackctl.py"), "act", "--help"],
+                           capture_output=True, text=True, env=dict(os.environ)).stdout
+_act_opts = set(_re.findall(r"(--[a-z][a-z-]+)", _act_help))
+_skill_md = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+_unreachable = sorted(o for o in _act_opts if o not in _ACT_NOT_THE_WRITERS and o not in _skill_md)
+
+check("the act options are discoverable at all", len(_act_opts) >= 8, f"parsed: {sorted(_act_opts)}")
+check("every act option the writer may use is named in the skill it follows",
+      not _unreachable, f"reachable only from --help: {_unreachable}")
+
 # `--task` existed, was wired, and rendered on the escalation — and fired zero times in a day of
 # real traffic. It appeared only in `act --help`, which the writer has no reason to run: not in the
 # route menu it follows, and not in what `show` prints at decision time. Measured on the real

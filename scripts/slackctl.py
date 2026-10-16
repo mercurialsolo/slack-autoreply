@@ -1434,6 +1434,39 @@ def cmd_resume(a):
     print("resumed — Solo is drafting again.")
 
 
+def proposal_uptake(days: int = 14) -> str | None:
+    """How often the writer proposed an agent when it said it could not answer.
+
+    A capability can be wired, documented and still never used — `--task` shipped working and fired
+    zero times in a day of traffic, which no test caught because every test passed. A bare count of
+    proposals is not the signal either: zero is correct when nothing warranted one. What matters is
+    the conversion — chances taken. A chance is a hold or escalate where triage said the writer
+    probably did not have what a good answer needs, which is exactly when a lookup would help.
+    """
+    if CFG["delegate_mode"] not in ("shadow", "auto"):
+        return None
+    since = datetime.now() - timedelta(days=days)
+    chances = taken = 0
+    for path in config.p("inbox").glob("*.json"):
+        try:
+            it = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - a half-written item must never break status
+            continue
+        if it.get("simulated") or datetime.fromisoformat(it.get("created", "1970-01-01")) < since:
+            continue
+        dec, t = it.get("decision") or {}, it.get("triage") or {}
+        if dec.get("action") not in ("hold", "escalate") or not t:
+            continue
+        if float(t.get("can_answer", 1.0)) >= 0.5:
+            continue
+        chances += 1
+        taken += 1 if (dec.get("task") or "").strip() else 0
+    if not chances:
+        return f"agent proposals: no chances in {days} days (a chance is a hold/escalate triage said you could not answer)"
+    flag = "" if taken else "  ← never once, with chances available"
+    return f"agent proposals: {taken}/{chances} chances taken in {days} days{flag}"
+
+
 def cmd_status(a):
     s = Slack()
     ledger, llm = load_services()
@@ -1452,6 +1485,8 @@ def cmd_status(a):
           f"sessions: {len(st.get('sessions', {}))} live")
     print(f"queued items: {len(list_items({'queued'}))} · handling: {len(list_items({'handling'}))} · pending drafts: {len(st.get('pending', {}))} · open follow-ups: {len(fus.open())}")
     print(f"context dirs: {', '.join(CFG['context_dirs']) or '(none — set CONTEXT_DIRS)'} · mcp: {', '.join(discover_mcp_names(CFG['claude_cwd'], CFG['mcp_allow'])) or '(none found)'}")
+    if (uptake := proposal_uptake(14)) is not None:
+        print(uptake)
     print()
     print(ledger.scorecard(14))
 
