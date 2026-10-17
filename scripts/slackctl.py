@@ -188,6 +188,25 @@ def record_delegation(**row) -> None:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def withhold_report(slack: "Slack", intent: str, frm: str, why: str, re_item: str | None = None):
+    """Solo will not place this report. Tell the owner anyway, then fail.
+
+    Refusing to choose a room is right. Refusing and going quiet is not: the first report ever to
+    come back through the dispatch loop was withheld at 3.5/5 for naming contact record ids, and
+    afterwards it existed only in a relay task record the owner has no reason to open. `delegations`
+    said "handed over, nothing back yet", which was true and misleading — a report had come back
+    and been refused. The gate is about which room hears it, and the console is not a room; it is
+    where drafts already wait for a ✅.
+    """
+    slack.console_post(f"🤐 *A report from `{frm}` was not placed* — {why}\n"
+                       f"_nothing went to anyone. It is here for you to place, rewrite or drop._\n"
+                       f"{quote(intent[:1200])}")
+    if re_item:
+        record_delegation(item=re_item, role=frm, outcome="report_refused",
+                          report=intent[:200], error=why[:200])
+    sys.exit(f"not placed: {why}\n   it is in your Solo DM instead — nothing was sent to anyone")
+
+
 def dispatched_item_ids() -> set[str]:
     """Items an agent was actually handed work on. `--re` is honoured for these and no others."""
     out: set[str] = set()
@@ -1632,7 +1651,7 @@ def cmd_say(a):
         # agent's doing, not about where it goes, which is now settled.
         sens = sensitivity_of(a.intent)
         if sens >= 3.5:
-            sys.exit(f"this reads as sensitive ({sens:.1f}/5) — not placing it. Tell the owner directly.")
+            withhold_report(s, a.intent, a.from_, f"it reads as sensitive ({sens:.1f}/5)", re_item)
         kind, tid, channel = ("people" if tgt["channel_type"] == "im" else "channels"), tgt["sender"], tgt["channel"]
         name = tgt["channel_name"]
         routed = f"back to {tgt['sender_name']}, where it was asked ({re_item})"
@@ -1655,16 +1674,14 @@ def cmd_say(a):
         # 3.5, not 4: "renegotiating the contract value and may drop the price" scores 3.9, and a
         # hard 4 let it straight through. Near-misses on a leak gate should ask, not pass.
         if sens >= 3.5:
-            sys.exit(f"this reads as sensitive ({sens:.1f}/5) — not placing it. Tell the owner, "
-                     f"or pass --to if you are certain.")
+            withhold_report(s, a.intent, a.from_, f"it reads as sensitive ({sens:.1f}/5)")
         if sens >= 2.5 and meta.get("exposure", 0) >= 3:
-            sys.exit(f"sensitive-ish ({sens:.1f}/5) for a channel this exposed "
-                     f"(#{meta.get('name')} at {meta['exposure']:.1f}/5) — the owner should place this.")
+            withhold_report(s, a.intent, a.from_, f"it is sensitive-ish ({sens:.1f}/5) for a room this "
+                            f"exposed (#{meta.get('name')} at {meta['exposure']:.1f}/5)")
         if not cid or conf < CHANNEL_MIN_CONFIDENCE:
-            sys.exit(f"could not place this confidently ({conf:.2f}) — tell the owner, or pass --to.\n"
-                     f"   best guess was: {why[:120]}\n"
-                     f"   routing gets reliable once each channel's **For:** line is filled in "
-                     f"({recall.CHANNELS_DIR}) — learned keywords alone are a weak signal.")
+            withhold_report(s, a.intent, a.from_, f"Solo could not place it confidently ({conf:.2f}). "
+                            f"Best guess was: {why[:120]}. Placement gets reliable once each channel's "
+                            f"**For:** line is filled in ({recall.CHANNELS_DIR})")
         kind, tid, channel = "channels", cid, cid
         name = cat[cid].split(".", 1)[0].strip().lstrip("#")
         routed = f"Solo placed it in #{name} ({conf:.2f})"

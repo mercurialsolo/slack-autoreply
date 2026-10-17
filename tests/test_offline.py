@@ -770,6 +770,40 @@ check("a report Solo could not compose is not recorded as having come back",
 check("and the failure is recorded, rather than the task just going quiet",
       any(r.get("outcome") == "report_failed" for r in _no_draft))
 
+# The first report ever to come back through this loop was refused at 3.5/5 for naming HubSpot
+# contact record ids — correctly, and then silently. It survived only in a relay task record the
+# owner has no reason to open, while `delegations` read "handed over, nothing back yet". Declining
+# to pick a room is the gate working; losing the report is not.
+def _withheld():
+    src3 = msg(d, U, D, "3000.000603", "did the testers ever reply?")
+    S.record_delegation(item=src3, peer="somepeer", role="scout", task="check the threads",
+                        outcome="dispatched", counterpart="Priya")
+    real, real_console = S.sensitivity_of, S.Slack.console_post
+    seen = []
+    S.sensitivity_of = lambda text: 4.2
+    S.Slack.console_post = lambda self, text: (seen.append(text), "1.0")[1]
+    try:
+        S.cmd_say(_say_args("Danielle's record 549576801980 is opted out", re=src3))
+    except SystemExit as e:
+        err = str(e)
+    finally:
+        S.sensitivity_of, S.Slack.console_post = real, real_console
+    rows = [json.loads(l) for l in S.DELEGATIONS.read_text().splitlines() if l.strip()]
+    return err, [r for r in rows if r.get("item") == src3], seen
+
+
+_err, _refused_rows, _console = _withheld()
+check("a report Solo will not place still reaches the owner",
+      "in your Solo DM" in _err and "nothing was sent" in _err)
+check("the withheld report is recorded as refused, not as never having come back",
+      any(r.get("outcome") == "report_refused" for r in _refused_rows))
+check("a withheld report is never recorded as reported back",
+      not any(r.get("outcome") == "reported" for r in _refused_rows))
+check("the owner is handed the text itself, not just told one exists",
+      any("549576801980" in t for t in _console))
+check("and is told plainly that nobody else received it",
+      any("nothing went to anyone" in t for t in _console))
+
 # Inbound <@U123> is flattened to "@Sri" for the writer to read, so a draft that mirrored the name
 # it had just read went out as literal grey text that pinged nobody. Slack renders a mention only
 # from <@ID> and will not linkify a bare @name posted through the API.
