@@ -1040,6 +1040,27 @@ def claude_command(item: dict, session: tuple[str, bool] | None = None, prompt: 
 PROBE_PROMPT = "reply with exactly: pong"
 
 
+def writer_logged_in() -> tuple[bool, str]:
+    """Claude Code's own account report. Free, so it can run every tick.
+
+    This is the one cheap check that tells the truth. The credentials *file* does not: the laptop
+    has none at all and works, because macOS keeps the session in the Keychain — so reading the
+    file would have called a working machine broken. `auth status` said `authMethod: none` on the
+    node while it was down and `loggedIn: true` once it was back.
+
+    It cannot see a rate limit, only the login. That is what the paid probe is for.
+    """
+    try:
+        p = subprocess.run([CFG["claude_bin"], "auth", "status"], capture_output=True, text=True, timeout=30)
+        info = json.loads((p.stdout or "").strip() or "{}")
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as e:
+        # Unreadable is not the same as logged out — say so rather than crying wolf.
+        return True, f"could not read auth status ({type(e).__name__})"
+    if info.get("loggedIn") is False or info.get("authMethod") in (None, "none"):
+        return False, "Not logged in to Claude Code — run `claude /login` on this machine"
+    return True, ""
+
+
 def writer_healthy(result: dict | None, err: str = "") -> tuple[bool, str]:
     """Did a writer run actually reach the model? Returns (ok, why not).
 
@@ -1543,17 +1564,21 @@ class Daemon(Slack):
         edge-triggered — once when it breaks, once when it comes back, never per tick.
         """
         mins = CFG["health_probe_minutes"]
-        if mins <= 0 or self.dispatch != "claude" or self.state.pause_info() is not None:
+        if self.dispatch != "claude" or self.state.pause_info() is not None:
             return
         if not self._probe_lock.acquire(blocking=False):
             return
         try:
             h = self.state.read().get("health") or {}
-            last = max(h.get("last_ok") or "", h.get("last_probe") or "")
-            if last and datetime.now() - datetime.fromisoformat(last) < timedelta(minutes=mins):
-                return
-            _, result, err = _run_claude_once({"id": "PROBE"}, (str(uuid.uuid4()), False), prompt=PROBE_PROMPT)
-            ok, why = writer_healthy(result, err)
+            ok, why = writer_logged_in()
+            if ok and mins > 0:
+                last = max(h.get("last_ok") or "", h.get("last_probe") or "")
+                if last and datetime.now() - datetime.fromisoformat(last) < timedelta(minutes=mins):
+                    return
+                _, result, err = _run_claude_once({"id": "PROBE"}, (str(uuid.uuid4()), False), prompt=PROBE_PROMPT)
+                ok, why = writer_healthy(result, err)
+            elif ok and h.get("ok", True):
+                return   # logged in, nothing changed, and the paid probe is off — say nothing
             was_ok = h.get("ok", True)
             self.state.update(lambda d: d.update(health={
                 "ok": ok, "why": why, "last_probe": now_iso(),

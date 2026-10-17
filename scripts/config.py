@@ -121,9 +121,12 @@ CFG = dict(
     claude_max_turns=env_int("CLAUDE_MAX_TURNS", 25),
     claude_timeout=env_int("CLAUDE_TIMEOUT_SECONDS", 600),
     # A logged-out or rate-limited node is a *standing* failure: nothing alerts until a real
-    # message has already failed on it. The probe closes that gap. It is idle-gated, so a busy
-    # day spends nothing. 0 disables it.
-    health_probe_minutes=env_int("HEALTH_PROBE_MINUTES", 30),
+    # message has already failed on it. Being logged out is caught for free by `claude auth
+    # status`, which runs every tick. This is the paid half — a real one-turn draft, which is the
+    # only thing that also sees a rate limit — and it is off by default because one costs ~$0.21
+    # (cache creation on a 1M-context model), so watching an idle night would cost more than the
+    # night's work. Set it to e.g. 360 if you want it.
+    health_probe_minutes=env_int("HEALTH_PROBE_MINUTES", 0),
     dispatch_parallel=env_int("DISPATCH_PARALLEL", 2),
     dispatch_use_api_key=env_bool("DISPATCH_USE_API_KEY", False),
     session_continuity=env_bool("SESSION_CONTINUITY", True),

@@ -1067,19 +1067,20 @@ DOWN = {"type": "result", "is_error": True, "result": "Not logged in · Please r
 UP = {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": 0.0004}
 
 
-def _probe(result, health=None, mins=30, dispatch="claude"):
+def _probe(result, health=None, mins=30, dispatch="claude", logged_in=(True, "")):
     """Run one probe against a scripted writer outcome → (notifications, health, prompts run)."""
     calls, notes = [], []
-    real_run, real_notify = S._run_claude_once, S.Daemon.notify
+    real_run, real_notify, real_auth = S._run_claude_once, S.Daemon.notify, S.writer_logged_in
     S._run_claude_once = lambda item, session, prompt=None: (calls.append(prompt), ([], result, ""))[1]
     S.Daemon.notify = lambda self, text: notes.append(text)
+    S.writer_logged_in = lambda: logged_in
     old_dispatch, old_mins = d.dispatch, S.CFG["health_probe_minutes"]
     d.dispatch, S.CFG["health_probe_minutes"] = dispatch, mins
     d.state.update(lambda x: x.update(health=health or {}))
     try:
         d.probe_writer()
     finally:
-        S._run_claude_once, S.Daemon.notify = real_run, real_notify
+        S._run_claude_once, S.Daemon.notify, S.writer_logged_in = real_run, real_notify, real_auth
         d.dispatch, S.CFG["health_probe_minutes"] = old_dispatch, old_mins
     return notes, (d.state.read().get("health") or {}), calls
 
@@ -1104,7 +1105,31 @@ check("and recovery stamps a fresh last_ok", _health3["ok"] and _health3["last_o
 _, _, _calls = _probe(UP, health={"ok": True, "last_ok": S.now_iso()})
 check("a writer that drafted just now is not probed again", not _calls)
 _, _, _calls0 = _probe(DOWN, mins=0)
-check("HEALTH_PROBE_MINUTES=0 switches the probe off entirely", not _calls0)
+check("HEALTH_PROBE_MINUTES=0 switches off the paid probe, which costs ~$0.21 a go", not _calls0)
+
+# Being logged out is the failure that actually happened, twice, and `claude auth status` reports
+# it for nothing — so that half runs every tick whether or not the paid probe is on.
+_lo_notes, _lo_health, _lo_calls = _probe(UP, mins=0, logged_in=(False, "Not logged in to Claude Code"))
+check("a logged-out node is caught by the free check, with the paid probe off",
+      len(_lo_notes) == 1 and "cannot draft" in _lo_notes[0] and not _lo_health["ok"])
+check("and catching it that way costs no model call at all", not _lo_calls)
+_up_notes, _, _ = _probe(UP, health={"ok": False, "why": "Not logged in"}, mins=0)
+check("logging back in is noticed for free too", len(_up_notes) == 1 and "can draft again" in _up_notes[0])
+_quiet, _, _ = _probe(UP, health={"ok": True}, mins=0)
+check("and a healthy node stays quiet every five minutes forever", not _quiet)
+
+# An auth check that cannot be read is not evidence of being logged out. The credentials *file*
+# would have made exactly that mistake — the laptop has none and works, via the Keychain.
+def _auth_unreadable():
+    real = S.CFG["claude_bin"]
+    S.CFG["claude_bin"] = "/nonexistent-claude"
+    try:
+        return S.writer_logged_in()
+    finally:
+        S.CFG["claude_bin"] = real
+
+
+check("an unreadable auth check does not cry wolf", _auth_unreadable()[0])
 _, _, _calls_n = _probe(DOWN, dispatch="none")
 check("and DISPATCH=none has no writer to probe", not _calls_n)
 
