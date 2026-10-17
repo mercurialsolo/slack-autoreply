@@ -2122,6 +2122,25 @@ def cmd_drop(a):
     print(drop_draft(s, load_item(a.item), ledger, State(), _find_pending(a.item)))
 
 
+def cmd_dispatch(a):
+    """The CLI's 🤖 — hand a proposed investigation to an agent.
+
+    ✅ and ❌ have had `approve` and `drop` from the start; 🤖 had nothing, so the only way to hand
+    work over was to be looking at Slack on a phone. A gate the owner cannot reach from a terminal
+    does not get respected, it gets worked around — and the point of this one is that the record
+    of who handed what over is complete.
+    """
+    if CFG["delegate_mode"] not in ("shadow", "auto"):
+        sys.exit(f"DELEGATE_MODE={CFG['delegate_mode']} — handing work to an agent is switched off")
+    item = load_item(a.item)
+    msg = dispatch_task(item, item.get("sender_name", "someone"), describe_where(item))
+    print(msg)
+    Slack().notify(f"🤖 {msg}")
+    # The record decides whether this worked, not the wording of the message.
+    if a.item not in dispatched_item_ids():
+        sys.exit(1)
+
+
 def _slack_and_services():
     s = Slack()
     ledger, _ = load_services()
@@ -2208,8 +2227,8 @@ def cmd_review_data(a):
 # `act`, which records a decision without executing it.
 # The writer proposes an investigation with `act --task`; it may not dispatch one, nor read the
 # record of what the owner has handed over.
-DISPATCH_FORBIDDEN = frozenset({"approve", "drop", "pause", "resume", "listen", "done", "build-voice",
-                                "delegations"})
+DISPATCH_FORBIDDEN = frozenset({"approve", "drop", "dispatch", "pause", "resume", "listen", "done",
+                                "build-voice", "delegations"})
 
 
 def main():
@@ -2231,6 +2250,9 @@ def main():
     p = sub.add_parser("simulate"); p.add_argument("text"); p.add_argument("--from", dest="sender", default="Sam"); p.add_argument("--channel-type", default="im", choices=["im", "mpim", "channel", "group"]); p.add_argument("--channel-name"); p.set_defaults(fn=cmd_simulate)
     p = sub.add_parser("delegations", help="what Solo proposed for agents, and what you did with it")
     p.set_defaults(fn=cmd_delegations)
+    p = sub.add_parser("dispatch", help="hand a proposed investigation to an agent — the CLI's 🤖")
+    p.add_argument("item", help="inbox item id, as `delegations` or `inbox` prints it")
+    p.set_defaults(fn=cmd_dispatch)
     p = sub.add_parser("deadline"); p.add_argument("--urgency", type=float, required=True); p.set_defaults(fn=cmd_deadline)
     p = sub.add_parser("act"); p.add_argument("item"); p.add_argument("--action", required=True, choices=["ignore", "ack", "hold", "reply", "escalate"])
     p.add_argument("--text", help="message text; use \\n for new lines"); p.add_argument("--text-file"); p.add_argument("--sources", help="comma list of where you looked: fs,notion,drive,github,calendar,web …")

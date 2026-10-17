@@ -250,6 +250,12 @@ check("the agent can still record a decision and research",
 _env = dict(os.environ); _env["AUTOREPLY_DISPATCH"] = "1"
 _r = subprocess.run([sys.executable, str(SCRIPTS / "slackctl.py"), "approve", "x"], capture_output=True, text=True, env=_env)
 check("approve is refused in a dispatched run", _r.returncode != 0 and "refused" in (_r.stdout + _r.stderr))
+# 🤖 had no terminal equivalent while ✅ and ❌ did, so handing work over meant being in Slack.
+# It is gated the same way: the writer that proposes an investigation may not hand itself one.
+_rd = subprocess.run([sys.executable, str(SCRIPTS / "slackctl.py"), "dispatch", "x"],
+                     capture_output=True, text=True, env=_env)
+check("dispatch is refused in a dispatched run too",
+      _rd.returncode != 0 and "refused" in (_rd.stdout + _rd.stderr))
 check("CONTEXT_MCP_ALLOW=none grants no mcp servers", S.discover_mcp_names(None, ["none"]) == [])
 
 # Slack cannot badge a self-DM that holds only your own messages (unread_count_display excludes
