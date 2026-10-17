@@ -894,6 +894,55 @@ def discover_mcp_names(cwd: str | None, allow: list[str]) -> list[str]:
     return sorted(names)
 
 
+def mcp_config_for(cwd: str | None, allow: list[str]) -> tuple[list[str], Path | None]:
+    """(server names, a file holding only those definitions) for use with --strict-mcp-config.
+
+    `--allowedTools` is a pre-approval list, not a boundary. On 2026-10-15, answering Sri's "any of
+    the 15 accounts being warmed up ready for deployment?" (item C0BV5ECCFFT-1792079120_386789),
+    the writer used `ToolSearch` and then `mcp__claude_ai_Google_Drive__read_file_content` — with
+    CONTEXT_MCP_ALLOW=deepwiki, and with neither tool in the allowlist. Nothing was denied because
+    nothing was ever denying: `--permission-mode dontAsk` plus whatever the install has configured
+    is the real grant, and the allowlist only decides what is pre-approved within it.
+
+    So the servers Solo may reach are written out and passed with --strict-mcp-config, which
+    ignores every other MCP source. With no allowed server there is no file and Solo gets none.
+    The privileged access belongs to the agents; Solo asks them for what it cannot see, which is
+    what `act --task` is for.
+    """
+    names = discover_mcp_names(cwd, allow)
+    if not names:
+        return [], None
+    defs: dict[str, dict] = {}
+    cj = Path.home() / ".claude.json"
+    sources = []
+    if cj.exists():
+        try:
+            data = json.loads(cj.read_text(encoding="utf-8"))
+            sources.append(data.get("mcpServers") or {})
+            if cwd:
+                sources.append(((data.get("projects") or {}).get(cwd) or {}).get("mcpServers") or {})
+        except (json.JSONDecodeError, OSError):
+            pass
+    if cwd and (Path(cwd) / ".mcp.json").exists():
+        try:
+            sources.append(json.loads((Path(cwd) / ".mcp.json").read_text(encoding="utf-8")).get("mcpServers") or {})
+        except (json.JSONDecodeError, OSError):
+            pass
+    for src in sources:
+        for n in names:
+            if n in src and n not in defs:
+                defs[n] = src[n]
+    if not defs:
+        # Named in CONTEXT_MCP_ALLOW but no definition anywhere we can pass on. Granting it would
+        # mean falling back to the install's own config, which is the hole this closes.
+        log.warning("mcp: %s allowed but no definition found — running with no MCP servers",
+                    ", ".join(sorted(set(names) - set(defs))))
+        return [], None
+    path = config.p("mcp-allowed.json")
+    path.write_text(json.dumps({"mcpServers": defs}, indent=2), encoding="utf-8")
+    return sorted(defs), path
+
+
 def session_key(item: dict) -> str:
     return f"{item['channel']}:{item['reply_thread_ts']}" if item.get("reply_thread_ts") else item["channel"]
 
@@ -927,7 +976,7 @@ def claude_command(item: dict, session: tuple[str, bool] | None = None, prompt: 
     dirs = [str(Path(os.path.expanduser(d)).resolve()) for d in CFG["context_dirs"] if d.strip() and d.strip() != "*"]
     any_dir = any(d.strip() == "*" for d in CFG["context_dirs"])
     cwd = CFG["claude_cwd"] or (dirs[0] if dirs else str(config.STATE_DIR))
-    mcp = discover_mcp_names(cwd, CFG["mcp_allow"])
+    mcp, mcp_file = mcp_config_for(cwd, CFG["mcp_allow"])
     allowed = bash_rules()
     allowed += ["Glob", "Grep", "WebFetch", "WebSearch"]
     allowed += ["Read"] if any_dir else [f"Read(//{d.lstrip('/')}/**)" for d in dirs]
@@ -936,8 +985,13 @@ def claude_command(item: dict, session: tuple[str, bool] | None = None, prompt: 
            "--output-format", "stream-json", "--verbose",
            "--permission-mode", "dontAsk",
            "--allowedTools", ",".join(allowed),
-           "--disallowedTools", "Write,Edit,NotebookEdit,Agent",
+           # ToolSearch is the escalator from a deferred tool to a live one, and it is how the
+           # Drive read in `mcp_config_for` was reached. Denial is the only thing that holds.
+           "--disallowedTools", "Write,Edit,NotebookEdit,Agent,ToolSearch",
+           "--strict-mcp-config",
            "--max-turns", str(CFG["claude_max_turns"])]
+    if mcp_file:
+        cmd += ["--mcp-config", str(mcp_file)]
     for d in dirs:
         cmd += ["--add-dir", d]
     if CFG["claude_model"]:
@@ -1958,7 +2012,8 @@ def cmd_ask(a):
     cmd = [CFG["claude_bin"], "-p", f"/slack-autoreply ask {a.question}",
            "--permission-mode", "dontAsk",
            "--allowedTools", ",".join(allowed),
-           "--disallowedTools", "Write,Edit,NotebookEdit,Agent,WebFetch,WebSearch",
+           "--disallowedTools", "Write,Edit,NotebookEdit,Agent,WebFetch,WebSearch,ToolSearch",
+           "--strict-mcp-config",
            "--max-turns", str(min(CFG["claude_max_turns"], 15))]
     env = dict(os.environ)
     env["AUTOREPLY_DISPATCH"] = "1"

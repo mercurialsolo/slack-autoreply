@@ -258,6 +258,22 @@ check("dispatch is refused in a dispatched run too",
       _rd.returncode != 0 and "refused" in (_rd.stdout + _rd.stderr))
 check("CONTEXT_MCP_ALLOW=none grants no mcp servers", S.discover_mcp_names(None, ["none"]) == [])
 
+# `--allowedTools` pre-approves; it does not deny. Answering "any of the 15 accounts being warmed
+# up ready for deployment?" on 2026-10-15 (item C0BV5ECCFFT-1792079120_386789) the writer used
+# ToolSearch and then mcp__claude_ai_Google_Drive__read_file_content, with CONTEXT_MCP_ALLOW=deepwiki
+# and with neither tool in the allowlist. The agents are the ones with privileged access; Solo is
+# supposed to ask them, not to hold the same reach itself.
+_wcmd, _, _ = S.claude_command({"id": "x"})
+_adir = _wcmd[_wcmd.index("--disallowedTools") + 1]
+check("the writer runs with --strict-mcp-config, so an install's own servers are not reachable",
+      "--strict-mcp-config" in _wcmd)
+check("ToolSearch is denied to the writer — it is the escalator to a deferred tool",
+      "ToolSearch" in _adir)
+check("no mcp config is passed when no server is allowed",
+      "--mcp-config" not in _wcmd, f"cmd: {_wcmd}")
+check("an allowed server with no definition anywhere grants nothing rather than falling back",
+      S.mcp_config_for(None, ["deepwiki"]) == ([], None))
+
 # Slack cannot badge a self-DM that holds only your own messages (unread_count_display excludes
 # them), so the ping that tells you a draft is waiting has to come from outside Slack.
 def _notify_cmd_runs():
@@ -601,6 +617,8 @@ def _ask_is_read_only():
     return ("AUTOREPLY_DISPATCH" in body                 # sending subcommands refuse
             and "Write,Edit" in body                      # file writes denied
             and "stdin=subprocess.DEVNULL" in body        # or the allowlist does not take
+            and "--strict-mcp-config" in body             # the install's own MCP servers are not its
+            and "ToolSearch" in body                      # nor is anything it could search up
             and "chat_postMessage" not in body)
 
 check("ask cannot send anything", _ask_is_read_only())
