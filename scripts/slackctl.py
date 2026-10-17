@@ -221,7 +221,11 @@ def report_target(item: dict) -> dict:
             "sender_handle": item.get("sender_handle") or "",
             # Mirror the normal reply path: inside the thread if there was one, flat if not.
             "thread_ts": item.get("reply_thread_ts"),
-            "reply_thread_ts": item.get("reply_thread_ts")}
+            "reply_thread_ts": item.get("reply_thread_ts"),
+            # An outbound item's own `ts` is a local clock reading, not a Slack ts. The writer may
+            # choose `--thread`, and `execute_decision` threads on `item["ts"]` when it does — so
+            # on a report that has to be the message being answered, or the send fails at ✅.
+            "ts": item.get("ts")}
 
 
 def dispatch_task(item: dict, who: str, where: str) -> str:
@@ -1684,22 +1688,30 @@ def cmd_say(a):
                            f"{(src.get('text') or '')[:300]}"
                            + (f"; {a.why}" if a.why else "") + ")")
     save_item(item)
-    if re_item:
-        # The loop closes here, so `delegations` can finally tell a task that came back from one
-        # that was handed over and never heard from again.
-        record_delegation(item=re_item, role=a.from_, outcome="reported", say=item["id"],
-                          report=a.intent[:200])
     print(f"queued {item['id']} → {name} (asked by {a.from_})")
     if CFG["dispatch"] != "claude":
         print(f"compose it with: claude -p '/slack-autoreply compose {item_path(item['id'])}'")
         return
     tools, result, err = run_claude(item, State(), prompt=f"/slack-autoreply compose {item_path(item['id'])}")
     item = load_item(item["id"])
+    why_not = err or (result or {}).get("subtype") or "no decision"
     if not item.get("decision"):
-        sys.exit(f"Solo could not compose it: {err or (result or {}).get('subtype') or 'no decision'}")
+        # `reported back` has to mean the owner has something to approve. Recorded here, where
+        # there is no draft, it would lie in exactly the case it exists to catch — and a compose
+        # failure is not hypothetical: a weekly rate limit does precisely this.
+        if re_item:
+            record_delegation(item=re_item, role=a.from_, outcome="report_failed",
+                              say=item["id"], error=str(why_not)[:200])
+        sys.exit(f"Solo could not compose it: {why_not}")
     ledger, _ = load_services()
     fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
-    print(execute_decision(s, item, item["decision"], ledger, fus, set(), state=State()))
+    outcome = execute_decision(s, item, item["decision"], ledger, fus, set(), state=State())
+    if re_item:
+        # The loop closes once there is a draft, so `delegations` can tell a task that came back
+        # from one that was handed over and never heard from again.
+        record_delegation(item=re_item, role=a.from_, outcome="reported", say=item["id"],
+                          report=a.intent[:200])
+    print(outcome)
 
 
 

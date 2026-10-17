@@ -735,6 +735,34 @@ check("the writer is told what was originally asked",
 # MODE says and whatever the ledger has learned. This is that rule, as a test.
 check("an agent's report still waits for the owner's ✅",
       _say["policy"]["effective"] == "draft")
+check("a report is threaded against the message it answers, not a local clock reading",
+      _say["ts"] == S.load_item(_src)["ts"])
+
+# `reported back` is the one state this whole round trip exists to state truthfully. Written when
+# the report arrives rather than when a draft exists, it would say "came back" in precisely the
+# case worth catching — a compose that failed. Today's weekly rate limit does exactly this.
+def _report_with_no_draft():
+    _src2 = msg(d, U, D, "3000.000602", "and did UC-2 finish too?")
+    S.record_delegation(item=_src2, peer="somepeer", role="scout", task="read the UC-2 log",
+                        outcome="dispatched", counterpart="Priya")
+    os.environ["CLAUDE_BIN"] = "/nonexistent-claude"
+    S.CFG["claude_bin"] = "/nonexistent-claude"
+    try:
+        S.cmd_say(_say_args("UC-2 finished at 03:40", re=_src2))
+    except SystemExit:
+        pass
+    finally:
+        os.environ["CLAUDE_BIN"] = str(FAKE_CLAUDE)
+        S.CFG["claude_bin"] = str(FAKE_CLAUDE)
+    rows = [json.loads(l) for l in S.DELEGATIONS.read_text().splitlines() if l.strip()]
+    return [r for r in rows if r.get("item") == _src2]
+
+
+_no_draft = _report_with_no_draft()
+check("a report Solo could not compose is not recorded as having come back",
+      not any(r.get("outcome") == "reported" for r in _no_draft))
+check("and the failure is recorded, rather than the task just going quiet",
+      any(r.get("outcome") == "report_failed" for r in _no_draft))
 
 # Inbound <@U123> is flattened to "@Sri" for the writer to read, so a draft that mirrored the name
 # it had just read went out as literal grey text that pinged nobody. Slack renders a mention only
