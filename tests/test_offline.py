@@ -1060,6 +1060,61 @@ def _hold_note_is_shown():
 
 check("a hold's note reaches the owner, not just the item file", _hold_note_is_shown())
 
+# A standing dead state — logged out, rate-limited — used to sit unreported until a real message
+# paid to discover it. Both of today's outages were found by hand. The probe is the fix, and the
+# thing that can go wrong with it is noise: an alert on every tick is an alert nobody reads.
+DOWN = {"type": "result", "is_error": True, "result": "Not logged in · Please run /login"}
+UP = {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": 0.0004}
+
+
+def _probe(result, health=None, mins=30, dispatch="claude"):
+    """Run one probe against a scripted writer outcome → (notifications, health, prompts run)."""
+    calls, notes = [], []
+    real_run, real_notify = S._run_claude_once, S.Daemon.notify
+    S._run_claude_once = lambda item, session, prompt=None: (calls.append(prompt), ([], result, ""))[1]
+    S.Daemon.notify = lambda self, text: notes.append(text)
+    old_dispatch, old_mins = d.dispatch, S.CFG["health_probe_minutes"]
+    d.dispatch, S.CFG["health_probe_minutes"] = dispatch, mins
+    d.state.update(lambda x: x.update(health=health or {}))
+    try:
+        d.probe_writer()
+    finally:
+        S._run_claude_once, S.Daemon.notify = real_run, real_notify
+        d.dispatch, S.CFG["health_probe_minutes"] = old_dispatch, old_mins
+    return notes, (d.state.read().get("health") or {}), calls
+
+
+_notes, _health, _ = _probe(DOWN)
+check("a writer that cannot draft is reported without waiting for a message to fail",
+      len(_notes) == 1 and "cannot draft" in _notes[0])
+check("and the reason is the writer's own words, not a guessed one",
+      "Not logged in" in _notes[0] and not _health["ok"])
+check("approvals are not implied to be broken too — only drafting is",
+      "✅" in _notes[0])
+
+_notes2, _, _ = _probe(DOWN, health={"ok": False, "why": "Not logged in", "since": "2026-10-16T17:19:00"})
+check("a still-broken writer is not re-announced every five minutes", not _notes2)
+
+_notes3, _health3, _ = _probe(UP, health={"ok": False, "why": "Not logged in", "since": "2026-10-16T17:19:00"})
+check("coming back is worth one line too", len(_notes3) == 1 and "can draft again" in _notes3[0])
+check("and recovery stamps a fresh last_ok", _health3["ok"] and _health3["last_ok"])
+
+# The probe only costs anything when nothing else has proved the writer works. A real run stamps
+# last_ok, so a day with traffic never pays for one.
+_, _, _calls = _probe(UP, health={"ok": True, "last_ok": S.now_iso()})
+check("a writer that drafted just now is not probed again", not _calls)
+_, _, _calls0 = _probe(DOWN, mins=0)
+check("HEALTH_PROBE_MINUTES=0 switches the probe off entirely", not _calls0)
+_, _, _calls_n = _probe(DOWN, dispatch="none")
+check("and DISPATCH=none has no writer to probe", not _calls_n)
+
+# The predicate itself. Today's logged-out run came back *with* a result object, so a check that
+# reads only the exit code calls it healthy.
+check("a logged-out run is not healthy, however it exits", not S.writer_healthy(DOWN)[0])
+check("a successful run is healthy", S.writer_healthy(UP)[0])
+check("no result at all falls back to what the process said",
+      S.writer_healthy(None, "exit 1: boom")[1] == "exit 1: boom")
+
 # The voice harness scores drafts against what the owner actually wrote. An empty draft passed
 # every regex at first — no greeting and no full stop because it has nothing — so silence in reply
 # to a direct question scored perfect. That is the one failure the harness exists to catch.

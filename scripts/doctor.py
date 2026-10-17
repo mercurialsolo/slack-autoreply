@@ -127,6 +127,7 @@ def check_socket_mode(r: Report):
 
 
 def check_claude(r: Report):
+    import slackctl   # local: importing it at module scope would pull in slack_sdk
     if CFG["dispatch"] != "claude":
         r.add(WARN, f"DISPATCH={CFG['dispatch']}", "messages will only be queued; drain with /slack-autoreply run (or /loop 2m /slack-autoreply run)")
         return
@@ -148,15 +149,19 @@ def check_claude(r: Report):
         p = subprocess.run([path, "-p", "reply with exactly: pong", "--output-format", "json", "--max-turns", "1"],
                            capture_output=True, text=True, timeout=90, env=env, cwd=str(config.STATE_DIR))
         out = p.stdout.strip()
-        if p.returncode == 0 and out:
-            try:
-                res = json.loads(out.splitlines()[-1])
-                r.add(OK, f"claude -p works on your login (cost est ${res.get('total_cost_usd') or 0:.4f})")
-            except json.JSONDecodeError:
-                r.add(OK, "claude -p works on your login")
+        res = None
+        try:
+            res = json.loads(out.splitlines()[-1]) if out else None
+        except json.JSONDecodeError:
+            pass
+        # Same predicate the daemon's probe uses, so doctor and `status` can never disagree about
+        # whether the writer works. A logged-out run answers *with* a result object, so the exit
+        # code alone is not the test.
+        ok, why = slackctl.writer_healthy(res, f"exit {p.returncode}: {(p.stderr or out).strip()[-200:]}")
+        if ok:
+            r.add(OK, f"claude -p works on your login (cost est ${(res or {}).get('total_cost_usd') or 0:.4f})")
         else:
-            err = (p.stderr or p.stdout).strip().splitlines()[-1:] or ["no output"]
-            r.add(FAIL, "claude -p failed", f"{err[0][:200]} — run `claude` once interactively and /login; for unattended use consider `claude setup-token`")
+            r.add(FAIL, "claude -p failed", f"{why} — run `claude` once interactively and /login; for unattended use consider `claude setup-token`")
     except subprocess.TimeoutExpired:
         r.add(FAIL, "claude -p timed out", "run `claude` interactively once to finish login/onboarding")
     # skill resolves

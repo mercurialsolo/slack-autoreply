@@ -244,6 +244,7 @@ Measured on the first real round trip, rather than assumed:
 | `doctor`: `missing user scopes` | app was created by hand, not from the manifest; re-create from `manifest.yaml`, reinstall, paste new token |
 | `doctor`: `claude -p failed` | not logged in, or onboarding incomplete: run `claude` interactively once; for unattended boxes `claude setup-token` |
 | `listen` logs `missing_scope` | same as missing scopes above |
+| Solo DM says `⚠️ Solo cannot draft` | the node's writer is dead — almost always logged out of Claude Code. Run `claude /login` on the node (it is interactive; ssh in with `-t`). `solo status` shows the same state as a `writer:` line, and `solo doctor` re-tests it. Nothing is lost while it is down; pending drafts still send on ✅ |
 | `listen` logs `Claude returned no decision` | run `claude "/slack-autoreply run"` interactively to see the error; usually a timeout (`CLAUDE_TIMEOUT_SECONDS`) or `CONTEXT_DIRS` pointing at a missing folder |
 | service runs but nothing happens on a DM | `ONLY_WHEN_AWAY=true` while owner is active, quiet hours, or sender in `BLOCK_USERS`; check the log line `skip (…)` |
 | `search --with` returns nothing | Slack search modifier differences; `history @handle` covers the same ground |

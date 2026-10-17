@@ -120,6 +120,10 @@ CFG = dict(
     claude_model=env("CLAUDE_MODEL", "").strip() or None,
     claude_max_turns=env_int("CLAUDE_MAX_TURNS", 25),
     claude_timeout=env_int("CLAUDE_TIMEOUT_SECONDS", 600),
+    # A logged-out or rate-limited node is a *standing* failure: nothing alerts until a real
+    # message has already failed on it. The probe closes that gap. It is idle-gated, so a busy
+    # day spends nothing. 0 disables it.
+    health_probe_minutes=env_int("HEALTH_PROBE_MINUTES", 30),
     dispatch_parallel=env_int("DISPATCH_PARALLEL", 2),
     dispatch_use_api_key=env_bool("DISPATCH_USE_API_KEY", False),
     session_continuity=env_bool("SESSION_CONTINUITY", True),

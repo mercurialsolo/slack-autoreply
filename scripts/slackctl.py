@@ -1037,6 +1037,26 @@ def claude_command(item: dict, session: tuple[str, bool] | None = None, prompt: 
     return cmd, env, cwd
 
 
+PROBE_PROMPT = "reply with exactly: pong"
+
+
+def writer_healthy(result: dict | None, err: str = "") -> tuple[bool, str]:
+    """Did a writer run actually reach the model? Returns (ok, why not).
+
+    Not the exit code. Today's logged-out failure came back *with* a result event — rc 1,
+    `is_error` true, `result` "Not logged in · Please run /login" — and a check that only reads
+    the return code would have called a rc-0 variant of that healthy. The result event is the
+    writer's own verdict, so trust it first and fall back to the exit code only when there is no
+    result at all.
+    """
+    if result is None:
+        return False, (err or "no result from claude").strip()[:200]
+    if result.get("is_error"):
+        why = result.get("result") or result.get("subtype") or result.get("terminal_reason") or "error"
+        return False, " ".join(str(why).split())[:200]
+    return True, ""
+
+
 def run_claude(item: dict, state: "State | None" = None, prompt: str | None = None) -> tuple[list[str], dict | None, str]:
     """Run Claude Code on an item in that conversation's session. Returns (tools used, result object, stderr tail)."""
     state = state or State()
@@ -1058,6 +1078,11 @@ def run_claude(item: dict, state: "State | None" = None, prompt: str | None = No
                     d["sessions"].pop(k, None)
         state.update(rec)
         item["session"] = {"id": sid, "resumed": session[1]}
+    if writer_healthy(result, err)[0]:
+        # What the probe's idle gate reads: a real run just proved the writer works, so there is
+        # nothing for a probe to find out.
+        state.update(lambda d: d.update(health={**(d.get("health") or {}), "ok": True, "why": "",
+                                                 "last_ok": now_iso()}))
     return tools, result, err
 
 
@@ -1108,6 +1133,7 @@ class Daemon(Slack):
         self.block_channels = self.resolve_channels(CFG["block_channels"])
         self.pool = ThreadPoolExecutor(max_workers=8)
         self.sem = threading.Semaphore(CFG["dispatch_parallel"])
+        self._probe_lock = threading.Lock()   # tick is every 5 min, a probe may take longer
         self.chan_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
         self.lock = threading.Lock()
         self.seen: OrderedDict[str, bool] = OrderedDict()
@@ -1502,6 +1528,47 @@ class Daemon(Slack):
                     self.console_update(draft_ts, f"⌛ Expired (no decision in {CFG['draft_expire_hours']:.0f}h)\n{quote(item['decision'].get('text', ''))}")
                 except Exception:
                     pass
+        self.probe_writer()
+
+    def probe_writer(self) -> None:
+        """Notice a dead writer before a message pays to discover it.
+
+        `handle_with_claude` does alert on a failure, but only after a real message has already
+        hit it — the alert is reactive, so a node that is logged out or rate-limited sits silently
+        broken until someone writes to you. That happened twice in one day and both times it was
+        found by hand.
+
+        Idle-gated, not tick-gated: every healthy writer run stamps `health.last_ok`, so a day
+        with traffic spends nothing and only quiet stretches pay for a probe. Alerts are
+        edge-triggered — once when it breaks, once when it comes back, never per tick.
+        """
+        mins = CFG["health_probe_minutes"]
+        if mins <= 0 or self.dispatch != "claude" or self.state.pause_info() is not None:
+            return
+        if not self._probe_lock.acquire(blocking=False):
+            return
+        try:
+            h = self.state.read().get("health") or {}
+            last = max(h.get("last_ok") or "", h.get("last_probe") or "")
+            if last and datetime.now() - datetime.fromisoformat(last) < timedelta(minutes=mins):
+                return
+            _, result, err = _run_claude_once({"id": "PROBE"}, (str(uuid.uuid4()), False), prompt=PROBE_PROMPT)
+            ok, why = writer_healthy(result, err)
+            was_ok = h.get("ok", True)
+            self.state.update(lambda d: d.update(health={
+                "ok": ok, "why": why, "last_probe": now_iso(),
+                "last_ok": now_iso() if ok else (h.get("last_ok") or ""),
+                "since": now_iso() if ok != was_ok else (h.get("since") or now_iso())}))
+            log.info("writer probe: %s", "ok" if ok else f"DOWN — {why}")
+            if not ok and was_ok:
+                self.notify(f"⚠️ *Solo cannot draft* — {why}\n"
+                            f"_triage still runs and pending drafts can still be ✅'d, but every new "
+                            f"message will fail until this is fixed._")
+            elif ok and not was_ok:
+                self.notify(f"✅ *Solo can draft again* — the writer answered at "
+                            f"{datetime.now():%H:%M}. Nothing was lost while it was down.")
+        finally:
+            self._probe_lock.release()
 
     def run(self) -> None:
         from slack_sdk.socket_mode import SocketModeClient
@@ -1648,6 +1715,11 @@ def cmd_status(a):
           f"dossiers: {len(list(recall.PEOPLE_DIR.glob('*.md')))} people, {len(list(recall.CHANNELS_DIR.glob('*.md')))} channels · "
           f"sessions: {len(st.get('sessions', {}))} live")
     print(f"queued items: {len(list_items({'queued'}))} · handling: {len(list_items({'handling'}))} · pending drafts: {len(st.get('pending', {}))} · open follow-ups: {len(fus.open())}")
+    if (h := st.get("health") or {}):
+        last_ok = (h.get("last_ok") or "")[11:16]
+        print(f"writer: {'ok' if h.get('ok') else 'DOWN — ' + (h.get('why') or '?')}"
+              + (f" · last good {last_ok}" if last_ok else "")
+              + ("" if h.get("ok") else f" · since {(h.get('since') or '')[11:16]}"))
     print(f"context dirs: {', '.join(CFG['context_dirs']) or '(none — set CONTEXT_DIRS)'} · mcp: {', '.join(discover_mcp_names(CFG['claude_cwd'], CFG['mcp_allow'])) or '(none found)'}")
     if (uptake := proposal_uptake(14)) is not None:
         print(uptake)
