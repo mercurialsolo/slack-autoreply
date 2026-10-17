@@ -962,6 +962,23 @@ def _render(can_answer):
 
 check("the writer is offered a proposal exactly where it is told it lacks the answer",
       "--task" in _render(0.25))
+
+# Solo's read of the owner's projects was removed — the agents hold that access — and
+# --strict-mcp-config means an unlisted server is not merely unapproved, it is absent. The skill
+# was still telling the writer to search "the directories you were given" and "any mcp__* tools you
+# have". An instruction to look somewhere unreachable yields a guess or a bare hold, so the reach is
+# computed from the same config that builds the invocation and printed where the decision is made.
+_reach = _render(0.9)
+check("the writer is told what it can actually reach", "what you can reach" in _reach)
+check("and told plainly when it has no connected service",
+      "none — you have no connected service" in _reach or "services:" in _reach)
+check("and told that anything beyond it belongs to an agent",
+      "belongs to an agent, not to you" in _reach)
+check("the reach is read off the same config that builds the invocation",
+      all(d.strip() in _reach for d in S.CFG["context_dirs"] if d.strip()))
+_skill_md_now = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+check("the writer is told that being denied is not the same as finding nothing",
+      "Being denied is not the same as finding nothing" in _skill_md_now)
 check("it is not offered when the writer can answer unaided",
       "--task" not in _render(0.9))
 

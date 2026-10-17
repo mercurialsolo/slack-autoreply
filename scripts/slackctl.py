@@ -650,6 +650,33 @@ def policy_preview(item: dict, ledger: Ledger, share_trusted: set[str]) -> dict:
     return {"mode": CFG["mode"], "effective_for_reply": mode, "reason": why, "share_trusted": share_ok}
 
 
+def writer_reach() -> list[str]:
+    """What the writer can actually see, printed where it decides.
+
+    The skill told it to look in "the directories you were given" and to use "any mcp__* tools you
+    have", while it held neither: the project read was removed because the agents are the ones with
+    privileged access, and --strict-mcp-config means an unlisted server is not there at all. An
+    instruction to look somewhere unreachable does not produce a lookup. It produces a guess, or a
+    bare hold — both measured on this writer already.
+
+    So the reach is computed from the same config that builds the invocation, printed at the point
+    of decision, and the way out is named: ask an agent that does have it.
+    """
+    dirs = [d.strip() for d in CFG["context_dirs"] if d.strip()]
+    mcp, _ = mcp_config_for(CFG["claude_cwd"] or (dirs[0] if dirs else None), CFG["mcp_allow"])
+    out = ["--- what you can reach ---",
+           f"files: {', '.join(dirs) if dirs else 'nothing on disk'}",
+           f"services: {', '.join(mcp) if mcp else 'none — you have no connected service'}",
+           "web: WebFetch / WebSearch, for public facts only"]
+    # Deliberately no mention of --task here. That offer is made where triage says the answer is
+    # missing, and a test guards it against being made where the writer can answer unaided —
+    # printing it on every item would turn a pointed hint into wallpaper. The rule for "I was
+    # denied rather than finding nothing" lives in the skill, at the branch that applies.
+    out.append("anything else — prod data, dashboards, email, a CRM, a repo you cannot read — belongs to "
+               "an agent, not to you. Do not imply you looked at something you cannot reach.")
+    return out + [""]
+
+
 def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: Followups | None = None) -> str:
     t = item.get("triage")
     pol = policy_preview(item, ledger, share_trusted)
@@ -657,7 +684,7 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
            f"from: {item['sender_name']} (@{item.get('sender_handle', '?')}) · {describe_where(item)}"
            f"{' · in a thread' if item.get('thread_ts') else ''} · {item.get('created', '')}",
            f"message: {item['text']}",
-           "", "--- recent conversation ---", item.get("context") or "(none)", ""]
+           "", "--- recent conversation ---", item.get("context") or "(none)", ""] + writer_reach()
     if t:
         out += ["--- triage (" + t.get("source", "?") + ") ---",
                 f"route: {t['route']}{' (forced: ' + t['forced'] + ')' if t.get('forced') else ''} · confidence {t['confidence']:.2f} · "
