@@ -14,6 +14,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
@@ -667,6 +668,74 @@ check("the owner sees the proposed investigation", "read last night's run logs" 
 check("the owner is told the reaction that hands it over", "react 🤖" in _shown)
 check("the owner is told the agent only reads", "read-only" in _shown)
 
+# A report has to come back to the conversation that asked. Without an id in the brief the agent
+# has nothing to put in `--to`, so every report fell through to channel guessing — which is how a
+# question asked in a DM gets answered in a room. `--re` carries the request's id both ways.
+def _say_args(intent, **kw):
+    return SimpleNamespace(intent=intent, target=kw.get("to"), from_=kw.get("frm", "scout"),
+                           why=kw.get("why"), thread_ts=None, re_item=kw.get("re"))
+
+
+def _refusal(**kw):
+    try:
+        S.cmd_say(_say_args(kw.pop("intent", "the run finished clean"), **kw))
+    except SystemExit as e:
+        return str(e)
+    return ""
+
+
+_src = msg(d, U, D, "3000.000600", "did last night's RH-1 run finish?")
+_brief_item = S.load_item(_src)
+_brief_item["decision"] = {"action": "escalate", "task": "read the RH-1 run log", "role": "scout"}
+os.environ["DELEGATE_PEER"] = "somepeer"
+S.CFG["delegate_peer"] = "somepeer"
+S.CFG["claudectl_bin"] = "/nonexistent-claudectl"
+_failed = S.dispatch_task(_brief_item, "Priya", "a DM")
+check("a dispatch that cannot reach claudectl says so rather than claiming success",
+      "could not reach claudectl" in _failed)
+
+check("the brief tells the agent the id to report against",
+      "--re {item_id}" in S.AGENT_BRIEF and "--re " in S.AGENT_BRIEF.format(
+          owner="o", task="t", who="w", where="x", quoted="q", role="r", item_id=_src))
+check("the id in the brief is the request's own id",
+      _src in S.AGENT_BRIEF.format(owner="o", task="t", who="w", where="x", quoted="q",
+                                   role="r", item_id=_src))
+
+_dm_target = S.report_target(S.load_item(_src))
+check("a report on a DM goes back to that DM",
+      _dm_target["channel"] == D and _dm_target["sender"] == U)
+check("a DM with no thread is answered flat, like any other reply",
+      _dm_target["reply_thread_ts"] is None)
+_in_thread = S.report_target({"channel": C, "channel_type": "channel", "channel_name": "growth",
+                              "sender": U, "sender_name": "Priya", "reply_thread_ts": "3000.000100"})
+check("a report on a channel message goes back to that channel",
+      _in_thread["channel"] == C and _in_thread["channel_type"] == "channel")
+check("a question asked in a thread is answered in that thread",
+      _in_thread["reply_thread_ts"] == "3000.000100")
+
+check("--re and --to together is refused, not silently resolved one way",
+      "not both" in _refusal(re=_src, to="@priya"))
+check("an unknown --re id is refused", "no such request" in _refusal(re="say-nope"))
+check("an agent cannot --re work the owner never handed over",
+      "nothing was dispatched" in _refusal(re=_src))
+
+S.record_delegation(item=_src, peer="somepeer", role="scout", task="read the RH-1 run log",
+                    outcome="dispatched", counterpart="Priya")
+S.cmd_say(_say_args("the RH-1 run finished at 02:14, no timeouts", re=_src))
+_rows = [json.loads(l) for l in S.DELEGATIONS.read_text().splitlines() if l.strip()]
+_reported = [r for r in _rows if r.get("outcome") == "reported"]
+check("a report closes the loop in the record", len(_reported) == 1 and _reported[0]["item"] == _src)
+_say = S.load_item(_reported[0]["say"])
+check("the report is addressed to the conversation that asked, not a guessed channel",
+      _say["channel"] == D and _say["sender"] == U)
+check("the report carries the id of the request it answers", _say.get("re") == _src)
+check("the writer is told what was originally asked",
+      "did last night's RH-1 run finish?" in _say["context"])
+# The owner's standing rule: nothing an agent causes goes out without their approval, whatever
+# MODE says and whatever the ledger has learned. This is that rule, as a test.
+check("an agent's report still waits for the owner's ✅",
+      _say["policy"]["effective"] == "draft")
+
 # Inbound <@U123> is flattened to "@Sri" for the writer to read, so a draft that mirrored the name
 # it had just read went out as literal grey text that pinged nobody. Slack renders a mention only
 # from <@ID> and will not linkify a bare @name posted through the API.
@@ -753,6 +822,25 @@ _unreachable = sorted(o for o in _act_opts if o not in _ACT_NOT_THE_WRITERS and 
 check("the act options are discoverable at all", len(_act_opts) >= 8, f"parsed: {sorted(_act_opts)}")
 check("every act option the writer may use is named in the skill it follows",
       not _unreachable, f"reachable only from --help: {_unreachable}")
+
+# Same guard on the other side of the interface. `say` is read by a coding agent following
+# skills/solo/SKILL.md, and an option that exists only in `--help` is an option no agent will ever
+# pass — `--re` is the whole round trip, so it failing this check would mean reports keep getting
+# routed by guesswork while the flag sits there working.
+_SAY_NOT_THE_AGENTS = {
+    "--help": "argparse's own",
+    "--to": "withheld on purpose — the skill tells agents not to pick a room; --re or Solo decides",
+    "--thread-ts": "the owner's and the daemon's; an agent has no thread ts to pass",
+    "--why": "optional colour for the owner; documented in the brief, not worth skill space",
+}
+_say_help = subprocess.run([sys.executable, str(SCRIPTS / "slackctl.py"), "say", "--help"],
+                           capture_output=True, text=True, env=dict(os.environ)).stdout
+_say_opts = set(_re.findall(r"(--[a-z][a-z-]+)", _say_help))
+_agent_skill = (ROOT / "skills" / "solo" / "SKILL.md").read_text(encoding="utf-8")
+_agent_unreachable = sorted(o for o in _say_opts if o not in _SAY_NOT_THE_AGENTS and o not in _agent_skill)
+check("the say options are discoverable at all", len(_say_opts) >= 5, f"parsed: {sorted(_say_opts)}")
+check("every say option an agent may pass is named in the skill agents follow",
+      not _agent_unreachable, f"reachable only from --help: {_agent_unreachable}")
 
 # `--task` existed, was wired, and rendered on the escalation — and fired zero times in a day of
 # real traffic. It appeared only in `act --help`, which the writer has no reason to run: not in the

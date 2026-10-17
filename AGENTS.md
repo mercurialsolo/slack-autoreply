@@ -205,6 +205,21 @@ What to expect, having been measured rather than assumed:
 - The agent treats routed mail as **data, not instruction** — it will not run what a message asks
   for, it reports the request to you instead. That rule lives in the `solo` skill.
 
+The return half is the same gate in reverse. A proposal you hand over with 🤖 carries the id of the
+message that caused it, and the agent answers with `solo say "…" --re <id> --from <role>`. The id
+is what puts the answer back in the conversation that asked — without it Solo infers a room from
+the words of the report, which is how a question asked in a DM gets answered in a channel. `--re`
+is honoured only for items you actually dispatched, so an agent cannot use it to place a draft in a
+conversation on its own initiative, and the draft still waits for your ✅ whatever MODE says.
+
+```bash
+solo delegations    # proposed · handed over · reported back
+```
+
+A task that reads `handed over, nothing back yet` long after you tapped 🤖 is the failure worth
+chasing: the two usual causes are `solo` not being on the agent's PATH and its sandbox refusing the
+ssh hop to the node, since `solo` is a proxy to wherever the daemon runs.
+
 ## If something breaks
 
 | symptom | cause → fix |

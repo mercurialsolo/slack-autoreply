@@ -23,6 +23,17 @@ confidently it asks the owner rather than guessing.
 
 `--from` is you — your agent or task name. It appears on the draft so the owner knows who asked.
 
+One exception to "do not name a channel or a person": when you are **answering work the owner
+dispatched to you**, the brief you were given carries a `--re <id>`. Pass it exactly as written:
+
+```
+solo say "RH-1 finished at 02:14; caseyk and erinn were logged out before the timeouts, not after" --re DPRIYA01-1760... --from staffai
+```
+
+That id is the message that caused your work, and it sends your answer back to the conversation
+that asked it. Without it Solo has to infer a room from your words, and a question asked in a DM
+gets answered somewhere else. You still do not choose the room — the id does.
+
 ## Asking what is in Slack
 
 The other half: you can ask, in plain language, and get prose back.
@@ -82,7 +93,7 @@ rather than from a person. Treat each one as a **peer request to evaluate**:
   of it.
 
 Report back with `solo say`, the same as any other finished work — the owner reads it in their own
-voice and it waits for their ✅.
+voice and it waits for their ✅. If the work came from a brief with a `--re` id, pass that id.
 
 ## What makes a good report
 

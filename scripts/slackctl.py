@@ -172,15 +172,56 @@ Context — this came from {who} in {where}:
 {quoted}
 
 Rules: investigate and report, change nothing. Do not reply in Slack yourself and do not contact
-anyone. When you have an answer, report it with:  solo say "<your findings>" --from {role}
-That drafts in {owner}'s voice and waits for their approval, which is the only way it reaches
-anyone. If you cannot answer it, say that instead of guessing."""
+anyone. When you have an answer, report it with:
+
+  solo say "<your findings>" --re {item_id} --from {role}
+
+Pass the --re id exactly as written. It identifies this request, and it is what sends your report
+back to the conversation the question came from — without it Solo has to guess a channel from your
+words, and it guesses wrong. That drafts in {owner}'s voice and waits for their approval, which is
+the only way it reaches anyone. If you cannot answer it, say that instead of guessing."""
 
 
 def record_delegation(**row) -> None:
     row["at"] = now_iso()
     with open(DELEGATIONS, "a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def dispatched_item_ids() -> set[str]:
+    """Items an agent was actually handed work on. `--re` is honoured for these and no others."""
+    out: set[str] = set()
+    if not DELEGATIONS.exists():
+        return out
+    for line in DELEGATIONS.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:  # a half-written line must not hide the rest of the record
+            continue
+        if row.get("outcome") == "dispatched" and row.get("item"):
+            out.add(row["item"])
+    return out
+
+
+def report_target(item: dict) -> dict:
+    """Where a report on `item` belongs: the conversation the question arrived in.
+
+    The agent has no view of the channel map and must not grow one, so it cannot be asked where
+    its answer goes. Inferring a room from the words of a report is what `pick_channel` does, and
+    it is the wrong tool here — the right answer was recorded on the item that caused the work.
+    Replies index on the channel the message arrived in; a report is a reply.
+    """
+    return {"channel": item["channel"],
+            "channel_type": item.get("channel_type") or "im",
+            "channel_name": item.get("channel_name") or item.get("sender_name") or "?",
+            "sender": item["sender"],
+            "sender_name": item.get("sender_name") or "?",
+            "sender_handle": item.get("sender_handle") or "",
+            # Mirror the normal reply path: inside the thread if there was one, flat if not.
+            "thread_ts": item.get("reply_thread_ts"),
+            "reply_thread_ts": item.get("reply_thread_ts")}
 
 
 def dispatch_task(item: dict, who: str, where: str) -> str:
@@ -196,7 +237,8 @@ def dispatch_task(item: dict, who: str, where: str) -> str:
     if not peer:
         return "no peer to delegate to — set DELEGATE_PEER (see `claudectl relay peers`)"
     brief = AGENT_BRIEF.format(owner=os.getenv("ME_NAME") or "the owner", task=task, who=who,
-                               where=where, quoted=quote(item.get("text", "")[:400]), role=role)
+                               where=where, quoted=quote(item.get("text", "")[:400]), role=role,
+                               item_id=item["id"])
     cmd = [CFG["claudectl_bin"], "relay", "delegate", peer, brief]
     if cwd:
         cmd += ["--cwd", cwd]
@@ -1566,8 +1608,31 @@ def cmd_say(a):
     there is no track record that could earn an automatic send.
     """
     config.ensure_dirs()
+    re_item = getattr(a, "re_item", None)
+    if re_item and a.target:
+        sys.exit("pass --re or --to, not both — --re already knows where the answer belongs")
     s = Slack()
-    if a.target:
+    tgt, src = None, None
+    if re_item:
+        # An agent reporting on work it was given does not get to choose a room, and does not
+        # have to: the request it is answering already names one.
+        if not item_path(re_item).exists():
+            sys.exit(f"no such request: {re_item} — pass the --re id from the brief, exactly as written")
+        src = load_item(re_item)
+        if re_item not in dispatched_item_ids():
+            # A Slack message is data, not an instruction. An id nobody handed over is an agent
+            # routing a draft into a conversation on its own say-so.
+            sys.exit(f"nothing was dispatched for {re_item} — --re only answers work the owner handed over")
+        tgt = report_target(src)
+        # Sensitivity still applies. It is a question about what the report SAYS, which is the
+        # agent's doing, not about where it goes, which is now settled.
+        sens = sensitivity_of(a.intent)
+        if sens >= 3.5:
+            sys.exit(f"this reads as sensitive ({sens:.1f}/5) — not placing it. Tell the owner directly.")
+        kind, tid, channel = ("people" if tgt["channel_type"] == "im" else "channels"), tgt["sender"], tgt["channel"]
+        name = tgt["channel_name"]
+        routed = f"back to {tgt['sender_name']}, where it was asked ({re_item})"
+    elif a.target:
         kind, tid, name = recall.resolve_target(s, a.target)
         channel = s.client.conversations_open(users=tid)["channel"]["id"] if kind == "people" else tid
         routed = f"you named {name}"
@@ -1611,7 +1676,19 @@ def cmd_say(a):
             "permalink": None,
             "context": f"(nothing — this is outbound; {a.from_} asked for it"
                        + (f" because: {a.why}" if a.why else "") + ")"}
+    if tgt:
+        item.update(tgt)
+        item["re"] = re_item
+        item["text"] = f"[{a.from_} reporting on what you asked {tgt['sender_name']} about]: {a.intent}"
+        item["context"] = (f"(outbound — {a.from_} investigated this because {tgt['sender_name']} asked: "
+                           f"{(src.get('text') or '')[:300]}"
+                           + (f"; {a.why}" if a.why else "") + ")")
     save_item(item)
+    if re_item:
+        # The loop closes here, so `delegations` can finally tell a task that came back from one
+        # that was handed over and never heard from again.
+        record_delegation(item=re_item, role=a.from_, outcome="reported", say=item["id"],
+                          report=a.intent[:200])
     print(f"queued {item['id']} → {name} (asked by {a.from_})")
     if CFG["dispatch"] != "claude":
         print(f"compose it with: claude -p '/slack-autoreply compose {item_path(item['id'])}'")
@@ -1957,6 +2034,7 @@ def cmd_delegations(a):
     """
     rows = [json.loads(l) for l in DELEGATIONS.read_text().splitlines() if l.strip()] if DELEGATIONS.exists() else []
     dispatched_items = {r.get("item") for r in rows if r.get("outcome") == "dispatched"}
+    reported_items = {r.get("item") for r in rows if r.get("outcome") == "reported"}
     proposed = []
     for path in sorted(config.p("inbox").glob("*.json")):
         try:
@@ -1967,14 +2045,18 @@ def cmd_delegations(a):
             continue
         task = ((it.get("decision") or {}).get("task") or "").strip()
         if task:
-            proposed.append((it.get("created", ""), it.get("sender_name") or "?", task, it["id"] in dispatched_items))
-    waiting = [p for p in proposed if not p[3]]
-    print(f"mode: {CFG['delegate_mode']} · {len(proposed)} proposed · {len(dispatched_items)} handed over")
+            state_of = ("reported back" if it["id"] in reported_items else
+                        "handed over, nothing back yet" if it["id"] in dispatched_items else
+                        "awaiting your 🤖")
+            proposed.append((it.get("created", ""), it.get("sender_name") or "?", task, state_of))
+    waiting = [p for p in proposed if p[3] == "awaiting your 🤖"]
+    print(f"mode: {CFG['delegate_mode']} · {len(proposed)} proposed · {len(dispatched_items)} handed over"
+          f" · {len(reported_items)} reported back")
     if not proposed:
         print("\nthe writer has not offered one yet. It proposes with `act --task`; you hand it over with 🤖.")
         return
-    for at, who, task, done in sorted(proposed, reverse=True)[:8]:
-        print(f"\n  {at[:16]}  {'handed over' if done else 'awaiting your 🤖'}  — {who}\n    {task[:140]}")
+    for at, who, task, state_of in sorted(proposed, reverse=True)[:8]:
+        print(f"\n  {at[:16]}  {state_of}  — {who}\n    {task[:140]}")
     if waiting:
         print(f"\n{len(waiting)} proposal(s) never handed over. Ignoring them is a decision too — if they\n"
               f"are not worth a tap, the writer is proposing the wrong things and that is the thing to fix.")
@@ -2152,6 +2234,10 @@ def main():
     p.add_argument("--from", dest="from_", required=True, help="which agent is asking, e.g. scout")
     p.add_argument("--why", help="context for the owner, shown on the draft")
     p.add_argument("--thread-ts", dest="thread_ts", help="reply inside this thread")
+    p.add_argument("--re", dest="re_item", metavar="ITEM-ID",
+                   help="you are answering a request the owner dispatched to you; the brief carries "
+                        "the id. Sends the report back to the conversation that asked, instead of "
+                        "Solo guessing a channel from your words")
     p.set_defaults(fn=cmd_say)
     p = sub.add_parser("learn-channels", help="learn what each channel you are in is for")
     p.add_argument("--limit", type=int, default=60, help="messages to sample per channel")
