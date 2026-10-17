@@ -220,6 +220,22 @@ A task that reads `handed over, nothing back yet` long after you tapped 🤖 is 
 chasing: the two usual causes are `solo` not being on the agent's PATH and its sandbox refusing the
 ssh hop to the node, since `solo` is a proxy to wherever the daemon runs.
 
+Measured on the first real round trip, rather than assumed:
+
+- **A relay-delegated agent can run `solo` from inside its sandbox.** PATH and the ssh hop both
+  work, so the report leg needs no extra wiring. Worth knowing because binding a bus role is
+  refused as self-modification, and this is the same class of thing but is allowed.
+- **Cost and latency: 183s and $0.66** for one investigation on Opus, 549k tokens, mostly cache
+  reads. Dispatching is not free and not instant; it is worth it for a question that needs looking
+  things up, not for one you could answer from the message.
+- **The agent's own permission rules still bite.** It was blocked from a read-only prod DB query
+  and from reading stored API keys — correctly — and reported the refusal instead of working
+  around it. A dispatched investigation can only answer what the agent is already allowed to read.
+- **A report can come back and be withheld.** Solo refuses to place a report it reads as sensitive
+  (3.5/5), which the first real one was, for naming contact record ids. It lands in your Solo DM
+  marked as not placed, and `delegations` records `report_refused` — not the same thing as never
+  coming back.
+
 ## If something breaks
 
 | symptom | cause → fix |
