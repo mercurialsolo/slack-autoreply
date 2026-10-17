@@ -1740,11 +1740,17 @@ def cmd_status(a):
           f"dossiers: {len(list(recall.PEOPLE_DIR.glob('*.md')))} people, {len(list(recall.CHANNELS_DIR.glob('*.md')))} channels · "
           f"sessions: {len(st.get('sessions', {}))} live")
     print(f"queued items: {len(list_items({'queued'}))} · handling: {len(list_items({'handling'}))} · pending drafts: {len(st.get('pending', {}))} · open follow-ups: {len(fus.open())}")
-    if (h := st.get("health") or {}):
+    # Asked live, not read from state: the free check is instant, and the question "can it draft
+    # right now" is the one that cost an ssh to answer.
+    if CFG["dispatch"] == "claude":
+        h = st.get("health") or {}
+        ok, why = writer_logged_in()
+        if ok and not h.get("ok", True):
+            ok, why = False, h.get("why") or "?"   # a known failure the free check cannot see
         last_ok = (h.get("last_ok") or "")[11:16]
-        print(f"writer: {'ok' if h.get('ok') else 'DOWN — ' + (h.get('why') or '?')}"
+        print(f"writer: {'ok' if ok else 'DOWN — ' + why}"
               + (f" · last good {last_ok}" if last_ok else "")
-              + ("" if h.get("ok") else f" · since {(h.get('since') or '')[11:16]}"))
+              + ("" if ok else f" · since {(h.get('since') or '')[11:16] or 'unknown'}"))
     print(f"context dirs: {', '.join(CFG['context_dirs']) or '(none — set CONTEXT_DIRS)'} · mcp: {', '.join(discover_mcp_names(CFG['claude_cwd'], CFG['mcp_allow'])) or '(none found)'}")
     if (uptake := proposal_uptake(14)) is not None:
         print(uptake)
