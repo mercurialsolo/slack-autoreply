@@ -940,6 +940,9 @@ def mcp_config_for(cwd: str | None, allow: list[str]) -> tuple[list[str], Path |
         return [], None
     path = config.p("mcp-allowed.json")
     path.write_text(json.dumps({"mcpServers": defs}, indent=2), encoding="utf-8")
+    # A server definition can carry an env token. None of the allowed ones do today; the mode is
+    # set so that the day one does, this file is not the thing that leaked it.
+    path.chmod(0o600)
     return sorted(defs), path
 
 
