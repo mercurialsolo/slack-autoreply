@@ -2227,9 +2227,9 @@ def cmd_ask(a):
 def cmd_simulate(a):
     config.ensure_dirs()
     ledger, llm = load_services()
-    me_name = os.getenv("ME_NAME") or "me"
+    me_name, me_id = os.getenv("ME_NAME") or "me", os.getenv("ME_ID") or ""
     try:
-        s = Slack(); me_name = s.me_name
+        s = Slack(); me_name, me_id = s.me_name, s.me
     except (SystemExit, Exception):
         pass
     text = a.text
@@ -2237,7 +2237,10 @@ def cmd_simulate(a):
             "channel": "SIM", "channel_type": a.channel_type, "channel_name": a.channel_name,
             "ts": f"{time.time():.6f}", "thread_ts": None, "reply_thread_ts": None,
             "sender": "USIM", "sender_name": a.sender, "sender_handle": a.sender.lower().replace(" ", ""),
-            "text": text, "permalink": None, "context": f"[{a.sender}]: {text}"}
+            "text": text, "permalink": None, "context": f"[{a.sender}]: {text}",
+            # A rehearsal that cannot reproduce the mention floor is a rehearsal that lies about
+            # what the writer may do.
+            "mentioned": bool(me_id) and f"<@{me_id}>" in text}
     t = make_triager(me_name, llm).run({"owner": me_name, "owner_notes": voice.load_notes(), "owner_presence": "away",
                                          "local_time": datetime.now().strftime("%A %H:%M"), "channel_type": a.channel_type,
                                          "channel_name": a.channel_name, "sender": a.sender, "sender_trusted_for_sharing": False,
