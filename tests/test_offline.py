@@ -438,6 +438,22 @@ def _ignore_a_mention():
     return ""
 
 
+# Sri replied "we should send a reply to Danielle today" in a #adair-homes thread Solo had
+# already drafted in twice that day. No @, so the channel filter dropped it before the log line.
+def _thread_reply(thread_ts):
+    """A channel message with no mention, as a reply inside `thread_ts`."""
+    ts = thread_ts.replace("17000000", "17000001")
+    d.client.history.setdefault(C, []).append({"user": U, "ts": ts, "text": "we should reply today"})
+    d.on_inbound({"user": U, "channel": C, "channel_type": "channel", "ts": ts,
+                  "thread_ts": thread_ts, "text": "we should reply today"})
+    return S.item_path(f"{C}-{ts.replace('.', '_')}").exists()
+
+
+d.state.update(lambda st: st["sessions"].__setitem__(f"{C}:1700000020.000",
+                                                     {"id": "s1", "runs": 1, "last": S.now_iso(), "cost": 0.5}))
+check("an unmentioned reply in a thread Solo already drafted in is picked up", _thread_reply("1700000020.000"))
+check("and in a thread it has never touched it is still left alone", not _thread_reply("1700000021.000"))
+
 _refused = _ignore_a_mention()
 check("the writer cannot answer a mention with silence", "not available here" in _refused)
 check("and is told what to do instead", "ack" in _refused and "emoji" in _refused)

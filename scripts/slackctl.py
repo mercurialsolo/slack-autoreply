@@ -1470,12 +1470,25 @@ class Daemon(Slack):
 
     # ------------------------------------------------------------ inbound
 
+    def in_my_thread(self, channel: str, thread_ts: str | None) -> bool:
+        """Has the writer already run for this thread? `sessions` is keyed by `session_key`,
+        which is `channel:reply_thread_ts` — the same key a later reply's `thread_ts` produces."""
+        return bool(thread_ts) and f"{channel}:{thread_ts}" in (self.state.read().get("sessions") or {})
+
     def on_inbound(self, ev: dict) -> None:
         sender, channel, ctype = ev["user"], ev["channel"], ev.get("channel_type", "")
         text = ev.get("text", "") or ""
         mentioned = f"<@{self.me}>" in text
+        thread_ts = ev.get("thread_ts")
         if ctype in ("channel", "group"):
-            if CFG["channels"] != "mentions" or not mentioned:
+            # A thread Solo has already drafted in is a conversation it is part of, so the next
+            # message in it is addressed to you whether or not your name is typed a second time.
+            # On 18 Oct Sri's "we should send a reply to Danielle today" — a reply in the
+            # #adair-homes thread Solo had drafted in twice that day — was dropped right here,
+            # without even a log line, for want of an @.
+            if CFG["channels"] != "mentions":
+                return
+            if not (mentioned or self.in_my_thread(channel, thread_ts)):
                 return
         elif ctype == "mpim":
             if CFG["group_dms"] == "off" or (CFG["group_dms"] == "mentions" and not mentioned):
@@ -1498,7 +1511,6 @@ class Daemon(Slack):
         if self._over_limit(channel):
             log.info("skip (rate limit) %s: %s", who, clean[:80]); return
 
-        thread_ts = ev.get("thread_ts")
         reply_thread_ts = thread_ts or (ev["ts"] if ctype in ("channel", "group") else None)
         item = {
             "id": f"{channel}-{ev['ts'].replace('.', '_')}", "created": now_iso(), "status": "queued", "simulated": False,
