@@ -1158,6 +1158,28 @@ def _run_claude_once(item: dict, session: tuple[str, bool], prompt: str | None =
     return tools, result, err
 
 
+# Topics where a message states something rather than asks for it. Replying to one of these is
+# conversation, not a rescue.
+NOT_OWED_TOPICS = frozenset({"info_share", "status_update", "social", "other"})
+
+
+def answer_was_owed(item: dict) -> bool:
+    """Was Solo's silence a miss, or were you simply carrying on the conversation?
+
+    `missed` fires whenever you answer something Solo ignored, which over-counts badly: three of
+    the first six rows were replies to statements — "yes already paid a few days back", "let me
+    follow up in the morning", a link someone shared. Nothing was asked, so nothing was missed,
+    and scoring them pinned the ignore route at 0.12 — a number `effective_mode` reads, so the
+    route could never earn its way out of what was partly measurement error.
+    """
+    if item.get("mentioned"):
+        return True
+    t = item.get("triage") or {}
+    if (t.get("topic") or "other") not in NOT_OWED_TOPICS:
+        return True
+    return "?" in (item.get("text") or "")
+
+
 class Daemon(Slack):
     def __init__(self, dispatch: str):
         super().__init__()
@@ -1297,10 +1319,13 @@ class Daemon(Slack):
         if ig and datetime.now() - datetime.fromisoformat(ig["at"]) < timedelta(hours=2):
             try:
                 item = load_item(ig["item"])
-                item["outcome"] = {**item.get("outcome", {}), "status": "missed", "actual": text}
-                save_item(item)
-                self.ledger.record(item=item, outcome="missed", correction={"draft": None, "actual": text})
-                log.info("missed: you replied to a message triage ignored (%s)", item["sender_name"])
+                if answer_was_owed(item):
+                    item["outcome"] = {**item.get("outcome", {}), "status": "missed", "actual": text}
+                    save_item(item)
+                    self.ledger.record(item=item, outcome="missed", correction={"draft": None, "actual": text})
+                    log.info("missed: you replied to a message triage ignored (%s)", item["sender_name"])
+                else:
+                    log.info("you replied after an ignore, but nothing was asked of you — not scored")
             except SystemExit:
                 pass
             self.state.update(lambda d: d["ignored"].pop(channel, None))
@@ -1483,6 +1508,7 @@ class Daemon(Slack):
             "sender": sender, "sender_name": who, "sender_handle": self.handle_of(sender),
             "text": clean, "permalink": self.permalink(channel, ev["ts"]),
             "context": self.transcript(channel, thread_ts, 8),
+            "mentioned": mentioned,
         }
         state = {"owner": self.me_name, "owner_notes": voice.load_notes(), "owner_presence": "active" if self.presence_active() else "away",
                  "local_time": datetime.now().strftime("%A %H:%M"), "channel_type": ctype, "channel_name": item["channel_name"],
@@ -1494,6 +1520,15 @@ class Daemon(Slack):
         item["triage"] = None if t.source == "default" else t.__dict__ | {"raw": None}
         save_item(item)
         log.info("%s in %s: %s → %s", who, ctype, clean[:80], t.summary() if item["triage"] else "no triage")
+        if item["triage"] and t.route == "ignore" and mentioned:
+            # Someone typed your name. Four of the six messages Solo routed to silence and you then
+            # answered yourself were mentions, and this is the half triage decides on its own — a
+            # confident `ignore` (0.69 here) skips the writer entirely, so you never see it. The
+            # floor for a mention is an emoji, not nothing.
+            t.route, t.forced = "ack", "you were mentioned by name"
+            item["triage"] = t.__dict__ | {"raw": None}
+            save_item(item)
+            log.info("mentioned by name — ignore → ack")
         if item["triage"] and t.route == "ignore":
             execute_decision(self, item, {"action": "ignore", "text": ""}, self.ledger, self.followups, self.share_trusted, state=self.state)
             return
@@ -2225,6 +2260,13 @@ def cmd_act(a):
         text = Path(a.text_file).read_text(encoding="utf-8").strip()
     if a.action in ("hold", "reply") and not text:
         sys.exit("--text is required for hold/reply")
+    if a.action == "ignore" and item.get("mentioned"):
+        # Measured: three times the writer took a `hold` that triage had chosen, turned it into
+        # silence, and the owner answered the question themselves — every one a direct @mention
+        # asking for something ("Any update on the warmed up accounts?"). Triage's own confidence
+        # floor does not reach this: it rewrites triage's route, not the writer's choice.
+        sys.exit("they mentioned you by name — `ignore` is not available here.\n"
+                 "   use --action ack with an --emoji if there is nothing to say, or hold with a time.")
     emoji = (a.emoji or "").strip().strip(":")
     if emoji and not re.fullmatch(r"[a-z0-9_+-]{1,64}", emoji):
         sys.exit(f"--emoji {a.emoji!r}: use a Slack emoji NAME like +1, tada, eyes — not the character itself")

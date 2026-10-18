@@ -44,7 +44,7 @@ Mode: **$0**. Argument: **$1**. If no mode was given, treat it as `status`.
    - `$SLACKCTL about <user>` — profile, dossier, track record, open promises, last 20 exchanges
    This conversation's Claude session persists across messages for a few days, so you may already remember earlier turns; the tools are for what you don't.
 3. Decide the route, starting from triage:
-   - `ignore` — nothing needed. `act --action ignore`
+   - `ignore` — nothing needed. `act --action ignore`. Not available when they mentioned the user by name: someone who typed their name is owed at least a reaction, so use `ack` with an `--emoji` if there is genuinely nothing to say. Measured — the three times this was used on a direct @mention, the question was a real one and the user ended up answering it themselves.
    - **Do the small thing instead of acknowledging it.** Before reaching for `ack`, ask whether the
      ask is small enough to just handle. A request about how to communicate or track — "post updates
      in the thread", "use this channel", "keep me posted", "bullets when you report blockers" — is

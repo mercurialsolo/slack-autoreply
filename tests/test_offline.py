@@ -390,10 +390,57 @@ msg(d, "UME", D2, "1700000003.000", "looking now")
 check("replying yourself retires the draft → replaced", d.ledger.rows[-1]["outcome"] == "replaced" and not d.state.read()["pending"])
 check("your own message becomes a voice sample with its prompt", voice.load_samples()[-1]["text"] == "looking now" and voice.load_samples()[-1]["prompt"] == "can you review the PR today?")
 
+# This check used to assert the opposite, and the fixture is why it had to change: "fyi shipped
+# it" → "nice, thanks!" is the owner carrying on a conversation, not rescuing a dropped message.
+# Scoring it held the ignore route at 0.12 in the real ledger, where `effective_mode` reads it.
 iid3 = msg(d, U, D, "1700000004.000", "fyi shipped it")
 S.execute_decision(d, S.load_item(iid3), {"action": "ignore", "text": ""}, d.ledger, d.followups, set(), state=d.state)
+_before = len(d.ledger.rows)
 msg(d, "UME", D, "1700000005.000", "nice, thanks!")
-check("answering an ignored message → missed", d.ledger.rows[-1]["outcome"] == "missed")
+check("thanking someone after an ignore is not a miss — nothing was asked",
+      len(d.ledger.rows) == _before)
+
+iid3b = msg(d, U, D, "1700000004.500", "did the warmup accounts finish?")
+S.execute_decision(d, S.load_item(iid3b), {"action": "ignore", "text": ""}, d.ledger, d.followups, set(), state=d.state)
+msg(d, "UME", D, "1700000005.500", "checking now")
+check("but answering an ignored question is", d.ledger.rows[-1]["outcome"] == "missed")
+
+def _triage_ignore(mentioned):
+    """A confident `ignore` straight from triage — the half that skips the writer entirely."""
+    real = d.triager.run
+    d.triager.run = lambda state: triage.Triage(
+        route="ignore", confidence=0.7, sensitivity=1.0, urgency=2.0, needs_context=0.1,
+        asks_for_content=0.1, source="jev:test", topic="status_update", can_answer=0.9)
+    try:
+        ts = "1700000009.100" if mentioned else "1700000009.200"
+        text = (f"<@{d.me}> that's strange, assume its still zero") if mentioned else "all good here"
+        d.on_inbound({"user": U, "channel": D, "channel_type": "im", "text": text, "ts": ts})
+        return S.load_item(f"{D}-{ts.replace('.', '_')}")
+    finally:
+        d.triager.run = real
+
+
+check("a confident ignore on a mention is lifted to an ack, so it reaches you",
+      (_triage_ignore(True).get("triage") or {}).get("route") == "ack")
+check("and the same message without your name is still ignored, as it should be",
+      (_triage_ignore(False).get("triage") or {}).get("route") == "ignore")
+
+# The record: three times the writer took a hold and turned it into silence, and every one was a
+# direct @mention asking for something. Triage's confidence floor rewrites triage's route, not the
+# writer's choice, so nothing stood between a mention and nothing at all.
+def _ignore_a_mention():
+    it = S.load_item(iid3b); it["mentioned"] = True; S.save_item(it)
+    try:
+        S.cmd_act(SimpleNamespace(item=iid3b, action="ignore", text="", text_file=None, emoji="",
+                                  sources="", note="", urgency=None, task="", role="", thread=False))
+    except SystemExit as e:
+        return str(e)
+    return ""
+
+
+_refused = _ignore_a_mention()
+check("the writer cannot answer a mention with silence", "not available here" in _refused)
+check("and is told what to do instead", "ack" in _refused and "emoji" in _refused)
 
 S.execute_decision(d, S.load_item(iid3), {"action": "ack", "text": ""}, d.ledger, d.followups, set(), state=d.state)
 check("ack → 👀 reaction", fc.reactions[-1][2] == "eyes")
