@@ -1060,6 +1060,49 @@ def _hold_note_is_shown():
 
 check("a hold's note reaches the owner, not just the item file", _hold_note_is_shown())
 
+# `total_cost_usd` is the session running total, not the run's. Stored raw and then summed, four
+# days of drafts added up to $124 against a real spend of $36 — and the per-message figure it
+# implied ($3.91 for the word "Will do") pointed straight at the wrong problem.
+def _marginal_costs():
+    seen = []
+    real = S._run_claude_once
+
+    def fake(item, session, prompt=None):
+        seen.append(session)
+        total = 0.40 + 0.20 * len(seen)   # a session total that only ever climbs
+        return [], {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": total}, ""
+
+    S._run_claude_once = fake
+    try:
+        it = S.load_item(iid)
+        first = S.run_claude(it, d.state)[1]["marginal_cost_usd"]
+        second = S.run_claude(S.load_item(iid), d.state)[1]["marginal_cost_usd"]
+    finally:
+        S._run_claude_once = real
+    return first, second
+
+
+_m1, _m2 = _marginal_costs()
+check("the first run in a session costs what the session has cost", abs(_m1 - 0.60) < 1e-6)
+check("the second is charged the delta, not the running total again", abs(_m2 - 0.20) < 1e-6)
+
+# 13KB of worked examples in every dump, to produce "Checking". They are the single biggest block
+# in `show` after VOICE.md, and four routes in five never write prose at all.
+TRIAGE = {"source": "jev:test", "confidence": 0.6, "topic": "status_request", "sensitivity": 2.0,
+          "urgency": 3.0, "needs_context": 0.8, "asks_for_content": 0.2, "can_answer": 0.3}
+
+
+def _rendered(route):
+    it = dict(S.load_item(iid), triage=dict(TRIAGE, route=route))
+    return S.render_item(it, d.ledger, set())
+
+
+check("the worked examples are there when the writer actually composes a reply",
+      "<them>" in _rendered("reply"))
+check("and are not carried on a route that ends in a word or two", "<them>" not in _rendered("hold"))
+check("the writer is told how to fetch them if it needs them anyway",
+      "voice --user" in _rendered("escalate"))
+
 # A standing dead state — logged out, rate-limited — used to sit unreported until a real message
 # paid to discover it. Both of today's outages were found by hand. The probe is the fix, and the
 # thing that can go wrong with it is noise: an alert on every tick is an alert nobody reads.

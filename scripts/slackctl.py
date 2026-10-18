@@ -727,9 +727,18 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
             f"  python3 {SCRIPT} search \"<words>\" --with {item['sender']}",
             f"  python3 {SCRIPT} about {item['sender']}",
             f"  python3 {SCRIPT} note {item['sender']} \"<one durable fact about them>\""]
-    out += ["", "--- your voice (VOICE.md) ---", voice.load_notes() or "(VOICE.md is empty — run /slack-autoreply setup)",
-            "", "--- how you actually write (real messages; <them> is what you were replying to) ---",
-            voice.format_samples(voice.pick_samples(voice.load_samples(), item["channel"], item["sender"]))]
+    out += ["", "--- your voice (VOICE.md) ---", voice.load_notes() or "(VOICE.md is empty — run /slack-autoreply setup)"]
+    # The worked examples are 13KB of the 37KB this prints, and they only earn that on a `reply` —
+    # four routes in five end in a word or two ("Checking", "Will do") or in nothing at all, and
+    # VOICE.md alone covers those. So they are fetched when they are needed, not carried every time.
+    if (item.get("triage") or {}).get("route") == "reply":
+        out += ["", "--- how you actually write (real messages; <them> is what you were replying to) ---",
+                voice.format_samples(voice.pick_samples(voice.load_samples(), item["channel"], item["sender"]))]
+    else:
+        out += ["", "--- how you actually write ---",
+                f"not printed: triage routes this as {(item.get('triage') or {}).get('route') or 'unknown'}, "
+                f"which VOICE.md above already covers. If you end up writing real prose, read the worked "
+                f"examples first:\n  python3 {SCRIPT} voice --user {item['sender']}"]
     return "\n".join(out)
 
 
@@ -1089,15 +1098,26 @@ def run_claude(item: dict, state: "State | None" = None, prompt: str | None = No
         tools, result, err = _run_claude_once(item, session)
     if result is not None:
         key, sid = session_key(item), session[0]
+        total = result.get("total_cost_usd")
 
         def rec(d):
             prev = d["sessions"].get(key) or {}
-            runs = prev.get("runs", 0) + 1 if prev.get("id") == sid else 1
-            d["sessions"][key] = {"id": sid, "runs": runs, "last": now_iso()}
+            same = prev.get("id") == sid
+            runs = prev.get("runs", 0) + 1 if same else 1
+            d["sessions"][key] = {"id": sid, "runs": runs, "last": now_iso(),
+                                  "cost": total if total is not None else prev.get("cost")}
             if len(d["sessions"]) > 300:
                 for k in sorted(d["sessions"], key=lambda x: d["sessions"][x]["last"])[: len(d["sessions"]) - 300]:
                     d["sessions"].pop(k, None)
-        state.update(rec)
+            return prev.get("cost") if same else None
+
+        prev_total = state.update(rec)
+        # `total_cost_usd` is the session's running total, not this run's. Stored as-is and then
+        # summed, it over-counts: four days of drafts added up to $124 when the real spend was
+        # $36. What a message cost is the delta since the last run in its session.
+        if total is not None:
+            result["marginal_cost_usd"] = (round(total - prev_total, 6)
+                                           if prev_total is not None and total >= prev_total else total)
         item["session"] = {"id": sid, "resumed": session[1]}
     if writer_healthy(result, err)[0]:
         # What the probe's idle gate reads: a real run just proved the writer works, so there is
@@ -1511,10 +1531,13 @@ class Daemon(Slack):
                 self.notify(f"⚠️ Couldn't handle a message from *{item['sender_name']}* ({describe_where(item)}): {item['outcome']['why'][:200]}\n{quote(item['text'][:300])}"
                             + (f"\n{item['permalink']}" if item.get("permalink") else ""))
                 return
-            item["run"] = {"tools": tools, "cost_usd": cost, "turns": (result or {}).get("num_turns"), "subtype": (result or {}).get("subtype")}
+            item["run"] = {"tools": tools, "cost_usd": (result or {}).get("marginal_cost_usd"),
+                           "cost_session_total": cost, "turns": (result or {}).get("num_turns"),
+                           "subtype": (result or {}).get("subtype")}
             summary = execute_decision(self, item, decision, self.ledger, self.followups, self.share_trusted, observed_tools=tools, state=self.state)
             self._count(item["channel"])
-            log.info("%s%s", summary, f" · ${cost:.3f}" if cost else "")
+            marg = (result or {}).get("marginal_cost_usd")
+            log.info("%s%s", summary, f" · ${marg:.3f} (session ${cost:.2f})" if marg else "")
 
     # ----------------------------------------------------------------- tick
 

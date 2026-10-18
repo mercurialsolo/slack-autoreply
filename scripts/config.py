@@ -130,7 +130,13 @@ CFG = dict(
     dispatch_parallel=env_int("DISPATCH_PARALLEL", 2),
     dispatch_use_api_key=env_bool("DISPATCH_USE_API_KEY", False),
     session_continuity=env_bool("SESSION_CONTINUITY", True),
-    session_max_age_hours=env_float("SESSION_MAX_AGE_HOURS", 72),
+    # Why 1 and not 72: a resumed session replays its whole transcript, and the prompt cache that
+    # makes that cheap has a 1h TTL. Resumed inside the hour a run costs ~$0.25; resumed cold it
+    # pays full cache creation on everything prior and climbs with depth — measured $0.39 at the
+    # start of one session and $2.76 by its twelfth run, for the same three turns. Past an hour a
+    # resume buys a bigger bill and nothing else, so start fresh and let `show` rebuild the
+    # thread from Slack.
+    session_max_age_hours=env_float("SESSION_MAX_AGE_HOURS", 1),
     session_max_runs=env_int("SESSION_MAX_RUNS", 20),
     context_dirs=env_list("CONTEXT_DIRS"),
     mcp_allow=env_list("CONTEXT_MCP_ALLOW", "*"),
