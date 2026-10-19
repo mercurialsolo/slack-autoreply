@@ -12,12 +12,12 @@ Scoring has two legs, deliberately: mechanical stylometrics against the owner's
 own measured habits, and the three chase-rules that only apply to some messages.
 A judge is not asked "does this sound like you" — it cannot see its own style.
 
-Known limitation — the mechanical legs are sound, the substance is not. The writer can call
-`slackctl history`, and these inbounds are real messages from real threads, so at draft time it
-can read the reply the owner actually sent and everything that came after it. "Held out" is true
-of the voice corpus, not of the writer's reach. Trust the style scores; do not read the drafts as
-evidence the substance was reached unaided. Fixing it means passing the pre-`ts` thread as
-item["context"] and telling the writer not to call `history`.
+Sealed, as of 2026-10-19. Each pair carries the thread as it stood *before* the owner replied,
+and the item is marked `sealed`, so `run_claude` sets AUTOREPLY_SEALED and the CLI refuses
+`history`, `search`, `about` and `ask` for the length of the run. Until then the writer could read
+the very reply it was being scored against, and the substance half of every past score is worthless
+for it. The style scores were always sound; `runs.jsonl` rows written before this date are marked
+`sealed: false` and should be re-run, not re-scored.
 """
 import argparse, json, os, re, sys, time, uuid
 from datetime import datetime, timezone
@@ -29,6 +29,7 @@ import config, voice  # noqa: E402
 
 PAIRS = config.STATE_DIR / "curriculum" / "heldout.jsonl"
 RUNS = config.STATE_DIR / "curriculum" / "runs.jsonl"
+EVAL_LAST = config.STATE_DIR / "curriculum" / "last.json"   # what `status` reads
 GREETING = re.compile(r"^\s*(hi|hey|hello|dear|good (morning|afternoon|evening))\b", re.I)
 PADDING = re.compile(r"^\s*(thanks for|thank you for|great question|hope you|happy to|i'd be happy)", re.I)
 # A date Solo invented rather than one the owner gave it.
@@ -59,9 +60,13 @@ def build_pairs(since: str, limit: int) -> list[dict]:
                     mine.append(nxt["text"])
             if not mine:
                 continue
+            # Everything said before they spoke, and nothing after — this is the whole world the
+            # writer gets. msgs is oldest-first, so msgs[:i] is exactly the past.
+            before = [f"[{s.names.get(x.get('user', ''), 'them')}]: {x['text']}"
+                      for x in msgs[max(0, i - 8):i] if x.get("text")]
             out.append({"inbound": m["text"], "sender": s.names.get(m.get("user", ""), "Sri"),
                         "channel_type": ctype, "channel_name": None if ctype == "im" else ref,
-                        "actual": "\n".join(mine), "ts": m["ts"],
+                        "actual": "\n".join(mine), "ts": m["ts"], "before": before,
                         "when": datetime.fromtimestamp(float(m["ts"])).strftime("%b %d %H:%M")})
     out.sort(key=lambda p: p["ts"])
     PAIRS.parent.mkdir(parents=True, exist_ok=True)
@@ -71,13 +76,14 @@ def build_pairs(since: str, limit: int) -> list[dict]:
 
 def draft_for(pair: dict) -> dict | None:
     """Run the real writer on a simulated item. Nothing can send: simulated=True."""
-    item = {"id": f"eval-{uuid.uuid4().hex[:8]}", "created": S.now_iso(), "status": "queued", "simulated": True,
+    item = {"id": f"eval-{uuid.uuid4().hex[:8]}", "created": S.now_iso(), "status": "queued",
+            "simulated": True, "sealed": True, "mentioned": False,
             "channel": "EVAL", "channel_type": pair["channel_type"], "channel_name": pair["channel_name"],
             "ts": f"{time.time():.6f}", "thread_ts": None, "reply_thread_ts": None,
             "sender": "UEVAL", "sender_name": pair["sender"],
             "sender_handle": pair["sender"].lower().replace(" ", ""),
             "text": pair["inbound"], "permalink": None,
-            "context": f"[{pair['sender']}]: {pair['inbound']}"}
+            "context": "\n".join((pair.get("before") or []) + [f"[{pair['sender']}]: {pair['inbound']}"])}
     S.save_item(item)
     S.run_claude(item, S.State())
     fresh = json.loads(S.item_path(item["id"]).read_text())
@@ -141,7 +147,8 @@ def main() -> None:
         sc = score(text, q)
         results.append((q, route, text, sc))
         with RUNS.open("a") as fh:
-            fh.write(json.dumps({"pair": q, "route": route, "text": text}) + "\n")
+            fh.write(json.dumps({"pair": q, "route": route, "text": text, "sealed": True,
+                                 "at": S.now_iso()}) + "\n")
         print(f"[{i}] {q['when']} {q['sender']}: {q['inbound'][:66]}")
         print(f"    they wrote: {q['actual'][:100]!r} ({sc['actual_words']}w)")
         print(f"    solo     : {text[:100]!r} ({sc['words']}w, route={route})")
@@ -167,8 +174,12 @@ def report(results: list, bar: float) -> None:
             worst[f] = worst.get(f, 0) + 1
     if worst:
         print("what to fix, most common first: " + ", ".join(f"{k} ({v})" for k, v in sorted(worst.items(), key=lambda x: -x[1])))
-    print("\nMechanical only. Read the pairs above for substance — whether the draft answered what was\n"
-          "asked is the half no regex scores.")
+    EVAL_LAST.parent.mkdir(parents=True, exist_ok=True)
+    EVAL_LAST.write_text(json.dumps({"at": S.now_iso(), "clean": clean, "n": len(results),
+                                     "rate": round(rate, 3), "bar": bar, "pass": rate >= bar}))
+    print("\nMechanical only, but sealed: the writer could not read the reply it was scored against.\n"
+          "Read the pairs above for substance — whether the draft answered what was asked is the\n"
+          "half no regex scores.")
 
 
 if __name__ == "__main__":

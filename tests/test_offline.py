@@ -454,6 +454,55 @@ d.state.update(lambda st: st["sessions"].__setitem__(f"{C}:1700000020.000",
 check("an unmentioned reply in a thread Solo already drafted in is picked up", _thread_reply("1700000020.000"))
 check("and in a thread it has never touched it is still left alone", not _thread_reply("1700000021.000"))
 
+# The learning loop's last two stages are manual, so the evidence piles up unread. These three
+# are the part that makes that visible — the daemon counts the debt and asks; it never edits the
+# guide itself, because `review` writes to a git repo the owner owns.
+def _review_debt():
+    guide = S.config.p("VOICE.md")
+    os.utime(guide, (time.time() - 60, time.time() - 60))   # VOICE.md was last written a minute ago
+    before, _ = S.review_debt()
+    with open(S.config.p("corrections.jsonl"), "a") as fh:
+        for _ in range(3):
+            fh.write(json.dumps({"at": S.now_iso(), "outcome": "replaced"}) + "\n")
+    return before, S.review_debt()[0]
+
+
+_was, _now = _review_debt()
+check("corrections written after VOICE.md changed are the review debt", _now - _was == 3)
+
+os.utime(S.config.p("VOICE.md"), None)   # you ran `review`; the guide is current again
+check("and folding them in clears the debt", S.review_debt()[0] == 0)
+
+
+def _nudges():
+    old = S.CFG["review_nudge_after"]
+    S.CFG["review_nudge_after"] = 2
+    os.utime(S.config.p("VOICE.md"), (time.time() - 60, time.time() - 60))   # debt again
+    sent = []
+    real = S.Daemon.notify                           # patch the class: an instance attribute here
+    S.Daemon.notify = lambda self, t: sent.append(t) # would shadow every later test's patch
+    try:
+        d.nudge_review(); d.nudge_review()           # twice on the same VOICE.md
+    finally:
+        S.Daemon.notify = real; S.CFG["review_nudge_after"] = old
+    return sent
+
+
+_n = _nudges()
+check("Solo asks you to run review once the debt is real", len(_n) == 1 and "corrections since VOICE.md" in _n[0])
+check("and does not ask again until VOICE.md moves", len(_n) == 1)
+check("it asks for the reviewer rather than editing the guide itself", "solo review" in _n[0])
+
+_sealed = subprocess.run([sys.executable, str(S.SCRIPT_REAL), "history", "@someone"],
+                         capture_output=True, text=True,
+                         env={**os.environ, "AUTOREPLY_SEALED": "1", "AUTOREPLY_HOME": str(TMP)})
+check("a sealed rehearsal cannot read the thread it is being scored against",
+      _sealed.returncode != 0 and "sealed" in (_sealed.stderr + _sealed.stdout).lower())
+check("every sealed command is a real subcommand", S.SEALED_FORBIDDEN <= {"history", "search", "about", "ask"})
+check("the seal reaches the writer's environment",
+      S.claude_command({**S.load_item(iid3b), "sealed": True})[1].get("AUTOREPLY_SEALED") == "1"
+      and "AUTOREPLY_SEALED" not in S.claude_command(S.load_item(iid3b))[1])
+
 _refused = _ignore_a_mention()
 check("the writer cannot answer a mention with silence", "not available here" in _refused)
 check("and is told what to do instead", "ack" in _refused and "emoji" in _refused)

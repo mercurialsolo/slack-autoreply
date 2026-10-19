@@ -982,6 +982,41 @@ def mcp_config_for(cwd: str | None, allow: list[str]) -> tuple[list[str], Path |
     return sorted(defs), path
 
 
+def review_debt() -> tuple[int, str]:
+    """(corrections written since VOICE.md last changed, when that was).
+
+    The learning loop has three stages and only the first runs by itself: capture is the daemon's,
+    distilling into VOICE.md is `review`, and verifying is `voice_eval`. Nothing schedules the last
+    two, so the evidence piles up unread — on 19 Oct VOICE.md had not moved in three days while 15
+    correction pairs accrued. This is the number that says so out loud.
+    """
+    guide = config.p("VOICE.md")
+    try:
+        since = datetime.fromtimestamp(guide.stat().st_mtime)
+    except OSError:
+        return 0, ""
+    path = config.p("corrections.jsonl")
+    if not path.exists():
+        return 0, since.isoformat(timespec="seconds")
+    n = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            at = json.loads(line).get("at", "")
+        except json.JSONDecodeError:
+            continue
+        if at and datetime.fromisoformat(at) > since:
+            n += 1
+    return n, since.isoformat(timespec="seconds")
+
+
+def last_eval() -> dict:
+    """What the last sealed rehearsal scored, or {} if none has been run."""
+    try:
+        return json.loads((config.STATE_DIR / "curriculum" / "last.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def session_key(item: dict) -> str:
     return f"{item['channel']}:{item['reply_thread_ts']}" if item.get("reply_thread_ts") else item["channel"]
 
@@ -1041,6 +1076,8 @@ def claude_command(item: dict, session: tuple[str, bool] | None = None, prompt: 
     env = dict(os.environ)
     env["AUTOREPLY_DISPATCH"] = "1"
     env["AUTOREPLY_HOME"] = str(config.STATE_DIR)
+    if item.get("sealed"):
+        env["AUTOREPLY_SEALED"] = "1"
     if not CFG["dispatch_use_api_key"]:
         env.pop("ANTHROPIC_API_KEY", None)   # bill the subscription login, not the API key
     return cmd, env, cwd
@@ -1620,6 +1657,29 @@ class Daemon(Slack):
                 except Exception:
                     pass
         self.probe_writer()
+        self.nudge_review()
+
+    def nudge_review(self) -> None:
+        """Ask for the reviewer, do not become one.
+
+        `review` edits VOICE.md, which lives in a git repo. An unattended Claude run with write
+        access to the owner's wiki is exactly the thing they have said no to, so the daemon counts
+        the debt and asks; the owner runs it. Once per VOICE.md revision — the mtime is the key, so
+        running `review` silences this until the next batch of corrections.
+        """
+        n, since = review_debt()
+        if n < CFG["review_nudge_after"] or not since:
+            return
+        if (self.state.read().get("review") or {}).get("nudged_for") == since:
+            return
+        self.state.update(lambda d: d.update(review={"nudged_for": since, "at": now_iso(), "n": n}))
+        ev = last_eval()
+        scored = (f" · last rehearsal {ev['clean']}/{ev['n']} clean ({'PASS' if ev.get('pass') else 'below bar'})"
+                  if ev else " · no rehearsal has been run yet")
+        log.info("review debt: %d corrections since VOICE.md changed", n)
+        self.notify(f"📚 *{n} corrections since VOICE.md last changed* ({since[:10]}){scored}\n"
+                    f"_that is what I got wrong and you fixed, still unread. run_ `solo review` "
+                    f"_to fold it in; nothing here changes until you do._")
 
     def probe_writer(self) -> None:
         """Notice a dead writer before a message pays to discover it.
@@ -1821,6 +1881,11 @@ def cmd_status(a):
         print(f"writer: {'ok' if ok else 'DOWN — ' + why}"
               + (f" · last good {last_ok}" if last_ok else "")
               + ("" if ok else f" · since {(h.get('since') or '')[11:16] or 'unknown'}"))
+    n, since = review_debt()
+    ev = last_eval()
+    print(f"learning: {n} corrections unreviewed (VOICE.md {since[:10] or '?'}) · "
+          + (f"rehearsal {ev['clean']}/{ev['n']} clean, bar {ev['bar']:.0%} — {'PASS' if ev.get('pass') else 'BELOW BAR'} ({ev['at'][:10]})"
+             if ev else "no rehearsal yet — python3 tools/voice_eval.py run"))
     print(f"context dirs: {', '.join(CFG['context_dirs']) or '(none — set CONTEXT_DIRS)'} · mcp: {', '.join(discover_mcp_names(CFG['claude_cwd'], CFG['mcp_allow'])) or '(none found)'}")
     if (uptake := proposal_uptake(14)) is not None:
         print(uptake)
@@ -2515,6 +2580,12 @@ def cmd_review_data(a):
 DISPATCH_FORBIDDEN = frozenset({"approve", "drop", "dispatch", "pause", "resume", "listen", "done",
                                 "build-voice", "delegations"})
 
+# A rehearsal scored against real history is only honest if the writer cannot read the future.
+# The eval pairs are real threads, so these four would hand it the very reply it is being scored
+# against — `history` and `search` directly, `about` through its recent-DM tail, `ask` through a
+# second Claude that can call them. Telling the writer in the prompt not to look is not a seal.
+SEALED_FORBIDDEN = frozenset({"history", "search", "about", "ask"})
+
 
 def main():
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)-5s %(message)s", datefmt="%H:%M:%S")
@@ -2583,6 +2654,10 @@ def main():
     # but `approve` would construct a real Slack client and send the draft, which is the agent
     # approving its own work. Nothing below may be reached from inside a dispatched run; the
     # owner runs them, from their own terminal or by reacting in Slack.
+    if os.getenv("AUTOREPLY_SEALED") == "1" and a.cmd in SEALED_FORBIDDEN:
+        sys.exit(f"sealed: `{a.cmd}` is not available during a voice rehearsal — the thread it "
+                 f"would read contains the reply you are being scored against.\n"
+                 f"   answer from the conversation you were handed, as you would have at the time.")
     if os.getenv("AUTOREPLY_DISPATCH") == "1" and a.cmd in DISPATCH_FORBIDDEN:
         sys.exit(f"refused: `{a.cmd}` cannot be run by the drafting agent. "
                  f"Write the reply with `act`; only {os.getenv('USER', 'the owner')} approves or sends. "

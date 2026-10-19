@@ -136,6 +136,7 @@ CFG = dict(
     # start of one session and $2.76 by its twelfth run, for the same three turns. Past an hour a
     # resume buys a bigger bill and nothing else, so start fresh and let `show` rebuild the
     # thread from Slack.
+    review_nudge_after=env_int("REVIEW_NUDGE_AFTER", 10),   # unread corrections before Solo asks you to run `review`
     session_max_age_hours=env_float("SESSION_MAX_AGE_HOURS", 1),
     session_max_runs=env_int("SESSION_MAX_RUNS", 20),
     context_dirs=env_list("CONTEXT_DIRS"),
