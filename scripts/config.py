@@ -148,6 +148,7 @@ CFG = dict(
     # Solo runs on the node; the owner's agents run on their laptop. Mailboxes are per-machine —
     # a `bus send` here queues here and is never seen there — so crossing machines is relay's job.
     delegate_peer=env("DELEGATE_PEER", ""),
+    delegate_repeat_hours=env_float("DELEGATE_REPEAT_HOURS", 6),   # don't re-ask the same conversation inside this
     delegate_cwd=env("DELEGATE_CWD", ""),
     claudectl_bin=env("CLAUDECTL_BIN", "claudectl"),
 )

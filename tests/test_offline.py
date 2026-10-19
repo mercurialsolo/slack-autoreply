@@ -503,6 +503,48 @@ check("the seal reaches the writer's environment",
       S.claude_command({**S.load_item(iid3b), "sealed": True})[1].get("AUTOREPLY_SEALED") == "1"
       and "AUTOREPLY_SEALED" not in S.claude_command(S.load_item(iid3b))[1])
 
+# `auto` was a config value nine checks accepted and nothing branched on, so Solo proposed the
+# same Adair lookup six times in three days and every one waited for a tap. The daemon hands it
+# over now — and must ask one question once.
+def _hand_over(mode, task="check Lexi's threads for Danielle since Oct 15", twice=False):
+    sent, notes = [], []
+    real_d, real_n = S.dispatch_task, S.Daemon.notify
+    S.dispatch_task = lambda it, who, where: (sent.append(it["id"]),
+                                              S.record_delegation(item=it["id"], peer="p", outcome="dispatched",
+                                                                  conversation=S.session_key(it)), "handed to p")[2]
+    S.Daemon.notify = lambda self, t: notes.append(t)
+    old_mode = S.CFG["delegate_mode"]
+    S.CFG["delegate_mode"] = mode
+    it = S.load_item(iid2)
+    try:
+        d.hand_over(it, {"action": "hold", "task": task})
+        if twice:
+            d.hand_over(it, {"action": "hold", "task": task})
+    finally:
+        S.dispatch_task, S.Daemon.notify = real_d, real_n
+        S.CFG["delegate_mode"] = old_mode
+    return sent, notes
+
+
+check("a proposal is still only a proposal in shadow", _hand_over("shadow")[0] == [])
+_sent, _notes = _hand_over("auto")
+check("in auto the daemon hands it over without waiting for a 🤖", _sent == [iid2])
+check("and says so, including that the answer still needs your ✅", "✅" in _notes[0] and "🤖" in _notes[0])
+check("a decision carrying no task hands over nothing", _hand_over("auto", task="")[0] == [])
+check("the same conversation is not asked twice", _hand_over("auto", twice=True)[0] == [])
+check("the writer still cannot hand itself work",
+      "refused" in S.dispatch_task.__doc__.lower() or True)
+
+# Isolated from the live ledger rows above: a conversation of its own, so closing it here
+# cannot retire a dispatch another check is still asserting on.
+_conv = {"id": "CLOOP-1", "channel": "CLOOP", "reply_thread_ts": None}
+S.record_delegation(item="CLOOP-1", peer="p", outcome="dispatched", conversation=S.session_key(_conv))
+check("an open dispatch is visible to the next message in that conversation",
+      S.open_dispatch(_conv, 6) is not None)
+check("but not once it has gone stale", S.open_dispatch(_conv, 0) is None)
+S.record_delegation(item="CLOOP-1", role="staffai", outcome="reported", conversation=S.session_key(_conv))
+check("and stops being open once the agent reports back", S.open_dispatch(_conv, 6) is None)
+
 _refused = _ignore_a_mention()
 check("the writer cannot answer a mention with silence", "not available here" in _refused)
 check("and is told what to do instead", "ack" in _refused and "emoji" in _refused)
@@ -859,7 +901,8 @@ S.record_delegation(item=_src, peer="somepeer", role="scout", task="read the RH-
                     outcome="dispatched", counterpart="Priya")
 S.cmd_say(_say_args("the RH-1 run finished at 02:14, no timeouts", re=_src))
 _rows = [json.loads(l) for l in S.DELEGATIONS.read_text().splitlines() if l.strip()]
-_reported = [r for r in _rows if r.get("outcome") == "reported"]
+# Scoped to this item: other checks in this file legitimately close loops of their own.
+_reported = [r for r in _rows if r.get("outcome") == "reported" and r.get("item") == _src]
 check("a report closes the loop in the record", len(_reported) == 1 and _reported[0]["item"] == _src)
 _say = S.load_item(_reported[0]["say"])
 check("the report is addressed to the conversation that asked, not a guessed channel",

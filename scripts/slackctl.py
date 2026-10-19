@@ -184,6 +184,7 @@ the only way it reaches anyone. If you cannot answer it, say that instead of gue
 
 def record_delegation(**row) -> None:
     row["at"] = now_iso()
+    row.setdefault("conversation", "")
     with open(DELEGATIONS, "a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
@@ -222,6 +223,39 @@ def dispatched_item_ids() -> set[str]:
         if row.get("outcome") == "dispatched" and row.get("item"):
             out.add(row["item"])
     return out
+
+
+def open_dispatch(item: dict, hours: float) -> dict | None:
+    """A dispatch already out for this conversation and not yet reported back, or None.
+
+    Solo proposed the same Danielle/Ryan/Kerry lookup six times in three days, because each
+    message is handled alone and knows nothing of the one before it. Under `shadow` that cost a
+    tap; dispatching automatically it would be six agent runs for one question. The conversation
+    is the unit — the thread if there is one, the channel and counterpart otherwise.
+    """
+    if not DELEGATIONS.exists():
+        return None
+    key = session_key(item)
+    cutoff = datetime.now() - timedelta(hours=hours)
+    open_row = None
+    for line in DELEGATIONS.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("conversation") != key:
+            continue
+        if row.get("outcome") == "dispatched":
+            try:
+                if datetime.fromisoformat(row["at"]) >= cutoff:
+                    open_row = row
+            except (KeyError, ValueError):
+                continue
+        elif open_row and row.get("item") == open_row.get("item"):
+            open_row = None      # it came back: reported or refused
+    return open_row
 
 
 def report_target(item: dict) -> dict:
@@ -274,7 +308,8 @@ def dispatch_task(item: dict, who: str, where: str) -> str:
         record_delegation(item=item["id"], peer=peer, role=role, task=task, outcome="failed",
                           error=(out.stderr or out.stdout)[:200])
         return f"claudectl refused it: {(out.stderr or out.stdout).strip()[:160]}"
-    record_delegation(item=item["id"], peer=peer, role=role, task=task, outcome="dispatched", counterpart=who)
+    record_delegation(item=item["id"], peer=peer, role=role, task=task, outcome="dispatched",
+                      counterpart=who, conversation=session_key(item))
     return f"handed to {peer}: {task[:80]} — it reports back with `solo say`, which still needs your ✅"
 
 
@@ -701,9 +736,14 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
             # yourself" and still never reached for it.
             if CFG["delegate_mode"] in ("shadow", "auto"):
                 out.append("      → if what is missing is a specific, read-only lookup somewhere you cannot "
-                           "reach, add --task \"<the question>\" to your act call. It proposes an agent "
-                           "investigation the owner hands over with 🤖; it never runs by itself. A hold "
-                           "carrying a proposal beats a bare hold.")
+                           "reach, add --task \"<the question>\" to your act call. "
+                           + ("It is sent to the agent as soon as you finish, and its answer comes back as "
+                              "a draft for the owner — so write the question as you would to a colleague "
+                              "who cannot see this thread."
+                              if CFG["delegate_mode"] == "auto" else
+                              "It proposes an agent investigation the owner hands over with 🤖; it never "
+                              "runs by itself.")
+                           + " A hold carrying a proposal beats a bare hold.")
         phrase, due = hold_deadline(t["urgency"])
         out.append(f"if hold: promise '{phrase}' (due {due:%a %-I:%M%p})")
     else:
@@ -1619,9 +1659,35 @@ class Daemon(Slack):
                            "cost_session_total": cost, "turns": (result or {}).get("num_turns"),
                            "subtype": (result or {}).get("subtype")}
             summary = execute_decision(self, item, decision, self.ledger, self.followups, self.share_trusted, observed_tools=tools, state=self.state)
+            self.hand_over(item, decision)
             self._count(item["channel"])
             marg = (result or {}).get("marginal_cost_usd")
             log.info("%s%s", summary, f" · ${marg:.3f} (session ${cost:.2f})" if marg else "")
+
+    def hand_over(self, item: dict, decision: dict) -> None:
+        """Under DELEGATE_MODE=auto, send the proposal the writer made instead of waiting for 🤖.
+
+        The gate was never the hard part — Solo proposed the same Adair lookup six times in three
+        days and every one sat unread, because a tap on a phone is a worse bottleneck than no
+        automation at all. What the gate was protecting is unchanged: the brief is read-only, the
+        agent reports through `say`, and that draft still waits for the owner's ✅. Nothing reaches
+        a person without them.
+
+        It lives in the daemon on purpose. `dispatch_task` refuses under AUTOREPLY_DISPATCH=1, and
+        `cmd_act` runs inside the writer — wiring this into the decision path would be refused
+        every time by a guard that is right. The writer proposes; the daemon hands over.
+        """
+        task = (decision.get("task") or "").strip()
+        if not task or CFG["delegate_mode"] != "auto" or item.get("simulated"):
+            return
+        if (open_row := open_dispatch(item, CFG["delegate_repeat_hours"])) is not None:
+            log.info("not re-asking: same conversation already with %s since %s",
+                     open_row.get("peer", "the agent"), open_row.get("at", "")[11:16])
+            return
+        msg = dispatch_task(item, item.get("sender_name", "someone"), describe_where(item))
+        log.info("auto-dispatch: %s", msg)
+        self.notify(f"🤖 *Asked `{CFG['delegate_role'] or 'the agent'}` on your behalf* — {task[:200]}\n"
+                    f"_its answer comes back as a draft for your ✅, same as everything else._")
 
     # ----------------------------------------------------------------- tick
 
