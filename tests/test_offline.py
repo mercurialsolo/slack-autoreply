@@ -542,7 +542,10 @@ S.record_delegation(item="CLOOP-1", peer="p", outcome="dispatched", conversation
 check("an open dispatch is visible to the next message in that conversation",
       S.open_dispatch(_conv, 6) is not None)
 check("but not once it has gone stale", S.open_dispatch(_conv, 0) is None)
-S.record_delegation(item="CLOOP-1", role="staffai", outcome="reported", conversation=S.session_key(_conv))
+# Recorded exactly as `cmd_say` records it: the item id it was handed, and no conversation —
+# the agent reporting back has never heard of a session key. Writing it here with one is what
+# let a dedupe that could never clear ship green.
+S.record_delegation(item="CLOOP-1", role="staffai", outcome="reported", say="say-x")
 check("and stops being open once the agent reports back", S.open_dispatch(_conv, 6) is None)
 
 _refused = _ignore_a_mention()

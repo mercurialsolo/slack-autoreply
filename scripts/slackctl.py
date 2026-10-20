@@ -228,10 +228,17 @@ def dispatched_item_ids() -> set[str]:
 def open_dispatch(item: dict, hours: float) -> dict | None:
     """A dispatch already out for this conversation and not yet reported back, or None.
 
-    Solo proposed the same Danielle/Ryan/Kerry lookup six times in three days, because each
-    message is handled alone and knows nothing of the one before it. Under `shadow` that cost a
-    tap; dispatching automatically it would be six agent runs for one question. The conversation
-    is the unit — the thread if there is one, the channel and counterpart otherwise.
+    Each message is handled alone and knows nothing of the one before it, so a thread that keeps
+    asking the same question would, under `auto`, become one agent run per message. The unit is
+    the conversation as `session_key` draws it: a thread. A fresh top-level @-mention is its own
+    conversation and is always asked — which is why Solo proposed the same Danielle/Ryan/Kerry
+    lookup six times in three days and this would not have collapsed those six. It collapses the
+    follow-ups inside one thread, which is where the repetition actually piles up.
+
+    The row that closes a dispatch is matched by `item`, not by conversation: `cmd_say` records
+    the return with the item id it was given and no conversation at all, so filtering on the
+    conversation first — as this did — meant a dispatch that had come back stayed "open" forever
+    and the thread was never asked again. The 19 Oct report at 13:27 is the row that showed it.
     """
     if not DELEGATIONS.exists():
         return None
@@ -245,16 +252,16 @@ def open_dispatch(item: dict, hours: float) -> dict | None:
             row = json.loads(line)
         except ValueError:
             continue
-        if row.get("conversation") != key:
-            continue
         if row.get("outcome") == "dispatched":
+            if row.get("conversation") != key:
+                continue
             try:
                 if datetime.fromisoformat(row["at"]) >= cutoff:
                     open_row = row
             except (KeyError, ValueError):
                 continue
         elif open_row and row.get("item") == open_row.get("item"):
-            open_row = None      # it came back: reported or refused
+            open_row = None      # it came back: reported, refused or failed
     return open_row
 
 
