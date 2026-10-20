@@ -143,6 +143,13 @@ CFG = dict(
     mcp_allow=env_list("CONTEXT_MCP_ALLOW", "*"),
     # Handing work to an agent starts in shadow: Solo proposes, the owner dispatches. "auto" is
     # earned later, from the record in delegations.jsonl, not switched on by hope.
+    # The routing gates. 0.5 and 0.6 are the values they shipped with, not values chosen against
+    # this traffic — `python3 tools/threshold_sweep.py` replays what each one catches and releases
+    # on messages already scored, with no model calls.
+    triage_max_execute=env_float("TRIAGE_MAX_EXECUTE", 0.5),
+    triage_min_answerable=env_float("TRIAGE_MIN_ANSWERABLE", 0.5),
+    triage_min_in_scope=env_float("TRIAGE_MIN_IN_SCOPE", 0.5),
+    triage_short_message=env_int("TRIAGE_SHORT_MESSAGE", 30),
     delegate_mode=env("DELEGATE_MODE", "shadow"),
     delegate_reach=env("DELEGATE_REACH", ""),
     delegate_role=env("DELEGATE_ROLE", ""),

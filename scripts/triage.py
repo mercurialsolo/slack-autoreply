@@ -153,6 +153,7 @@ class Triage:
     in_scope: float = 1.0      # 0..1: is about this workspace's own work
     forced: str | None = None  # why policy overrode the model's route
     model_route: str = ""      # what the model said before policy touched it
+    chars: int = 0             # length of the message itself, where the execute score goes astray
     raw: dict = field(default_factory=dict)
 
     def summary(self) -> str:
@@ -174,6 +175,11 @@ class Policy:
     # work. Both of these force escalate — the owner sees it and decides; nothing is auto-approved.
     max_execute: float = 0.5
     min_in_scope: float = 0.5
+    # A message this short is where `asks_to_execute` stops describing the message. Measured over
+    # 138 scored messages: at or under this length the median is 0.55, above it 0.36. "ty" came in
+    # at 0.86, "i dont think so" at 0.92, "421452" at 0.89 — none of them asks for anything. The
+    # score is reading the thread they arrived in.
+    short_message_chars: int = 30
 
     def apply(self, t: Triage) -> Triage:
         # Kept so forcing can be measured rather than argued about. The action rule fired on 48
@@ -186,8 +192,21 @@ class Policy:
         # These two come first: they are hard boundaries, not preferences, so they outrank
         # every other reason a message might have looked routine.
         if t.asks_to_execute >= self.max_execute:
-            t.route, t.forced = "escalate", f"asks for an action, not an answer ({t.asks_to_execute:.2f})"
-            return t
+            # …except where the score is measuring the thread rather than the message, and the
+            # model — which read both — chose to stay quiet. The boundary this gate defends is
+            # that Solo never performs an action. `ignore` and `ack` perform none: they are
+            # silence and an emoji. Forcing them to the owner does not protect anything, it just
+            # moves a "ty" into their queue. Observed, not supposed: "i think is the issue",
+            # 20 characters, scored 0.55, model said ignore, escalated.
+            #
+            # `hold` and `reply` are not exempt. "and dont have it run" is 20 characters and a
+            # genuine instruction; the owner should see it.
+            if 0 < t.chars <= self.short_message_chars and t.model_route in ("ignore", "ack"):
+                log.info("not forcing: %d-char message scored %.2f for action, model said %s",
+                         t.chars, t.asks_to_execute, t.model_route)
+            else:
+                t.route, t.forced = "escalate", f"asks for an action, not an answer ({t.asks_to_execute:.2f})"
+                return t
         # Scope only matters when Solo would SAY something. Ignoring an out-of-scope message
         # leaks nothing, and a bare FYI with little context scores low on scope for want of
         # signal rather than because it is off-limits — escalating those just moves the flood.
@@ -368,6 +387,9 @@ class Triager:
 
     def run(self, state: dict) -> Triage:
         t: Triage | None = None
+        # `apply` gates on a score the message's own length tells us to distrust, and it is the
+        # only place the message itself is still in hand.
+        chars = len(" ".join((state.get("latest_message") or "").split()))
         if self.jev_ok:
             try:
                 t = jev(state, self.me, self.api_key)
@@ -380,6 +402,7 @@ class Triager:
                 log.error("triage fallback failed too (%s)", e)
         if t is None:
             t = Triage("hold", 0.0, 3.0, 2.0, 0.5, 0.0, "default", forced="triage unavailable")
+        t.chars = chars
         return self.policy.apply(t)
 
 

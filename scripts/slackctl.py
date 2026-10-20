@@ -772,7 +772,12 @@ def load_services():
 
 
 def make_triager(me_name: str, llm) -> Triager:
-    return Triager(me_name, Policy(min_confidence=CFG["triage_min_confidence"], sensitivity_escalate=CFG["sensitivity_escalate"]),
+    return Triager(me_name, Policy(min_confidence=CFG["triage_min_confidence"],
+                                   sensitivity_escalate=CFG["sensitivity_escalate"],
+                                   max_execute=CFG["triage_max_execute"],
+                                   min_answerable=CFG["triage_min_answerable"],
+                                   min_in_scope=CFG["triage_min_in_scope"],
+                                   short_message_chars=CFG["triage_short_message"]),
                    llm, CFG["triage_fallback_model"])
 
 

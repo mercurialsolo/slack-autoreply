@@ -81,6 +81,9 @@ def replay(d: dict, gate: str, value: float) -> str:
     # recorded, and clear `forced` so the replayed summary is not carrying the old reason.
     kw["route"] = t.get("model_route") or t["route"]
     kw["forced"] = None
+    # The execute gate exempts a short message the model chose to stay quiet on, so a replay that
+    # does not carry the length models a policy that is not running.
+    kw["chars"] = t.get("chars") or len(" ".join((d.get("text") or "").split()))
     return T.Policy(**{GATES[gate][1]: value}).apply(T.Triage(**kw)).route
 
 

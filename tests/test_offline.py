@@ -703,6 +703,38 @@ _no_mr = {**_row, "_t": {k: v for k, v in _row["_t"].items() if k != "model_rout
 check("a row saved before the route was recorded replays from what it has",
       TS.replay(_no_mr, "execute", 0.6) == "escalate")
 
+# `asks_to_execute` stops describing the message when the message is a couple of words: median
+# 0.55 at 30 characters or fewer against 0.36 above it. On the first day of recording the model's
+# own route, "i think is the issue" — 20 chars, 0.55 — came back `ignore` and was escalated.
+def _gate(text, exec_score, route, **kw):
+    """Through `Triager.run`, not `Policy.apply` — the length is measured there, and a test that
+    set `chars` by hand would pass against code where production never sets it at all."""
+    tr = triage.Triager("me", triage.Policy(**kw), None, "")
+    tr.jev_ok, tr.api_key = True, "x"
+    real = triage.jev
+    triage.jev = lambda state, me, key: _tri(route=route, asks_to_execute=exec_score,
+                                             topic="action_request")
+    try:
+        return tr.run({"latest_message": text, "recent_conversation": ""})
+    finally:
+        triage.jev = real
+
+
+check("a two-word message the model chose to ignore is not forced to the owner",
+      _gate("i think is the issue", 0.55, "ignore").route == "ignore")
+check("an ack is silence too, so it is not forced either",
+      _gate("ty", 0.86, "ack").route == "ack")
+check("a short instruction the model did not drop still reaches them",
+      _gate("and dont have it run", 0.89, "hold").route == "escalate")
+check("and a long action request is untouched by any of this",
+      _gate("@Barada Sahu please fix login for Bill Katsak on guest-web", 0.97, "ignore").route == "escalate")
+check("the length that counts is the message's own, measured where the text still is",
+      _gate("i think is the issue", 0.55, "ignore").chars == 20)
+check("the exemption is a dial, not a constant",
+      _gate("i think is the issue", 0.55, "ignore", short_message_chars=5).route == "escalate")
+check("and the gate itself is still the owner's to set",
+      _gate("do the thing now please ok", 0.55, "reply", max_execute=0.9).route == "reply")
+
 _refused = _ignore_a_mention()
 check("the writer cannot answer a mention with silence", "not available here" in _refused)
 check("and is told what to do instead", "ack" in _refused and "emoji" in _refused)
