@@ -646,6 +646,14 @@ check("and it is not told the examples are unnecessary",
 check("a two-word ack still does not carry 13KB of examples",
       "not printed: triage routes this as" in S.render_item({**_say_item, "outbound": False}, d.ledger, set()))
 
+# The 13:27 Adair report went into the queue as "2 of 3 have replied\u23ce\u2022 Danielle" — the writer
+# typing a line break it could not put in a shell argument. One \u2705 away from Sri reading it.
+check("a line break typed as a glyph becomes a line break",
+      S.normalize_breaks("replied\u23ce\u2022 Danielle\u21b5\u2022 Ryan") == "replied\n\u2022 Danielle\n\u2022 Ryan")
+check("and the escape that already worked still does", S.normalize_breaks("a\\nb") == "a\nb")
+check("ordinary text is left alone", S.normalize_breaks("2 of 3 replied - nothing since") ==
+      "2 of 3 replied - nothing since")
+
 _refused = _ignore_a_mention()
 check("the writer cannot answer a mention with silence", "not available here" in _refused)
 check("and is told what to do instead", "ack" in _refused and "emoji" in _refused)

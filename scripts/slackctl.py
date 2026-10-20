@@ -2523,11 +2523,23 @@ def cmd_deadline(a):
     print(f"{phrase}\t{due.isoformat(timespec='minutes')}")
 
 
+# The writer reaches for a visible glyph when it wants a line break inside a shell argument.
+# `\n` was already translated here; ⏎ was not, and on 19 Oct an agent's report reached the draft
+# queue reading "2 of 3 have replied⏎• Danielle". The owner has not typed one of these once in
+# 360 messages, and none of them means anything in Slack but itself.
+RETURN_GLYPHS = str.maketrans({"\u23ce": "\n", "\u21b5": "\n", "\u240a": "\n", "\u2424": "\n"})
+
+
+def normalize_breaks(text: str) -> str:
+    """A line break the writer could only type as a visible character becomes a real one."""
+    return text.replace("\\n", "\n").translate(RETURN_GLYPHS)
+
+
 def cmd_act(a):
     item = load_item(a.item)
-    text = (a.text or "").replace("\\n", "\n").strip()
+    text = normalize_breaks(a.text or "").strip()
     if a.text_file:
-        text = Path(a.text_file).read_text(encoding="utf-8").strip()
+        text = normalize_breaks(Path(a.text_file).read_text(encoding="utf-8")).strip()
     if a.action in ("hold", "reply") and not text:
         sys.exit("--text is required for hold/reply")
     if a.action == "ignore" and item.get("mentioned"):
