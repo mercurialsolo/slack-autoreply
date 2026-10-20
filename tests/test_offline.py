@@ -612,6 +612,23 @@ check("a dispatch that never came back is not reported as an answer on its way",
 check("under seal the writer sees none of it — a report is future information in a rehearsal",
       "already been asked in this channel" not in S.render_item({**_later, "sealed": True}, d.ledger, set()))
 
+# The hint must not promise a hand-over the dedupe can silently withhold: a writer that reads
+# "still out — do not ask this again" above and proposes anyway has decided the new question is
+# a different one, and dropping it without a word is the dead channel again.
+_hint = S.render_item({**_later, "triage": {"route": "hold", "confidence": 0.7, "topic": "status_request",
+                                            "sensitivity": 2.0, "urgency": 3.0, "needs_context": 0.8,
+                                            "asks_for_content": 0.3, "can_answer": 0.2, "source": "test"}},
+                      d.ledger, set())
+check("the --task offer says what the dedupe will do with it",
+      "--task" in _hint and ("already has a question out" in _hint or S.CFG["delegate_mode"] != "auto"))
+_was_mode = S.CFG["delegate_mode"]; S.CFG["delegate_mode"] = "auto"
+_hint_auto = S.render_item({**_later, "triage": {"route": "hold", "confidence": 0.7, "topic": "status_request",
+                                                 "sensitivity": 2.0, "urgency": 3.0, "needs_context": 0.8,
+                                                 "asks_for_content": 0.3, "can_answer": 0.2, "source": "test"}},
+                           d.ledger, set())
+S.CFG["delegate_mode"] = _was_mode
+check("in auto it is not promised unconditionally", "already has a question out" in _hint_auto)
+
 _refused = _ignore_a_mention()
 check("the writer cannot answer a mention with silence", "not available here" in _refused)
 check("and is told what to do instead", "ack" in _refused and "emoji" in _refused)

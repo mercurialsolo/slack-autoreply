@@ -850,9 +850,11 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
             if CFG["delegate_mode"] in ("shadow", "auto"):
                 out.append("      → if what is missing is a specific, read-only lookup somewhere you cannot "
                            "reach, add --task \"<the question>\" to your act call. "
-                           + ("It is sent to the agent as soon as you finish, and its answer comes back as "
-                              "a draft for the owner — so write the question as you would to a colleague "
-                              "who cannot see this thread."
+                           + ("It is sent to the agent as soon as you finish — unless this thread "
+                              "already has a question out, in which case the daemon holds it until "
+                              "that one is answered rather than asking twice. Its answer comes back "
+                              "as a draft for the owner, so write the question as you would to a "
+                              "colleague who cannot see this thread."
                               if CFG["delegate_mode"] == "auto" else
                               "It proposes an agent investigation the owner hands over with 🤖; it never "
                               "runs by itself.")
