@@ -2534,23 +2534,23 @@ def cmd_deadline(a):
     print(f"{phrase}\t{due.isoformat(timespec='minutes')}")
 
 
-# The writer reaches for a visible glyph when it wants a line break inside a shell argument.
-# `\n` was already translated here; ⏎ was not, and on 19 Oct an agent's report reached the draft
-# queue reading "2 of 3 have replied⏎• Danielle". The owner has not typed one of these once in
-# 360 messages, and none of them means anything in Slack but itself.
-RETURN_GLYPHS = str.maketrans({"\u23ce": "\n", "\u21b5": "\n", "\u240a": "\n", "\u2424": "\n"})
-
-
+# ⏎ is BEAT, not a typo. It is how a draft says "this is two messages", `post` splits on it, and
+# the console deliberately does not — the owner has to see the marker to know what ✅ will send.
+# 53% of their messages are part of a burst, and voice.md calls the two-beat shape the voice. It
+# was translated to a newline here for one commit on 20 Oct, which silently folded every burst
+# into one message. The other return glyphs go with it: none has ever appeared in this traffic,
+# and the one that has means something.
 def normalize_breaks(text: str) -> str:
-    """A line break the writer could only type as a visible character becomes a real one."""
-    return text.replace("\\n", "\n").translate(RETURN_GLYPHS)
+    """The escape a writer can type in a shell argument becomes a real line break. BEAT is left
+    alone: it is a message boundary, not a line break, and `Slack.post` is what acts on it."""
+    return text.replace("\\n", "\n")
 
 
 def cmd_act(a):
     item = load_item(a.item)
     text = normalize_breaks(a.text or "").strip()
     if a.text_file:
-        text = normalize_breaks(Path(a.text_file).read_text(encoding="utf-8")).strip()
+        text = Path(a.text_file).read_text(encoding="utf-8").strip()
     if a.action in ("hold", "reply") and not text:
         sys.exit("--text is required for hold/reply")
     if a.action == "ignore" and item.get("mentioned"):

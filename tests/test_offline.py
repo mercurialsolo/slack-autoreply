@@ -646,11 +646,14 @@ check("and it is not told the examples are unnecessary",
 check("a two-word ack still does not carry 13KB of examples",
       "not printed: triage routes this as" in S.render_item({**_say_item, "outbound": False}, d.ledger, set()))
 
-# The 13:27 Adair report went into the queue as "2 of 3 have replied\u23ce\u2022 Danielle" — the writer
-# typing a line break it could not put in a shell argument. One \u2705 away from Sri reading it.
-check("a line break typed as a glyph becomes a line break",
-      S.normalize_breaks("replied\u23ce\u2022 Danielle\u21b5\u2022 Ryan") == "replied\n\u2022 Danielle\n\u2022 Ryan")
-check("and the escape that already worked still does", S.normalize_breaks("a\\nb") == "a\nb")
+# BEAT survives `act`, or the burst that is half this owner's messages is folded into one line
+# before `post` ever sees it. Read as a stray character on 20 Oct and translated away for one
+# commit; voice.md calls the two-beat shape the voice.
+check("the two-beat marker reaches the draft intact",
+      S.BEAT in S.normalize_breaks(f"2 of 3 have replied{S.BEAT}Danielle this AM"))
+check("and still splits into two messages at the send",
+      len([p for p in S.normalize_breaks(f"Yes please{S.BEAT}go ahead").split(S.BEAT) if p]) == 2)
+check("the escape a shell argument can carry is still translated", S.normalize_breaks("a\\nb") == "a\nb")
 check("ordinary text is left alone", S.normalize_breaks("2 of 3 replied - nothing since") ==
       "2 of 3 replied - nothing since")
 
