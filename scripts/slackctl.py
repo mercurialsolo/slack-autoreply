@@ -265,6 +265,98 @@ def open_dispatch(item: dict, hours: float) -> dict | None:
     return open_row
 
 
+def peek_item(item_id: str) -> dict:
+    """An inbox item if it is still on disk, else {}. Unlike `load_item`, never exits."""
+    try:
+        return json.loads(item_path(item_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+# What an answer that came back is doing now. "drafted" is the one that matters: the report
+# exists and the person who asked has never seen it, so the writer must fold it in rather than
+# refer back to it.
+REPORT_STATE = {
+    "drafted": "drafted, still waiting for the owner's ✅ — they have NOT seen it yet",
+    "escalated_draft": "drafted, still waiting for the owner's ✅ — they have NOT seen it yet",
+    "sent": "sent — they have already been told this",
+    "sent_from_draft": "sent — they have already been told this",
+    "dropped": "the owner dropped it; treat it as something they chose not to say",
+    "deleted": "the owner deleted it after it went out",
+}
+
+
+def channel_reports(item: dict, limit: int = 3) -> list[dict]:
+    """What agents have already been asked, and have already answered, in this channel.
+
+    Every message is handled alone, so on 19 Oct Solo proposed the same Adair lookup at 16:34 —
+    three hours after the agent had answered it at 13:27, and while that answer still sat
+    unapproved in the self-DM. Asking again is not judgement. Reading what came back is, and the
+    writer could not: nothing ever put a returned report in front of it.
+
+    `open_dispatch` cannot do this job. It is keyed per thread, and those were four separate
+    top-level mentions — four conversations by `session_key`, one question by any human reading.
+
+    Scoped by channel, and no wider: `pick_channel` already decided which room may hear each
+    report, so a report is only ever shown back in the room it was placed in. Age is shown rather
+    than cut off — this question has been running for three days, and whether yesterday's answer
+    still holds is exactly the call the writer is being asked to make.
+    """
+    if not DELEGATIONS.exists():
+        return []
+    channel = item.get("channel")
+    asked: dict[str, dict] = {}
+    for line in DELEGATIONS.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        src_id = row.get("item") or ""
+        # The return row carries the id it was handed and nothing else, so the channel comes from
+        # the question's item — on disk if it is still there, otherwise from the id it was named.
+        if (peek_item(src_id).get("channel") or src_id.split("-")[0]) != channel:
+            continue
+        if row.get("outcome") == "dispatched":
+            asked[src_id] = {"asked_at": row.get("at", ""), "task": row.get("task") or "", "back": None}
+        elif src_id in asked and row.get("outcome") in ("reported", "report_failed", "report_refused"):
+            asked[src_id]["back"] = row
+    out = []
+    for rec in list(asked.values())[-limit:]:
+        back = rec.pop("back")
+        if back is None:
+            out.append(rec | {"state": "still out — no answer back yet"})
+            continue
+        say = peek_item(back.get("say") or "")
+        rec |= {"at": back.get("at", ""),
+                "answer": say.get("intent") or back.get("report") or "",
+                "state": REPORT_STATE.get((say.get("outcome") or {}).get("status", ""),
+                                          back.get("outcome", "").replace("report_", "the agent could not report: "))}
+        out.append(rec)
+    out.reverse()
+    return out
+
+
+def render_reports(reports: list[dict]) -> list[str]:
+    """The reports section of the writer's prompt, or nothing when there is nothing to say."""
+    if not reports:
+        return []
+    out = ["--- what an agent has already been asked in this channel ---"]
+    for r in reports:
+        out.append(f"· {r['asked_at'][5:16].replace('T', ' ')} — asked: {r['task'][:300]}")
+        if r.get("answer"):
+            out.append(f"  answered {r['at'][5:16].replace('T', ' ')} ({r['state']}):")
+            out += ["  " + l for l in r["answer"][:800].splitlines()]
+        else:
+            out.append(f"  {r['state']}")
+    out.append("Answer from these where they cover the question — say when the fact is from "
+               "(\"as of 1:30\") rather than implying it is live. An answer still waiting for the "
+               "owner's ✅ has not reached anyone, so fold it into what you write instead of "
+               "referring back to it. Ask an agent only for what these do not already cover.")
+    return out + [""]
+
+
 def report_target(item: dict) -> dict:
     """Where a report on `item` belongs: the conversation the question arrived in.
 
@@ -726,7 +818,12 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
            f"from: {item['sender_name']} (@{item.get('sender_handle', '?')}) · {describe_where(item)}"
            f"{' · in a thread' if item.get('thread_ts') else ''} · {item.get('created', '')}",
            f"message: {item['text']}",
-           "", "--- recent conversation ---", item.get("context") or "(none)", ""] + writer_reach()
+           "", "--- recent conversation ---", item.get("context") or "(none)", ""]
+    # Not under seal: during a rehearsal an agent report is future information the writer would
+    # not have had when the real reply was written.
+    reports = [] if item.get("sealed") else channel_reports(item)
+    out += render_reports(reports)
+    out += writer_reach()
     if t:
         out += ["--- triage (" + t.get("source", "?") + ") ---",
                 f"route: {t['route']}{' (forced: ' + t['forced'] + ')' if t.get('forced') else ''} · confidence {t['confidence']:.2f} · "
@@ -750,7 +847,10 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
                               if CFG["delegate_mode"] == "auto" else
                               "It proposes an agent investigation the owner hands over with 🤖; it never "
                               "runs by itself.")
-                           + " A hold carrying a proposal beats a bare hold.")
+                           + " A hold carrying a proposal beats a bare hold."
+                           + (" Read the reports above first: ask only for what they do not "
+                              "already cover, and do not re-ask a question that is still out."
+                              if reports else ""))
         phrase, due = hold_deadline(t["urgency"])
         out.append(f"if hold: promise '{phrase}' (due {due:%a %-I:%M%p})")
     else:

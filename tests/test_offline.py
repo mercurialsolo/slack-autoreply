@@ -548,6 +548,55 @@ check("but not once it has gone stale", S.open_dispatch(_conv, 0) is None)
 S.record_delegation(item="CLOOP-1", role="staffai", outcome="reported", say="say-x")
 check("and stops being open once the agent reports back", S.open_dispatch(_conv, 6) is None)
 
+# Asking again is not judgement. On 19 Oct Solo proposed the Adair lookup at 16:34, three hours
+# after the agent had answered it at 13:27 — a different thread, so `open_dispatch` was blind to
+# it, and nothing else ever put a returned report in front of the writer.
+_r_src = {"id": "CREP-900.000", "channel": "CREP", "channel_type": "channel", "sender_name": "Sri",
+          "sender": "U9", "text": "any replies yet?", "created": S.now_iso(), "status": "done",
+          "reply_thread_ts": "900.000", "ts": "900.000"}
+_r_say = {"id": "say-rep1", "channel": "CREP", "channel_type": "channel", "sender_name": "growth",
+          "sender": "CREP", "text": "[staffai reporting]", "created": S.now_iso(), "status": "done",
+          "reply_thread_ts": None, "ts": "901.000", "origin": "agent:staffai",
+          "intent": "2 of 3 have replied — Danielle this AM, Kerry Saturday, Ryan nothing",
+          "outcome": {"status": "drafted", "at": S.now_iso()}}
+S.save_item(_r_src); S.save_item(_r_say)
+S.record_delegation(item=_r_src["id"], peer="p", role="staffai", outcome="dispatched",
+                    task="check Lexi's Adair threads for replies", conversation="CREP:900.000")
+# …recorded the way `cmd_say` records it: the item id and the say id, no conversation.
+S.record_delegation(item=_r_src["id"], role="staffai", outcome="reported", say="say-rep1",
+                    report="2 of 3 have replied")
+
+_later = {"id": "CREP-999.000", "channel": "CREP", "channel_type": "channel", "sender_name": "Sri",
+          "sender": "U9", "text": "any more replies from Danielle, Kerry or Ryan?",
+          "created": S.now_iso(), "status": "queued", "reply_thread_ts": "999.000", "ts": "999.000",
+          "triage": None, "context": "(none)"}
+_rep = S.channel_reports(_later)
+check("a report that came back is carried to the next message in that channel",
+      len(_rep) == 1 and "Danielle this AM" in _rep[0]["answer"])
+check("and the writer is told nobody has seen it yet",
+      "NOT seen it" in _rep[0]["state"])
+check("the question it answered comes with it, so a new ask can be narrower",
+      "Adair" in _rep[0]["task"])
+check("a thread-keyed dedupe would have missed it — this is a different conversation",
+      S.open_dispatch(_later, 6) is None and S.session_key(_later) != "CREP:900.000")
+check("it reaches the writer's prompt, under a heading that says what it is",
+      "already been asked in this channel" in "\n".join(S.render_reports(_rep)))
+check("nothing crosses channels — pick_channel already decided which room may hear it",
+      S.channel_reports(_later | {"channel": "CELSE"}) == [])
+
+_r_say2 = dict(_r_say, id="say-rep1")
+S.save_item({**_r_say, "outcome": {"status": "sent_from_draft", "at": S.now_iso()}})
+check("once it has gone out the writer is told that instead",
+      "already been told" in S.channel_reports(_later)[0]["state"])
+
+S.record_delegation(item="CREP-998.000", peer="p", role="staffai", outcome="dispatched",
+                    task="transcripts for the uncovered scenarios", conversation="CREP:998.000")
+_out = [r for r in S.channel_reports(_later, limit=5) if r["task"].startswith("transcripts")]
+check("a question still out is shown as still out, so it is not asked twice",
+      len(_out) == 1 and "still out" in _out[0]["state"] and not _out[0].get("answer"))
+check("under seal the writer sees none of it — a report is future information in a rehearsal",
+      "already been asked in this channel" not in S.render_item({**_later, "sealed": True}, d.ledger, set()))
+
 _refused = _ignore_a_mention()
 check("the writer cannot answer a mention with silence", "not available here" in _refused)
 check("and is told what to do instead", "ack" in _refused and "emoji" in _refused)
