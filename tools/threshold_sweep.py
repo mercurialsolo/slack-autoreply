@@ -35,12 +35,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import config  # noqa: E402
 import triage as T  # noqa: E402
 
-# gate -> (the Triage field it reads, the Policy field that gates it, which way the test runs)
+# gate -> (the Triage field it reads, the Policy field that gates it, the config key that sets it
+# on this machine, which way the test runs). The config key, not the dataclass default: the
+# default is what shipped, and marking that as "in use" tells you the opposite of the truth on
+# any node where the owner has tuned it.
 GATES = {
-    "execute":    ("asks_to_execute", "max_execute", "at or above forces escalate"),
-    "answerable": ("can_answer", "min_answerable", "below demotes a reply to a hold"),
-    "scope":      ("in_scope", "min_in_scope", "below forces escalate"),
-    "confidence": ("confidence", "min_confidence", "below demotes reply→hold, ignore→ack"),
+    "execute":    ("asks_to_execute", "max_execute", "triage_max_execute", "at or above forces escalate"),
+    "answerable": ("can_answer", "min_answerable", "triage_min_answerable", "below demotes a reply to a hold"),
+    "scope":      ("in_scope", "min_in_scope", "triage_min_in_scope", "below forces escalate"),
+    "confidence": ("confidence", "min_confidence", "triage_min_confidence", "below demotes reply→hold, ignore→ack"),
 }
 SHORT = 30          # a message at or under this many characters, where the score drifts to the thread
 STEPS = [round(0.30 + 0.05 * i, 2) for i in range(13)]
@@ -123,7 +126,8 @@ def short_message_check(rows: list[dict], field: str) -> None:
 
 
 def sweep(rows: list[dict], gate: str) -> None:
-    field, _, direction = GATES[gate]
+    field, _, cfg_key, direction = GATES[gate]
+    live = float(config.CFG[cfg_key])
     forced_now = [d for d in rows if (d["_t"].get("forced") or "")]
     replayable = [d for d in rows if d["_t"].get("model_route")]
     print(f"\n=== moving the {gate} gate ({direction}) ===")
@@ -138,7 +142,7 @@ def sweep(rows: list[dict], gate: str) -> None:
         routes = defaultdict(int)
         for d in replayable:
             routes[replay(d, gate, value)] += 1
-        mark = "  ← in use" if abs(value - getattr(T.Policy(), GATES[gate][1])) < 1e-9 else ""
+        mark = "  ← in use" if abs(value - live) < 1e-9 else ""
         extra = ("  replayed: " + ", ".join(f"{k} {v}" for k, v in sorted(routes.items()))) if routes else ""
         print(f"  {value:.2f}  catches {len(caught):>3}/{len(rows)}{mark}{extra}")
         if prev and (released := prev - caught):
