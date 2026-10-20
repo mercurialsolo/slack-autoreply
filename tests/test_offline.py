@@ -654,6 +654,37 @@ check("and the escape that already worked still does", S.normalize_breaks("a\\nb
 check("ordinary text is left alone", S.normalize_breaks("2 of 3 replied - nothing since") ==
       "2 of 3 replied - nothing since")
 
+# 34 chances, 10 proposals. The writer was told an agent exists and never what it can see, so a
+# "are these FB accounts logged out?" read as unreachable by anybody and went to the owner bare.
+_t_low = {"route": "hold", "confidence": 0.7, "topic": "action_request", "sensitivity": 2.0,
+          "urgency": 3.0, "needs_context": 0.8, "asks_for_content": 0.3, "can_answer": 0.2,
+          "source": "test"}
+_was_reach, _was_mode = S.CFG["delegate_reach"], S.CFG["delegate_mode"]
+S.CFG["delegate_mode"] = "auto"
+S.CFG["delegate_reach"] = "the staffai prod DB, HubSpot, Gmail, RingCentral"
+_with = S.render_item({**_later, "triage": _t_low}, d.ledger, set())
+S.CFG["delegate_reach"] = ""
+_without = S.render_item({**_later, "triage": _t_low}, d.ledger, set())
+S.CFG["delegate_reach"], S.CFG["delegate_mode"] = _was_reach, _was_mode
+check("the writer is told what the agent can actually see", "HubSpot" in _with)
+check("and only where the offer is made", _with.count("the agent you can ask reaches") == 1)
+check("an unset reach says nothing rather than something empty",
+      "the agent you can ask reaches" not in _without and "--task" in _without)
+
+# `forced` rewrites the model's route, and `raw` is nulled before an item is saved. Without this
+# there is no way to count how often the action rule turns a correct silence into a message.
+def _tri(**kw):
+    base = dict(route="reply", confidence=0.9, sensitivity=1.0, urgency=2.0,
+                needs_context=0.2, asks_for_content=0.1, source="test")
+    return triage.Triage(**(base | kw))
+
+
+_tr = triage.Policy().apply(_tri(route="ignore", asks_to_execute=0.9))
+check("forcing records what the model had said", _tr.route == "escalate" and _tr.model_route == "ignore")
+check("and says so where the decision is logged", "model said ignore" in _tr.summary())
+check("an unforced route records itself",
+      triage.Policy().apply(_tri(can_answer=0.9)).model_route == "reply")
+
 _refused = _ignore_a_mention()
 check("the writer cannot answer a mention with silence", "not available here" in _refused)
 check("and is told what to do instead", "ack" in _refused and "emoji" in _refused)

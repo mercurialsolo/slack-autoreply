@@ -848,6 +848,12 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
             # "send me the list" ask it reasoned "I don't have access, so you'll need to pull it
             # yourself" and still never reached for it.
             if CFG["delegate_mode"] in ("shadow", "auto"):
+                # Measured: 34 chances, 10 proposals. The writer was told an agent exists and
+                # never told what it can see, so "can you check if these FB accounts are logged
+                # out" read as unreachable by anyone. The three reports that have come back prove
+                # otherwise. An offer you cannot tell is in range is an offer you decline.
+                if CFG["delegate_reach"]:
+                    out.append(f"      the agent you can ask reaches: {CFG['delegate_reach']}")
                 out.append("      → if what is missing is a specific, read-only lookup somewhere you cannot "
                            "reach, add --task \"<the question>\" to your act call. "
                            + ("It is sent to the agent as soon as you finish — unless this thread "

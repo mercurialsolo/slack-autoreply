@@ -152,10 +152,12 @@ class Triage:
     asks_to_execute: float = 0.0  # 0..1: wants an action on a system, not an answer
     in_scope: float = 1.0      # 0..1: is about this workspace's own work
     forced: str | None = None  # why policy overrode the model's route
+    model_route: str = ""      # what the model said before policy touched it
     raw: dict = field(default_factory=dict)
 
     def summary(self) -> str:
-        f = f" (forced: {self.forced})" if self.forced else ""
+        f = (f" (forced: {self.forced}; model said {self.model_route})" if self.forced
+             else "")
         return (f"{self.route}{f} · {self.topic} · conf {self.confidence:.2f} · sens {self.sensitivity:.1f} · "
                 f"urg {self.urgency:.1f} · ctx {self.needs_context:.2f} · answerable {self.can_answer:.2f} · "
                 f"share {self.asks_for_content:.2f} · exec {self.asks_to_execute:.2f} · "
@@ -174,6 +176,11 @@ class Policy:
     min_in_scope: float = 0.5
 
     def apply(self, t: Triage) -> Triage:
+        # Kept so forcing can be measured rather than argued about. The action rule fired on 48
+        # of 115 messages — including "ty" at 0.86 — and `raw` is nulled before an item is saved,
+        # so there was no way to ask how often it turned a correct silence into a message for the
+        # owner. It overrides `ignore` and `ack` too, and that is the case worth counting.
+        t.model_route = t.route
         if t.route not in ROUTES:
             t.route, t.forced = "hold", f"unknown route {t.route!r}"
         # These two come first: they are hard boundaries, not preferences, so they outrank

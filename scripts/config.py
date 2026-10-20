@@ -144,6 +144,7 @@ CFG = dict(
     # Handing work to an agent starts in shadow: Solo proposes, the owner dispatches. "auto" is
     # earned later, from the record in delegations.jsonl, not switched on by hope.
     delegate_mode=env("DELEGATE_MODE", "shadow"),
+    delegate_reach=env("DELEGATE_REACH", ""),
     delegate_role=env("DELEGATE_ROLE", ""),
     # Solo runs on the node; the owner's agents run on their laptop. Mailboxes are per-machine —
     # a `bus send` here queues here and is never seen there — so crossing machines is relay's job.
