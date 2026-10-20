@@ -326,7 +326,16 @@ def channel_reports(item: dict, limit: int = 3) -> list[dict]:
     for rec in list(asked.values())[-limit:]:
         back = rec.pop("back")
         if back is None:
-            out.append(rec | {"state": "still out — no answer back yet"})
+            # A dispatch that never came back is not a question in flight. The 16 Oct Adair
+            # lookup still had no return row three days later; calling that "still out" would
+            # tell the writer to wait for an answer that is not coming.
+            try:
+                stale = datetime.now() - datetime.fromisoformat(rec["asked_at"]) > timedelta(hours=CFG["delegate_repeat_hours"])
+            except ValueError:
+                stale = True
+            out.append(rec | {"state": "never came back — nothing arrived, so this is NOT covered; "
+                                       "ask again if you still need it" if stale else
+                                       "still out — an answer is coming, so do not ask this again"})
             continue
         say = peek_item(back.get("say") or "")
         rec |= {"at": back.get("at", ""),

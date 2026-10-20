@@ -594,6 +594,21 @@ S.record_delegation(item="CREP-998.000", peer="p", role="staffai", outcome="disp
 _out = [r for r in S.channel_reports(_later, limit=5) if r["task"].startswith("transcripts")]
 check("a question still out is shown as still out, so it is not asked twice",
       len(_out) == 1 and "still out" in _out[0]["state"] and not _out[0].get("answer"))
+
+# The 16 Oct Adair dispatch still had no return row on the 19th. Reading that as "an answer is
+# coming" would park the question forever on a run that died three days ago.
+_old_at = (S.datetime.now() - S.timedelta(hours=48)).isoformat(timespec="seconds")
+S.record_delegation(item="CREP-997.000", peer="p", role="staffai", outcome="dispatched",
+                    task="a lookup nothing ever answered", conversation="CREP:997.000")
+import json as _json
+_rows = [_json.loads(l) for l in S.DELEGATIONS.read_text().splitlines() if l.strip()]
+for _r in _rows:
+    if _r.get("item") == "CREP-997.000":
+        _r["at"] = _old_at
+S.DELEGATIONS.write_text("".join(_json.dumps(_r) + "\n" for _r in _rows))
+_dead = [r for r in S.channel_reports(_later, limit=9) if r["task"].startswith("a lookup nothing")]
+check("a dispatch that never came back is not reported as an answer on its way",
+      len(_dead) == 1 and "NOT covered" in _dead[0]["state"])
 check("under seal the writer sees none of it — a report is future information in a rehearsal",
       "already been asked in this channel" not in S.render_item({**_later, "sealed": True}, d.ledger, set()))
 
