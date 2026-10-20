@@ -685,6 +685,24 @@ check("and says so where the decision is logged", "model said ignore" in _tr.sum
 check("an unforced route records itself",
       triage.Policy().apply(_tri(can_answer=0.9)).model_route == "reply")
 
+# The sweep replays saved scores at other thresholds. Two ways it could quietly lie: starting
+# from the post-forcing route (every row looks unchanged, so the gate looks irrelevant), and
+# carrying the old `forced` string into the replayed summary.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+import threshold_sweep as TS  # noqa: E402
+
+_row = {"id": "SW-1", "text": "can you check the FB accounts", "_outcome": None,
+        "_t": {"route": "escalate", "model_route": "hold", "forced": "asks for an action (0.56)",
+               "confidence": 0.8, "sensitivity": 1.0, "urgency": 3.0, "needs_context": 0.8,
+               "asks_for_content": 0.2, "can_answer": 0.8, "asks_to_execute": 0.56,
+               "in_scope": 0.9, "topic": "action_request", "source": "test"}}
+check("the replay starts from what the model said, not from what forcing produced",
+      TS.replay(_row, "execute", 0.6) == "hold")
+check("and the gate still fires below the score", TS.replay(_row, "execute", 0.5) == "escalate")
+_no_mr = {**_row, "_t": {k: v for k, v in _row["_t"].items() if k != "model_route"}}
+check("a row saved before the route was recorded replays from what it has",
+      TS.replay(_no_mr, "execute", 0.6) == "escalate")
+
 _refused = _ignore_a_mention()
 check("the writer cannot answer a mention with silence", "not available here" in _refused)
 check("and is told what to do instead", "ack" in _refused and "emoji" in _refused)
