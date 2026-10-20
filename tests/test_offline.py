@@ -629,6 +629,23 @@ _hint_auto = S.render_item({**_later, "triage": {"route": "hold", "confidence": 
 S.CFG["delegate_mode"] = _was_mode
 check("in auto it is not promised unconditionally", "already has a question out" in _hint_auto)
 
+# The agent reporting back does not know the owner's voice — that is the whole reason its finding
+# is routed through the writer instead of posted by the agent. And rewriting a paragraph of someone
+# else's register is the longest prose Solo ever writes. It was the one route that got no worked
+# examples: a say item carries no triage, so the `route == "reply"` gate read `unknown`.
+_say_item = {"id": "say-voice1", "channel": D, "channel_type": "im", "sender": U, "sender_name": "Dana",
+             "text": "[staffai reporting on what you asked Dana about]: …", "created": S.now_iso(),
+             "status": "queued", "reply_thread_ts": None, "ts": "1000.000", "outbound": True,
+             "origin": "agent:staffai", "context": "(outbound)", "triage": None,
+             "intent": "Two of three replied. Danielle responded this morning regarding the lot."}
+_say_txt = S.render_item(_say_item, d.ledger, set())
+check("an agent's report is shown how the owner actually writes",
+      "how you actually write (real messages" in _say_txt)
+check("and it is not told the examples are unnecessary",
+      "not printed: triage routes this as" not in _say_txt)
+check("a two-word ack still does not carry 13KB of examples",
+      "not printed: triage routes this as" in S.render_item({**_say_item, "outbound": False}, d.ledger, set()))
+
 _refused = _ignore_a_mention()
 check("the writer cannot answer a mention with silence", "not available here" in _refused)
 check("and is told what to do instead", "ack" in _refused and "emoji" in _refused)

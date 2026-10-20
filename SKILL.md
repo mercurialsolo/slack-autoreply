@@ -145,10 +145,16 @@ $SLACKCTL act <id> --action escalate --text "Checking" \
   --task "read last night's warmup run logs and say why it stalled"
 ```
 
-The proposal appears on the escalation with a 🤖 for the owner to react to. **Only that reaction
-dispatches it** — you cannot, and `delegations` is not yours to read. What goes out is a read-only
-investigation: the agent reads and reports, changes nothing, and its finding returns as a draft in
-the owner's voice that still waits for their ✅.
+**You never dispatch it yourself** — `dispatch` refuses a writer, and `delegations` is not yours
+to read. What happens to the proposal depends on the mode, which `show` states at the point it
+offers the `--task`: the owner hands it over with 🤖, or the daemon does it for them as soon as you
+finish. Either way what goes out is a read-only investigation: the agent reads and reports, changes
+nothing, and its finding comes back through `compose` as a draft in the owner's voice that still
+waits for their ✅.
+
+`show` also prints what an agent has already been asked in this channel and what came back. Read it
+before proposing anything. An answer that is still waiting for the owner's ✅ has reached nobody, so
+it belongs in what you write now — not as "as I mentioned", and not as a reason to ask again.
 
 A request to *do* something still escalates. The difference is the owner can hand it off in one tap
 instead of retyping it. Propose only a specific, read-only question with an obvious place to look.

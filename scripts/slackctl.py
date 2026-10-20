@@ -886,10 +886,16 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
             f"  python3 {SCRIPT} about {item['sender']}",
             f"  python3 {SCRIPT} note {item['sender']} \"<one durable fact about them>\""]
     out += ["", "--- your voice (VOICE.md) ---", voice.load_notes() or "(VOICE.md is empty — run /slack-autoreply setup)"]
-    # The worked examples are 13KB of the 37KB this prints, and they only earn that on a `reply` —
-    # four routes in five end in a word or two ("Checking", "Will do") or in nothing at all, and
-    # VOICE.md alone covers those. So they are fetched when they are needed, not carried every time.
-    if (item.get("triage") or {}).get("route") == "reply":
+    # The worked examples are 13KB of the 37KB this prints, and they only earn that where real
+    # prose gets written — four routes in five end in a word or two ("Checking", "Will do") or in
+    # nothing at all, and VOICE.md alone covers those. So they are fetched when they are needed.
+    #
+    # An outbound item is always one of those places, and had been getting the opposite. A report
+    # coming back from an agent has no triage at all, so this read `route: unknown` and withheld
+    # the examples — on the single longest piece of prose Solo ever writes, rewriting a paragraph
+    # of someone else's register into the owner's. The agent does not know their voice; that is
+    # the whole reason the report is routed through here rather than posted by the agent.
+    if (item.get("triage") or {}).get("route") == "reply" or item.get("outbound"):
         out += ["", "--- how you actually write (real messages; <them> is what you were replying to) ---",
                 voice.format_samples(voice.pick_samples(voice.load_samples(), item["channel"], item["sender"]))]
     else:
