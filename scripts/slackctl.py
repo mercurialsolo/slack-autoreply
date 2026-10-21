@@ -1184,6 +1184,24 @@ def review_debt() -> tuple[int, str]:
     return n, since.isoformat(timespec="seconds")
 
 
+def load_self_edits(days: int | None = None) -> list[dict]:
+    """Messages you typed and then fixed — your own tone adjustments, oldest first."""
+    path = config.p("self_edits.jsonl")
+    if not path.exists():
+        return []
+    cutoff = datetime.now() - timedelta(days=days) if days else None
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if cutoff and datetime.fromisoformat(row["at"]) < cutoff:
+            continue
+        out.append(row)
+    return out
+
+
 def last_eval() -> dict:
     """What the last sealed rehearsal scored, or {} if none has been run."""
     try:
@@ -1566,6 +1584,7 @@ class Daemon(Slack):
         st = self.state.read()
         s = st.get("sent", {}).get(msg.get("ts"))
         if not s:
+            self.on_self_edit(ev.get("channel"), msg, prev)
             return
         try:
             item = load_item(s["item"])
@@ -1577,6 +1596,19 @@ class Daemon(Slack):
         self.ledger.record(item=item, outcome="corrected", correction={"draft": s.get("text"), "actual": actual})
         self.state.update(lambda d: d["sent"].pop(msg.get("ts"), None))
         log.info("corrected: you edited the reply to %s", item["sender_name"])
+
+    def on_self_edit(self, channel: str | None, msg: dict, prev: dict) -> None:
+        """You fixed a message you typed yourself. Not Solo's mistake, so nothing is scored — but the
+        before/after is how you tune your own tone, which review reads alongside the corrections."""
+        if not channel or channel in (self.self_dm, self.bot_dm):
+            return
+        before = clean_text(prev.get("text", ""), self.name_of)
+        after = clean_text(msg.get("text", ""), self.name_of)
+        voice.revise_sample(channel, msg.get("ts"), after)
+        with open(config.p("self_edits.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": now_iso(), "channel": channel, "ts": msg.get("ts"),
+                                "before": before, "after": after}, ensure_ascii=False) + "\n")
+        log.info("self-edit: you revised your own message in %s", channel)
 
     def on_deleted(self, ev: dict) -> None:
         ts = (ev.get("previous_message") or {}).get("ts") or ev.get("deleted_ts")
@@ -2774,6 +2806,12 @@ def cmd_dossier(a):
 def cmd_review_data(a):
     ledger, _ = load_services()
     print(ledger.review_text(a.days))
+    edits = load_self_edits(a.days)
+    print("\nYour own edits (what you sent → what you changed it to; not scored, pure tone):")
+    if not edits:
+        print("  none yet")
+    for e in edits[-15:]:
+        print(f"- {e['at'][:16]} · {e['channel']}\n    sent:   {e['before'][:300]}\n    edited: {e['after'][:300]}")
     print("\n--- VOICE.md as it stands ---\n" + (voice.load_notes() or "(empty)"))
     print(f"\nVOICE.md path: {voice.VOICE_FILE}")
     files = sorted(recall.PEOPLE_DIR.glob("*.md")) + sorted(recall.CHANNELS_DIR.glob("*.md"))

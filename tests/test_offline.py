@@ -390,6 +390,15 @@ msg(d, "UME", D2, "1700000003.000", "looking now")
 check("replying yourself retires the draft → replaced", d.ledger.rows[-1]["outcome"] == "replaced" and not d.state.read()["pending"])
 check("your own message becomes a voice sample with its prompt", voice.load_samples()[-1]["text"] == "looking now" and voice.load_samples()[-1]["prompt"] == "can you review the PR today?")
 
+# The owner fixes their own messages right after sending. The edit is what they meant to say, so
+# the sample must carry it, and the before/after is how they tune their own tone — kept, not scored.
+_rows = len(d.ledger.rows)
+d.on_event({"type": "message", "subtype": "message_changed", "channel": D2, "message": {"user": "UME", "ts": "1700000003.000", "text": "looking now, give me 10"},
+            "previous_message": {"user": "UME", "ts": "1700000003.000", "text": "looking now"}})
+check("editing your own message updates its voice sample", voice.load_samples()[-1]["text"] == "looking now, give me 10")
+check("…and records the self-edit pair", S.load_self_edits()[-1]["before"] == "looking now" and S.load_self_edits()[-1]["after"] == "looking now, give me 10")
+check("…without scoring Solo for it", len(d.ledger.rows) == _rows)
+
 # This check used to assert the opposite, and the fixture is why it had to change: "fyi shipped
 # it" → "nice, thanks!" is the owner carrying on a conversation, not rescuing a dropped message.
 # Scoring it held the ignore route at 0.12 in the real ledger, where `effective_mode` reads it.

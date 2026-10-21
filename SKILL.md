@@ -163,6 +163,7 @@ If the ask is vague, escalate without a task and say what is unclear.
 ## `review` — learn from mistakes
 
 1. `$SLACKCTL review-data --days 14`. It prints the scorecard (per route: approved / dropped / replaced / corrected / deleted / missed; who's graduated to auto) and the correction pairs: what the bot wrote vs. what the user actually sent.
+   It also prints **your own edits**: messages the user typed, sent, then fixed in Slack (usually the most recent ones). These are not scored, but they are the best evidence there is for tone, because they show what the user thought was slightly off in their *own* writing: softening, a word swapped, a line split, a "thx" added. Treat a recurring edit the way you would a correction pattern.
 2. Look for patterns, not one-offs: too long, too formal, wrong opener, promised something they wouldn't, answered when they'd have stalled, stalled when they'd have answered, wrong register for a person or channel, missed replies on things triage ignored.
 3. Turn each pattern into one concrete line in VOICE.md (`Edit`), quoting the user's own words as the example. Remove lines the evidence contradicts. Don't bloat it — VOICE.md should stay a page.
 4. Dossiers (`review-data` lists them): consolidate any that have grown into a stack of dated lines — rewrite with `Edit` into short sections (who · working on · how we talk · glossary), keep the facts, drop the dates and the duplicates. A person's file should stay under a screen.

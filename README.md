@@ -30,7 +30,7 @@ tests/test_offline.py    42 end-to-end checks with a fake Slack and a fake claud
 docs/architecture.svg    the diagram above
 ```
 
-State lives in `~/.slack-autoreply/` (`.env`, `VOICE.md`, `voice_samples.json`, `people/`, `channels/`, `inbox/`, `outcomes.jsonl`, `corrections.jsonl`, `followups.json`, `state.json`, `replies.jsonl`) and is never touched by a reinstall.
+State lives in `~/.slack-autoreply/` (`.env`, `VOICE.md`, `voice_samples.json`, `people/`, `channels/`, `inbox/`, `outcomes.jsonl`, `corrections.jsonl`, `self_edits.jsonl`, `followups.json`, `state.json`, `replies.jsonl`) and is never touched by a reinstall.
 
 ## Install in seven steps
 

@@ -85,6 +85,17 @@ def append_sample(sample: dict, cap: int) -> None:
     save_samples(samples[-cap:])
 
 
+def revise_sample(channel: str, ts: str, text: str) -> bool:
+    """You edited a message after sending it: the edit is what you meant, so the sample carries it."""
+    samples = load_samples()
+    for s in samples:
+        if s.get("ts") == ts and s.get("channel") == channel:
+            s["text"] = text
+            save_samples(samples)
+            return True
+    return False
+
+
 def pick_samples(samples: list[dict], channel: str | None = None, counterpart: str | None = None,
                  max_samples: int = 40, max_chars: int = 14000) -> list[dict]:
     same_conv, same_person, rest = [], [], []

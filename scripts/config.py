@@ -8,6 +8,7 @@ State lives outside the skill dir so a skill update never touches your data:
     inbox/                       one JSON per inbound message, with triage, decision, outcome
     outcomes.jsonl               learning signals (approved / corrected / dropped / missed …)
     corrections.jsonl            what the bot wrote vs. what you actually sent
+    self_edits.jsonl             messages you typed, then edited: before → after
     followups.json               "back to you by X" promises
     state.json                   daemon bookkeeping (pending drafts, sent messages)
     replies.jsonl                audit trail
