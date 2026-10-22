@@ -1547,6 +1547,7 @@ check("no result at all falls back to what the process said",
 FAKE_GH, GH_LOG = TMP / "fakegh", TMP / "gh.log"
 FAKE_GH.write_text(f"""#!/usr/bin/env bash
 printf '%s\\n' "$*" >> {GH_LOG}
+case "$*" in *"--assignee nobody-gh"*) echo "could not assign user: 'nobody-gh' not found" >&2; exit 1 ;; esac
 if [ "$1 $2" = "issue create" ]; then echo "https://github.com/StaffAI-Inc/staffai/issues/$(( $(grep -c '^issue create' {GH_LOG}) + 3100 ))"; fi
 if [ "$1 $2" = "issue view" ] && [ -f {TMP}/ghview-$3.json ]; then cat {TMP}/ghview-$3.json; fi
 """)
@@ -1677,7 +1678,7 @@ _real_gql, L.gql = L.gql, _lin
 os.environ["LINEAR_API_KEY"] = "lin_test"
 (STATE / "eng.json").write_text(json.dumps({"linear_team": "ENG", "people": {
     "UME": {"name": "Barada", "github": "mercurialsolo", "linear": "lin-barada", "machine": "mini"},
-    U2: {"name": "Ana", "github": "ana-gh"}}}))
+    U2: {"name": "Ana", "github": "ana-gh"}, "UNOGH": {"name": "Vic", "github": "nobody-gh"}}}))
 
 
 def _last_create():
@@ -1710,6 +1711,12 @@ _eng("1700000402.000", f"*SR-82* <@{U}> export is slow")
 _gc = _last_create()
 check("someone not in the people table: filed, unassigned, unlabelled", "--assignee" not in _gc and "--label" not in _gc
       and "assigneeId" not in _lin.made()[-1], _gc)
+
+_n = len(_gh("issue create"))
+_eng("1700000406.000", "*SR-85* <@UNOGH> someone GitHub won't assign")
+check("someone GitHub can't assign on the repo: filed unassigned instead of lost",
+      len(_gh("issue create")) == _n + 2 and "--assignee" not in _last_create(), _last_create())
+check("…and the thread says it couldn't assign them", "assign" in d.bot.posted[-1][1].lower(), d.bot.posted[-1][1])
 
 _n = len(_lin.made())
 _eng("1700000403.000", "*SR-49* <@UME> the digest is missing reply rates")

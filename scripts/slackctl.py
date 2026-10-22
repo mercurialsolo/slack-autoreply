@@ -1705,6 +1705,8 @@ class Daemon(Slack):
                                test=test, assignee=owner, **lin)
         log.info("eng: filed #%s%s for %s", number, f" and {lin['linear']}" if lin else "", self.name_of(owner))
         reply = self.eng_reply(number, url, lin, label, self.name_of(owner) if people is not None else None)
+        if filed.get("unassigned"):
+            reply += f"\nGitHub wouldn't assign {self.name_of(owner)} on this repo, so #{number} is unassigned there."
         if test:
             reply += "\nMarked as a test: the issue and its PR close themselves once the agent has reported."
         try:
@@ -1746,8 +1748,17 @@ class Daemon(Slack):
                   if label else f"No agent machine works for {for_whom} yet.")
         body = (f"{source}\n\n{quote(text)}{linked}\n\n<sub>Filed by Solo from Slack. {pickup}"
                 + (" This is a test request: it closes itself once the agent has reported." if test else "") + "</sub>")
+        login, unassigned = person.get("github"), False
         try:
-            number, url = file_issue(title, body, labels, assignee=person.get("github"))
+            try:
+                number, url = file_issue(title, body, labels, assignee=login)
+            except RuntimeError as e:
+                if not login:
+                    raise
+                # e.g. not a collaborator on the repo: an unassigned issue beats a lost request
+                log.warning("eng: GitHub won't assign %s (%s) — filing unassigned", login, e)
+                number, url = file_issue(title, body, labels)
+                unassigned = True
         except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as e:
             log.error("eng: could not file %s's request: %s", who, e)
             self.notify(f"⚠️ Couldn't file *{who}*'s request from {where} as an issue: {e}"
@@ -1758,7 +1769,7 @@ class Daemon(Slack):
                 linear.comment(lin["id"], (f"{source}\n\n{quote(text)}\n\n" if lin.get("attached") else "") + f"GitHub: {url}")
             except (RuntimeError, OSError) as e:
                 log.warning("eng: could not link %s to %s: %s", lin["identifier"], url, e)
-        return {"issue": number, "url": url,
+        return {"issue": number, "url": url, "unassigned": unassigned,
                 "linear": {"linear": lin["identifier"], "linear_id": lin["id"], "linear_url": lin["url"],
                            "branch": lin["branchName"], "attached": bool(lin.get("attached"))} if lin else {}}
 
