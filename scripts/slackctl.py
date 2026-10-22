@@ -116,12 +116,16 @@ def slack_md(text: str, name_of) -> str:
     """Slack's mrkdwn as Markdown, for tickets: *bold* → **bold**, ~strike~ → ~~strike~~, • → -,
     <url|text> → [text](url), mentions as names. Code spans and blocks are left exactly as written."""
     t = re.sub(r"<(https?://[^|>]+)\|([^>]+)>", r"[\2](\1)", text or "")
-    parts = re.split(r"(```.*?```|`[^`\n]*`)", clean_text(t, name_of), flags=re.S)
-    for i in range(0, len(parts), 2):
-        p = re.sub(r"(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])", r"**\1**", parts[i])
-        p = re.sub(r"(?<![\w~])~(?!\s)([^~\n]+?)(?<!\s)~(?![\w~])", r"~~\1~~", p)
-        parts[i] = re.sub(r"(?m)^(\s*)[•◦▪]\s+", r"\1- ", p)
-    return "".join(parts)
+    code: list[str] = []   # set aside, so bold may wrap code and code keeps its own asterisks
+
+    def hold(m: re.Match) -> str:
+        code.append(m.group(0))
+        return f"\x00{len(code) - 1}\x00"
+    t = re.sub(r"```.*?```|`[^`\n]*`", hold, clean_text(t, name_of), flags=re.S)
+    t = re.sub(r"(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])", r"**\1**", t)
+    t = re.sub(r"(?<![\w~])~(?!\s)([^~\n]+?)(?<!\s)~(?![\w~])", r"~~\1~~", t)
+    t = re.sub(r"(?m)^(\s*)[•◦▪]\s+", r"\1- ", t)
+    return re.sub(r"\x00(\d+)\x00", lambda m: code[int(m.group(1))], t)
 
 
 def quote(text: str) -> str:

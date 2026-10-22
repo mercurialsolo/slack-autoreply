@@ -1731,6 +1731,8 @@ d.client.history.pop(E)
 # Markdown, so an agent can work from Linear or GitHub without opening Slack.
 check("Slack bold becomes Markdown bold, but not inside code",
       S.slack_md("*13 listings* sit at `status: *x*`", d.name_of) == "**13 listings** sit at `status: *x*`")
+check("…including bold that wraps code", S.slack_md("*13 sit at `status: x` with `y` null.* rest", d.name_of)
+      == "**13 sit at `status: x` with `y` null.** rest")
 check("…bullets become list items", S.slack_md("• one\n• two", d.name_of) == "- one\n- two")
 check("…links keep their text", S.slack_md("see <https://x.io/a|the doc>", d.name_of) == "see [the doc](https://x.io/a)")
 check("…mentions become names", S.slack_md(f"<@{U}> look", d.name_of) == "@Priya look")
