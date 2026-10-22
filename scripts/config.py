@@ -160,6 +160,11 @@ CFG = dict(
     delegate_repeat_hours=env_float("DELEGATE_REPEAT_HOURS", 6),   # don't re-ask the same conversation inside this
     delegate_cwd=env("DELEGATE_CWD", ""),
     claudectl_bin=env("CLAUDECTL_BIN", "claudectl"),
+    # Engineering requests: one channel whose messages become GitHub issues for a coding agent.
+    eng_channel=env("ENG_CHANNEL", ""),
+    eng_repo=env("ENG_REPO", ""),
+    eng_label=env("ENG_LABEL", "agent"),
+    gh_bin=env("GH_BIN", "gh"),
 )
 
 SEND_REACTIONS = {"white_check_mark", "heavy_check_mark", "ballot_box_with_check", "+1", "thumbsup"}

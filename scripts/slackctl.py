@@ -421,6 +421,61 @@ def dispatch_task(item: dict, who: str, where: str) -> str:
     return f"handed to {peer}: {task[:80]} — it reports back with `solo say`, which still needs your ✅"
 
 
+# --- engineering requests ------------------------------------------------------------------------
+# ENG_CHANNEL is the one place the team asks for code changes. Each top-level message there becomes
+# a GitHub issue labelled ENG_LABEL, and the bot says so in the thread. A coding agent on the node
+# (`eng_pickup.py`) takes the issue and answers with a draft PR. Nothing here is written in the
+# owner's voice, so nothing waits on their ✅ — the gate is the PR review, which a person still does.
+ENG_REQUESTS = config.p("eng_requests.jsonl")
+
+
+def eng_request(*, channel: str | None = None, ts: str | None = None, issue: int | None = None) -> dict | None:
+    """The recorded request for a Slack message, or for an issue number."""
+    if not ENG_REQUESTS.exists():
+        return None
+    for line in ENG_REQUESTS.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if issue is not None and row.get("issue") == issue:
+            return row
+        if ts is not None and row.get("channel") == channel and row.get("ts") == ts:
+            return row
+    return None
+
+
+def record_eng_request(**row) -> None:
+    row["at"] = now_iso()
+    with open(ENG_REQUESTS, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def issue_title(text: str) -> str:
+    line = " ".join((text.strip().splitlines() or [""])[0].split())
+    return line if len(line) <= 72 else line[:71].rstrip() + "…"
+
+
+def file_issue(title: str, body: str) -> tuple[int, str]:
+    """`gh issue create` on ENG_REPO with ENG_LABEL. Returns (number, url); raises with gh's words."""
+    cmd = [CFG["gh_bin"], "issue", "create", "--repo", CFG["eng_repo"], "--label", CFG["eng_label"],
+           "--title", title, "--body", body]
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    url = (out.stdout.strip().splitlines() or [""])[-1]
+    if out.returncode != 0 or "/issues/" not in url:
+        raise RuntimeError((out.stderr or out.stdout).strip()[:200] or f"gh exited {out.returncode}")
+    return int(url.rstrip("/").rsplit("/", 1)[1]), url
+
+
+def post_eng_update(bot, issue: int, text: str) -> bool:
+    """Post in the Slack thread an issue came from, as the bot. False if Solo never filed it."""
+    row = eng_request(issue=issue)
+    if not row or not bot:
+        return False
+    bot.chat_postMessage(channel=row["channel"], thread_ts=row["ts"], text=text)
+    return True
+
+
 def audit(**row) -> None:
     row["at"] = now_iso()
     with open(AUDIT, "a", encoding="utf-8") as f:
@@ -1424,6 +1479,11 @@ class Daemon(Slack):
         self.share_trusted = self.resolve_users(CFG["share_trusted"])
         self.allow_channels = self.resolve_channels(CFG["allow_channels"])
         self.block_channels = self.resolve_channels(CFG["block_channels"])
+        self.eng_channel = next(iter(self.resolve_channels([CFG["eng_channel"]])), None) if CFG["eng_channel"] else None
+        if self.eng_channel and not CFG["eng_repo"]:
+            log.warning("ENG_CHANNEL is set but ENG_REPO is not — engineering requests are off")
+            self.eng_channel = None
+        self.eng_lock = threading.Lock()
         self.pool = ThreadPoolExecutor(max_workers=8)
         self.sem = threading.Semaphore(CFG["dispatch_parallel"])
         self._probe_lock = threading.Lock()   # tick is every 5 min, a probe may take longer
@@ -1507,10 +1567,58 @@ class Daemon(Slack):
             if sender == self.me:
                 self.on_console_message(ev)
             return
+        if self.eng_channel and channel == self.eng_channel:
+            self.on_eng_request(ev)
+            return
         if sender == self.me:
             self.on_owner_message(ev)
             return
         self.on_inbound(ev)
+
+    def on_eng_request(self, ev: dict) -> None:
+        """A message in ENG_CHANNEL: file it for the coding agent and say so in the thread."""
+        sender, channel, ts = ev["user"], ev["channel"], ev["ts"]
+        who, text = self.name_of(sender), clean_text(ev.get("text", "") or "", self.name_of)
+        if ev.get("thread_ts") and ev["thread_ts"] != ts:
+            log.info("eng: %s replied in a request thread — not a new request", who); return
+        if self.state.pause_info() is not None:
+            log.info("eng: skip (paused) %s: %s", who, text[:80]); return
+        where = f"#{self.channel_name(channel)}"
+        with self.eng_lock:   # Slack redelivers; one message must never become two issues
+            if eng_request(channel=channel, ts=ts):
+                return
+            t = self.triager.run({"owner": self.me_name, "channel_type": ev.get("channel_type"),
+                                  "channel_name": where[1:], "sender": who, "latest_message": text,
+                                  "recent_conversation": ""})
+            triaged = t.source != "default"
+            if triaged and t.route == "ignore":
+                record_eng_request(channel=channel, ts=ts, sender=sender, status="ignored")
+                log.info("eng: not a request (%s): %s", t.summary(), text[:80]); return
+            if triaged and t.sensitivity >= CFG["sensitivity_escalate"]:
+                record_eng_request(channel=channel, ts=ts, sender=sender, status="escalated")
+                self.notify(f"🔒 *{who}* asked for this in {where} — not filed, it reads as sensitive "
+                            f"({t.sensitivity:.1f}). File it yourself if it should go to an agent.\n{quote(text[:400])}")
+                return
+            permalink = self.permalink(channel, ts)
+            body = (f"Requested by {who} in {where}" + (f" — {permalink}" if permalink else "") + "\n\n"
+                    + quote(text) + f"\n\n<sub>Filed by Solo from Slack. A coding agent picks up issues labelled "
+                    f"`{CFG['eng_label']}` and answers with a draft PR in the Slack thread.</sub>")
+            try:
+                number, url = file_issue(issue_title(text), body)
+            except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as e:
+                log.error("eng: could not file %s's request: %s", who, e)
+                self.notify(f"⚠️ Couldn't file *{who}*'s request from {where} as an issue: {e}\n{quote(text[:300])}")
+                return
+            record_eng_request(channel=channel, ts=ts, sender=sender, status="filed", issue=number, url=url)
+        log.info("eng: filed #%s for %s", number, who)
+        reply = f"Filed as #{number}: {url}\nAn agent picks it up shortly and posts a draft PR here."
+        try:
+            if not self.bot:
+                raise RuntimeError("no bot token")
+            self.bot.chat_postMessage(channel=channel, thread_ts=ts, text=reply)
+        except Exception as e:  # noqa: BLE001
+            hint = " — invite the Solo bot to the channel (/invite @Solo)" if "not_in_channel" in str(e) else ""
+            self.notify(f"⚠️ Filed #{number} for *{who}* but couldn't say so in {where}: {e}{hint}\n{url}")
 
     def on_owner_message(self, ev: dict) -> None:
         """You typed something yourself: close promises, learn from it, keep your voice fresh."""
@@ -2803,6 +2911,17 @@ def cmd_dossier(a):
     print(recall.load_dossier(kind, ident) or f"(nothing on file for {name})")
 
 
+def cmd_eng_report(a):
+    """What eng_pickup.py calls to answer in the request's thread, as the bot."""
+    token = config.env("SLACK_BOT_TOKEN")
+    if not token.startswith("xoxb-"):
+        sys.exit("SLACK_BOT_TOKEN is not set — the report has no identity to post as")
+    from slack_sdk import WebClient
+    if not post_eng_update(WebClient(token=token), a.issue, a.text):
+        sys.exit(f"#{a.issue} was not filed by Solo, so there is no thread to answer in")
+    print(f"posted to the thread for #{a.issue}")
+
+
 def cmd_review_data(a):
     ledger, _ = load_services()
     print(ledger.review_text(a.days))
@@ -2829,7 +2948,7 @@ def cmd_review_data(a):
 # The writer proposes an investigation with `act --task`; it may not dispatch one, nor read the
 # record of what the owner has handed over.
 DISPATCH_FORBIDDEN = frozenset({"approve", "drop", "dispatch", "pause", "resume", "listen", "done",
-                                "build-voice", "delegations"})
+                                "build-voice", "delegations", "eng-report"})
 
 # A rehearsal scored against real history is only honest if the writer cannot read the future.
 # The eval pairs are real threads, so these four would hand it the very reply it is being scored
@@ -2893,6 +3012,8 @@ def main():
     sub.add_parser("drafts").set_defaults(fn=cmd_drafts)
     p = sub.add_parser("approve"); p.add_argument("item"); p.set_defaults(fn=cmd_approve)
     p = sub.add_parser("drop"); p.add_argument("item"); p.set_defaults(fn=cmd_drop)
+    p = sub.add_parser("eng-report", help="answer in the Slack thread an engineering issue came from, as the bot")
+    p.add_argument("issue", type=int); p.add_argument("text"); p.set_defaults(fn=cmd_eng_report)
     p = sub.add_parser("review-data"); p.add_argument("--days", type=int, default=14); p.set_defaults(fn=cmd_review_data)
     p = sub.add_parser("history", help="older messages: @handle (your DM), #channel, or an ID"); p.add_argument("target"); p.add_argument("--limit", type=int, default=100); p.add_argument("--thread"); p.add_argument("--before", help="page back from this ts"); p.set_defaults(fn=cmd_history)
     p = sub.add_parser("search", help="Slack search"); p.add_argument("query"); p.add_argument("--with", dest="with_", help="@handle: only your DM with them"); p.add_argument("--from", dest="from_", help="@handle: only messages by them"); p.add_argument("--in", dest="in_", help="#channel"); p.add_argument("--limit", type=int, default=20); p.set_defaults(fn=cmd_search)

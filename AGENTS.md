@@ -236,6 +236,45 @@ Measured on the first real round trip, rather than assumed:
   marked as not placed, and `delegations` records `report_refused` — not the same thing as never
   coming back.
 
+## Phase 9 — engineering requests: Slack channel → issue → draft PR (optional)
+
+One channel where anyone on the team asks for a code change. Solo files each top-level message
+there as a GitHub issue labelled `agent` and says so in the thread **as the bot**, so nothing waits
+on the owner's ✅. `scripts/eng_pickup.py`, on cron on the node, hands the oldest unclaimed issue to
+Claude Code in a fresh worktree of its own clone; the agent opens a **draft** PR, and the bot posts
+the link in the thread. Replies inside a thread are not new requests. Triage still runs: chit-chat
+(`ignore`) is not filed, and anything at `SENSITIVITY_ESCALATE` or above goes to the owner instead.
+
+**Owner does these — they change what the team's repo and Slack app allow:**
+
+1. **Protect the default branch first.** The node's `gh` is logged in as the owner, so without
+   protection an agent *can* merge; the brief forbidding it is not a boundary. GitHub → repo →
+   Settings → Rules: require a pull request with one approval, and do not exempt admins.
+   Verify: `gh api repos/<owner>/<repo>/rulesets` lists it, or
+   `gh api repos/<owner>/<repo>/branches/main/protection` stops returning 404.
+2. **Slack app**: Event Subscriptions → *Subscribe to events on behalf of users* must include
+   `message.channels` (and `message.groups` for a private channel); save, then reinstall when Slack
+   asks. Solo still ignores every other channel unless you are @mentioned.
+3. **Invite the bot** in the request channel: `/invite @Solo`. Without it the bot cannot answer in
+   the thread, and the owner gets a ⚠️ in the console instead.
+4. **Node `.env`** (back it up first):
+   ```
+   ENG_CHANNEL=#eng-requests
+   ENG_REPO=StaffAI-Inc/staffai
+   ```
+   then `solo restart`. Verify: `solo logs` shows no `ENG_REPO is not set` warning, and a test
+   message in the channel logs `eng: filed #N` and gets a bot reply with the link.
+5. **Cron on the node**, once a filed issue exists to try it on:
+   ```
+   */10 * * * * PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin ~/.slack-autoreply/venv/bin/python3 ~/.claude/skills/slack-autoreply/scripts/eng_pickup.py >> ~/.slack-autoreply/eng_pickup.log 2>&1
+   ```
+   Verify by running it once by hand: the issue gains `agent:working`, then `agent:done` with a
+   draft PR or `agent:needs-human` with a comment, and the bot posts in the thread either way.
+
+The agent works in `ENG_REPO_DIR` (default `~/agent-work/<repo>`), never in a checkout a person
+uses. `ENG_MAX_TURNS` (150) and `ENG_TIMEOUT` (5400 s) cap one run. To stop pickups, remove the
+cron line; to stop filing, unset `ENG_CHANNEL` and `solo restart`.
+
 ## If something breaks
 
 | symptom | cause → fix |

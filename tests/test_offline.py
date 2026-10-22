@@ -1540,6 +1540,67 @@ check("a successful run is healthy", S.writer_healthy(UP)[0])
 check("no result at all falls back to what the process said",
       S.writer_healthy(None, "exit 1: boom")[1] == "exit 1: boom")
 
+# ---------------------------------------------------- engineering requests
+# One channel where anyone on the team can ask for a code change. Solo files it as a labelled
+# GitHub issue and answers in the thread as the bot, so nothing here waits on the owner's ✅; a
+# coding agent on the node picks the issue up and comes back with a draft PR.
+FAKE_GH, GH_LOG = TMP / "fakegh", TMP / "gh.log"
+FAKE_GH.write_text(f"""#!/usr/bin/env bash
+printf '%s\\n' "$*" >> {GH_LOG}
+if [ "$1 $2" = "issue create" ]; then echo "https://github.com/StaffAI-Inc/staffai/issues/$(( $(grep -c '^issue create' {GH_LOG}) + 3100 ))"; fi
+""")
+FAKE_GH.chmod(0o755)
+E = "CENG0001"
+S.CFG.update(gh_bin=str(FAKE_GH), eng_repo="StaffAI-Inc/staffai", eng_label="agent")
+d.eng_channel, d.bot = E, FakeClient()
+
+
+def _eng(ts, text, tri=None, thread_ts=None):
+    """A message in the request channel; returns every `gh issue create` filed so far."""
+    real = d.triager.run
+    if tri:
+        d.triager.run = lambda state: tri
+    try:
+        d.on_event({"type": "message", "user": U, "channel": E, "channel_type": "channel", "ts": ts, "text": text,
+                    **({"thread_ts": thread_ts} if thread_ts else {})})
+    finally:
+        d.triager.run = real
+    return [line for line in GH_LOG.read_text().splitlines() if line.startswith("issue create")] if GH_LOG.exists() else []
+
+
+def _etri(route="reply", sensitivity=1.0, confidence=0.8):
+    return triage.Triage(route=route, confidence=confidence, sensitivity=sensitivity, urgency=2.0, needs_context=0.1,
+                         asks_for_content=0.1, source="jev:test", topic="request", can_answer=0.2)
+
+
+_filed = _eng("1700000300.000", "reset-identity leaves the user with no_instance, can someone fix the proxy")
+check("a request in the engineering channel files a labelled issue, no @ needed",
+      len(_filed) == 1 and "--label agent" in _filed[0] and "--repo StaffAI-Inc/staffai" in _filed[0])
+check("…and the bot answers in that thread with the issue link",
+      d.bot.posted[-1][0] == E and d.bot.posted[-1][2] == "1700000300.000" and "#3101" in d.bot.posted[-1][1])
+check("…and nothing is posted as the owner there", not any(p[0] == E for p in d.client.posted))
+check("Slack redelivering the same message files nothing twice", len(_eng("1700000300.000", "reset-identity leaves the user with no_instance, can someone fix the proxy")) == 1)
+check("chit-chat triage ignores is not filed", len(_eng("1700000301.000", "thanks all", tri=_etri("ignore"))) == 1)
+check("a reply inside a request thread is not a new request",
+      len(_eng("1700000302.000", "also happens on staging", thread_ts="1700000300.000")) == 1)
+check("a sensitive request is not filed", len(_eng("1700000303.000", "fix the payroll export for Bill's salary", tri=_etri(sensitivity=4.5))) == 1)
+check("…it goes to the owner instead",
+      any(p[0] == d.console and "not filed" in p[1] for p in d.client.posted + d.bot.posted))
+check("the pickup's report lands in the request's thread, as the bot",
+      S.post_eng_update(d.bot, 3101, "Draft PR #3200 is up") and d.bot.posted[-1][2] == "1700000300.000")
+check("an issue Solo never filed has nowhere to report", not S.post_eng_update(d.bot, 999, "x"))
+check("the writer cannot post as the bot", "eng-report" in S.DISPATCH_FORBIDDEN)
+
+import eng_pickup as P  # noqa: E402
+
+_issues = [{"number": 3, "createdAt": "2026-10-21T10:00:00Z", "labels": [{"name": "agent"}]},
+           {"number": 2, "createdAt": "2026-10-21T09:00:00Z", "labels": [{"name": "agent"}, {"name": "agent:working"}]},
+           {"number": 1, "createdAt": "2026-10-21T11:00:00Z", "labels": [{"name": "agent"}]}]
+check("pickup takes the oldest issue no agent has touched", P.pick(_issues)["number"] == 3)
+check("…and nothing when every issue is taken", P.pick([_issues[1]]) is None)
+_brief = P.brief({"number": 3, "title": "fix proxy", "body": "b", "url": "u"}, "agent/issue-3")
+check("the coding brief says draft PR and never merge", "--draft" in _brief and "never merge" in _brief.lower())
+
 # The voice harness scores drafts against what the owner actually wrote. An empty draft passed
 # every regex at first — no greeting and no full stop because it has nothing — so silence in reply
 # to a direct question scored perfect. That is the one failure the harness exists to catch.
