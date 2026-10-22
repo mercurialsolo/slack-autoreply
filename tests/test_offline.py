@@ -1548,6 +1548,7 @@ FAKE_GH, GH_LOG = TMP / "fakegh", TMP / "gh.log"
 FAKE_GH.write_text(f"""#!/usr/bin/env bash
 printf '%s\\n' "$*" >> {GH_LOG}
 if [ "$1 $2" = "issue create" ]; then echo "https://github.com/StaffAI-Inc/staffai/issues/$(( $(grep -c '^issue create' {GH_LOG}) + 3100 ))"; fi
+if [ "$1 $2" = "issue view" ] && [ -f {TMP}/ghview-$3.json ]; then cat {TMP}/ghview-$3.json; fi
 """)
 FAKE_GH.chmod(0o755)
 E = "CENG0001"
@@ -1628,6 +1629,135 @@ _n = len(_gh("issue create"))
 _eng("1700000310.000", "*SR-76* <@UME> testing the export button")
 check("a real SR that merely mentions testing is not a test", "sr:test" not in _gh("issue create")[-1])
 
+# SRs for anyone: a people table maps each Slack person to their GitHub login, Linear user and the
+# machine whose agent works for them. Solo files the Linear ticket (or finds the one that already
+# names the SR) and the GitHub issue, assigns both, and labels them for the machine.
+import linear as L  # noqa: E402
+
+
+class _FakeLinear:
+    def __init__(self):
+        self.calls, self.n, self.down = [], 100, False
+        self.titles = {"ENG-44": "Weekly digest (SR-49)", "ENG-50": "Fleet seats (SR-72)"}
+
+    def __call__(self, q, v=None):
+        v = v or {}
+        self.calls.append((q, v))
+        if self.down:
+            raise RuntimeError("Linear 503: down")
+        if "teams(" in q:
+            return {"teams": {"nodes": [{"id": "team1", "states": {"nodes": [{"id": "st-todo", "type": "unstarted"}, {"id": "st-can", "type": "canceled"}]},
+                                          "labels": {"nodes": [{"id": "lab-mini", "name": "agent:mini"}]}}]}}
+        if "issues(" in q:
+            return {"issues": {"nodes": [{"id": "id-" + k, "identifier": k, "url": f"https://linear.app/x/issue/{k}", "branchName": f"barada/{k.lower()}", "title": t}
+                                         for k, t in self.titles.items() if v["s"].lower() in t.lower()]}}
+        if "issueLabelCreate" in q:
+            return {"issueLabelCreate": {"issueLabel": {"id": "lab-" + v["i"]["name"]}}}
+        if "issueCreate(input" in q:
+            self.n += 1
+            k = f"ENG-{self.n}"
+            return {"issueCreate": {"issue": {"id": "id-" + k, "identifier": k, "url": f"https://linear.app/x/issue/{k}", "branchName": f"barada/{k.lower()}-x"}}}
+        if "commentCreate" in q:
+            return {"commentCreate": {"success": True}}
+        if "issue(id" in q:
+            return {"issue": {"team": {"states": {"nodes": [{"id": "st-can", "type": "canceled"}]}}}}
+        if "issueUpdate" in q:
+            return {"issueUpdate": {"success": True}}
+        raise AssertionError(q)
+
+    def made(self):
+        return [v["i"] for q, v in self.calls if "issueCreate(input" in q]
+
+    def comments(self):
+        return [v["i"] for q, v in self.calls if "commentCreate" in q]
+
+
+_lin = _FakeLinear()
+_real_gql, L.gql = L.gql, _lin
+os.environ["LINEAR_API_KEY"] = "lin_test"
+(STATE / "eng.json").write_text(json.dumps({"linear_team": "ENG", "people": {
+    "UME": {"name": "Barada", "github": "mercurialsolo", "linear": "lin-barada", "machine": "mini"},
+    U2: {"name": "Ana", "github": "ana-gh"}}}))
+
+
+def _last_create():
+    return _gh("issue create")[-1]
+
+
+_eng("1700000400.000", "*SR-80* <@UME> add a last-checked timestamp")
+_li, _gc = _lin.made()[-1], _last_create()
+check("an SR for someone with a machine opens a Linear issue assigned to them", _li.get("assigneeId") == "lin-barada", str(_li))
+check("…labelled for their machine, in Todo", "lab-mini" in _li["labelIds"] and _li.get("stateId") == "st-todo", str(_li))
+check("…titled from the SR", _li["title"] == "SR-80: add a last-checked timestamp", _li["title"])
+check("the GitHub issue is assigned to their login and labelled for the machine",
+      "--assignee mercurialsolo" in _gc and "--label agent:mini" in _gc, _gc)
+_gbody = GH_LOG.read_text().rsplit("issue create", 1)[1]
+check("…and names the Linear issue and its branch, for the pickup", "Linear: [ENG-101](https://linear.app/x/issue/ENG-101)" in _gbody
+      and "Branch: `barada/eng-101-x`" in _gbody, _gbody[:400])
+check("the Linear issue links back to the GitHub one", any("/issues/" in c["body"] and c["issueId"] == "id-ENG-101" for c in _lin.comments()))
+check("the thread hears both tickets and the machine", all(x in d.bot.posted[-1][1] for x in ("ENG-101", "/issues/", "mini")), d.bot.posted[-1][1])
+_row = S.eng_request(channel=E, ts="1700000400.000")
+check("…and the request remembers both", _row.get("linear") == "ENG-101" and _row.get("branch") == "barada/eng-101-x", str(_row))
+
+_eng("1700000401.000", f"*SR-81* <@{U2}> duplicate fleet seats")
+_li, _gc = _lin.made()[-1], _last_create()
+check("someone not in Linear: the Linear issue is unassigned and says who it's for",
+      "assigneeId" not in _li and "Ana" in _li["description"] and "Linear" in _li["description"], str(_li))
+check("…GitHub still assigns them, with no agent label", "--assignee ana-gh" in _gc and "agent:" not in _gc, _gc)
+check("…and the thread says no agent picks it up", "no agent" in d.bot.posted[-1][1].lower(), d.bot.posted[-1][1])
+
+_eng("1700000402.000", f"*SR-82* <@{U}> export is slow")
+_gc = _last_create()
+check("someone not in the people table: filed, unassigned, unlabelled", "--assignee" not in _gc and "--label" not in _gc
+      and "assigneeId" not in _lin.made()[-1], _gc)
+
+_n = len(_lin.made())
+_eng("1700000403.000", "*SR-49* <@UME> the digest is missing reply rates")
+check("an SR Linear already has is not opened twice", len(_lin.made()) == _n)
+check("…the thread is added to that issue instead", _lin.comments()[-1]["issueId"] == "id-ENG-44"
+      and "slack" in _lin.comments()[-1]["body"].lower(), str(_lin.comments()[-1]))
+check("…and GitHub points at it", "Linear: [ENG-44]" in GH_LOG.read_text().rsplit("issue create", 1)[1])
+check("…and the thread is told it was already tracked", "ENG-44" in d.bot.posted[-1][1] and "already" in d.bot.posted[-1][1].lower(), d.bot.posted[-1][1])
+check("SR-7 is not SR-72", L.find_sr("ENG", "SR-7") is None and L.find_sr("ENG", "SR-72")["identifier"] == "ENG-50")
+
+_eng("1700000404.000", "*SR-83* [test] <@UME> try the pipeline")
+check("a [test] SR is labelled as one in Linear too", "lab-sr:test" in _lin.made()[-1]["labelIds"], str(_lin.made()[-1]))
+
+_n = len(_gh("issue create"))
+_lin.down = True
+_eng("1700000405.000", "*SR-84* <@UME> Linear is down today")
+_lin.down = False
+check("Linear down: the GitHub issue is still filed", len(_gh("issue create")) == _n + 1)
+check("…and the owner hears Linear failed", any("Linear" in p[1] for p in d.client.posted + d.bot.posted if p[0] == d.console))
+
+# Pull-based pickup on any machine: Solo watches the issues it filed and reports in the thread
+# itself, so a machine needs only gh and claude, not Solo's Slack token.
+_num = int(_row["url"].rsplit("/", 1)[1])
+(TMP / f"ghview-{_num}.json").write_text(json.dumps({"state": "OPEN", "updatedAt": "2026-01-01T00:00:00Z",
+    "labels": [{"name": "agent:mini"}, {"name": "agent:done"}],
+    "comments": [{"body": "Draft PR: https://github.com/StaffAI-Inc/staffai/pull/5300"}]}))
+_before = len(d.bot.posted)
+d.poll_eng()
+_mine = [p for p in d.bot.posted[_before:] if p[2] == "1700000400.000"]
+check("a finished issue is reported in its thread by Solo", _mine and "/pull/5300" in _mine[0][1] and "ENG-101" in _mine[0][1],
+      str(d.bot.posted[_before:]))
+_before = len(d.bot.posted)
+d.poll_eng()
+check("…once", not [p for p in d.bot.posted[_before:] if p[2] == "1700000400.000"])
+_row81 = S.eng_request(channel=E, ts="1700000405.000")
+_n81 = int(_row81["url"].rsplit("/", 1)[1])
+(TMP / f"ghview-{_n81}.json").write_text(json.dumps({"state": "OPEN", "updatedAt": datetime.now().astimezone().isoformat(),
+    "labels": [{"name": "agent:needs-human"}], "comments": []}))
+_before = len(d.bot.posted)
+d.poll_eng()
+check("a label changed moments ago waits, so the machine's own report goes first",
+      not [p for p in d.bot.posted[_before:] if p[2] == "1700000405.000"])
+S.mark_eng_reported(_n81)
+(TMP / f"ghview-{_n81}.json").write_text(json.dumps({"state": "OPEN", "updatedAt": "2026-01-01T00:00:00Z",
+    "labels": [{"name": "agent:needs-human"}], "comments": []}))
+d.poll_eng()
+check("an issue the machine already reported is not reported again", not [p for p in d.bot.posted[_before:] if p[2] == "1700000405.000"])
+
 check("the pickup's report lands in the request's thread, as the bot",
       S.post_eng_update(d.bot, 3101, "Draft PR #3200 is up") and d.bot.posted[-1][2] == "1700000300.000")
 check("an issue Solo never filed has nowhere to report", not S.post_eng_update(d.bot, 999, "x"))
@@ -1654,6 +1784,14 @@ check("the report carries the Linear issue the agent created",
       P.linear_url([{"body": "Tracked in [ENG-42](https://linear.app/staffai-dev/issue/ENG-42/fix-proxy)"}])
       == "https://linear.app/staffai-dev/issue/ENG-42/fix-proxy")
 check("…and nothing when it made none", P.linear_url([{"body": "no link here"}]) is None)
+_lbody = "Requested by Barada\n\nLinear: [ENG-101](https://linear.app/x/issue/ENG-101)\nBranch: `barada/eng-101-x`\n"
+check("pickup reads the Linear issue and branch Solo recorded", P.linked({"body": _lbody})
+      == {"identifier": "ENG-101", "url": "https://linear.app/x/issue/ENG-101", "branch": "barada/eng-101-x"})
+check("…and nothing from an issue Solo didn't link", P.linked({"body": "plain"}) is None)
+_kbrief = P.brief({"number": 7, "title": "t", "body": _lbody, "url": "u"}, "barada/eng-101-x", linear_team="ENG",
+                  linked=P.linked({"body": _lbody}))
+check("with the Linear issue already open, the agent must not open another",
+      "gitBranchName" not in _kbrief and "open a Linear issue" not in _kbrief and "ENG-101" in _kbrief, _kbrief[:600])
 P.GH, P.REPO, P.TEST_LABEL = str(FAKE_GH), "StaffAI-Inc/staffai", "sr:test"
 check("pickup knows a test issue by its label", P.is_test({"labels": [{"name": "agent"}, {"name": "sr:test"}]})
       and not P.is_test({"labels": [{"name": "agent"}]}))
@@ -1662,6 +1800,11 @@ check("after the report, a test issue is closed", _gh("issue close 4200"))
 check("…and so is its draft PR", _gh("pr close 5100"))
 P.close_test(4201, [])
 check("…and with no PR only the issue", _gh("issue close 4201") and len(_gh("pr close")) == 1)
+P.close_test(4202, [], linked={"identifier": "ENG-101"})
+check("…and its Linear issue is canceled", any("issueUpdate" in q and v["id"] == "ENG-101" for q, v in _lin.calls))
+L.gql = _real_gql
+os.environ.pop("LINEAR_API_KEY", None)
+(STATE / "eng.json").unlink()
 
 # The voice harness scores drafts against what the owner actually wrote. An empty draft passed
 # every regex at first — no greeting and no full stop because it has nothing — so silence in reply

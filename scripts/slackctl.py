@@ -40,6 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import config  # noqa: E402
+import linear  # noqa: E402
 import recall  # noqa: E402
 import voice  # noqa: E402
 from config import CFG, DELEGATE_REACTIONS, DROP_REACTIONS, OK_SUBTYPES, SEND_REACTIONS  # noqa: E402
@@ -429,20 +430,62 @@ def dispatch_task(item: dict, who: str, where: str) -> str:
 ENG_REQUESTS = config.p("eng_requests.jsonl")
 
 
-def eng_request(*, channel: str | None = None, ts: str | None = None, issue: int | None = None) -> dict | None:
-    """The recorded request for a Slack message, or for an issue number."""
+ENG_PEOPLE = config.p("eng.json")
+REPORTED_LABELS = {"agent:done", "agent:needs-human"}
+
+
+def eng_rows() -> list[dict]:
     if not ENG_REQUESTS.exists():
-        return None
+        return []
+    rows = []
     for line in ENG_REQUESTS.read_text(encoding="utf-8").splitlines():
         try:
-            row = json.loads(line)
+            rows.append(json.loads(line))
         except json.JSONDecodeError:
             continue
+    return rows
+
+
+def eng_request(*, channel: str | None = None, ts: str | None = None, issue: int | None = None) -> dict | None:
+    """The recorded request for a Slack message, or for an issue number."""
+    for row in eng_rows():
         if issue is not None and row.get("issue") == issue:
             return row
         if ts is not None and row.get("channel") == channel and row.get("ts") == ts:
             return row
     return None
+
+
+def eng_reported() -> set[int]:
+    return {row["reported"] for row in eng_rows() if row.get("reported")}
+
+
+def mark_eng_reported(issue: int) -> None:
+    """The thread has heard how the agent's work ended; neither the machine nor Solo says it twice."""
+    if issue not in eng_reported():
+        record_eng_request(reported=issue)
+
+
+def eng_people() -> dict | None:
+    """The people table, ~/.slack-autoreply/eng.json:
+        {"linear_team": "ENG",
+         "people": {"<slack id>": {"name": …, "github": <login>, "linear": <user id>, "machine": "mini"}}}
+    Read on every request, so an edit applies without a restart. None when there is no table, and
+    ENG_ROUTES decides instead."""
+    if not ENG_PEOPLE.exists():
+        return None
+    try:
+        data = json.loads(ENG_PEOPLE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        log.warning("eng: %s is not JSON (%s) — routing by ENG_ROUTES", ENG_PEOPLE, e)
+        return None
+    data.setdefault("people", {})
+    return data
+
+
+def sr_id(raw: str) -> str | None:
+    m = re.search(r"(?<![\w-])SR-\d+", raw, re.I)
+    return m.group(0).upper() if m else None
 
 
 def record_eng_request(**row) -> None:
@@ -475,14 +518,15 @@ def gh(*args: str) -> str:
     return out.stdout
 
 
-def file_issue(title: str, body: str, labels: list[str]) -> tuple[int, str]:
+def file_issue(title: str, body: str, labels: list[str], assignee: str | None = None) -> tuple[int, str]:
     """`gh issue create` on ENG_REPO. Returns (number, url); raises with gh's words."""
     for label in labels:
         if label not in _labels_made:   # gh refuses a label the repo does not have yet
             gh("label", "create", label, "--force", "--color", "0E8A16", "--description", "queue for a coding agent")
             _labels_made.add(label)
     cmd = [CFG["gh_bin"], "issue", "create", "--repo", CFG["eng_repo"],
-           *[a for label in labels for a in ("--label", label)], "--title", title, "--body", body]
+           *[a for label in labels for a in ("--label", label)], *(["--assignee", assignee] if assignee else []),
+           "--title", title, "--body", body]
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     url = (out.stdout.strip().splitlines() or [""])[-1]
     if out.returncode != 0 or "/issues/" not in url:
@@ -496,6 +540,7 @@ def post_eng_update(bot, issue: int, text: str) -> bool:
     if not row or not bot:
         return False
     bot.chat_postMessage(channel=row["channel"], thread_ts=row["ts"], text=text)
+    mark_eng_reported(issue)
     return True
 
 
@@ -1617,15 +1662,20 @@ class Daemon(Slack):
             log.info("eng: skip (paused) %s: %s", who, text[:80]); return False
         if CFG["eng_match"] and not re.match(CFG["eng_match"], raw.strip()):
             log.info("eng: not a request (no %s): %s", CFG["eng_match"], text[:80]); return False
-        label = CFG["eng_label"]
-        if self.eng_routes:
-            owner = assignee(raw) or sender   # an SR nobody is @'d on belongs to whoever posted it
-            label = self.eng_routes.get(owner)
-            if not label:
-                log.info("eng: for %s, who has no cluster yet — not filed: %s", self.name_of(owner), text[:80])
-                return False
+        owner = assignee(raw) or sender   # an SR nobody is @'d on belongs to whoever posted it
+        people, person = eng_people(), {}
+        if people is not None:   # everyone's SRs are filed; only people with a machine get an agent
+            person = people["people"].get(owner, {})
+            label = f"agent:{person['machine']}" if person.get("machine") else None
+        else:
+            label = CFG["eng_label"]
+            if self.eng_routes:
+                label = self.eng_routes.get(owner)
+                if not label:
+                    log.info("eng: for %s, who has no cluster yet — not filed: %s", self.name_of(owner), text[:80])
+                    return False
         test = bool(CFG["eng_test_match"] and re.search(CFG["eng_test_match"], raw))
-        labels = [label] + ([CFG["eng_test_label"]] if test else [])
+        labels = ([label] if label else []) + ([CFG["eng_test_label"]] if test else [])
         where = f"#{self.channel_name(channel)}"
         with self.eng_lock:   # Slack redelivers; one message must never become two issues
             if eng_request(channel=channel, ts=ts):
@@ -1646,22 +1696,15 @@ class Daemon(Slack):
                 self.notify(f"🔒 *{who}* asked for this in {where} — not filed, it reads as sensitive "
                             f"({t.sensitivity:.1f}). File it yourself if it should go to an agent.\n{quote(text[:400])}")
                 return True
-            permalink = self.permalink(channel, ts)
-            body = (f"Requested by {who} in {where}" + (f" — {permalink}" if permalink else "") + "\n\n"
-                    + quote(text) + f"\n\n<sub>Filed by Solo from Slack. A coding agent picks up issues labelled "
-                    f"`{label}` and answers with a draft PR in the Slack thread."
-                    + (" This is a test request: it closes itself once the agent has reported." if test else "")
-                    + "</sub>")
-            try:
-                title = issue_title(re.sub(CFG["eng_test_match"], "", raw) if test else raw)
-                number, url = file_issue(title, body, labels)
-            except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as e:
-                log.error("eng: could not file %s's request: %s", who, e)
-                self.notify(f"⚠️ Couldn't file *{who}*'s request from {where} as an issue: {e}\n{quote(text[:300])}")
+            filed = self.file_eng(raw=raw, text=text, who=who, owner=owner, person=person, people=people,
+                                  label=label, labels=labels, test=test, where=where, permalink=self.permalink(channel, ts))
+            if not filed:
                 return True
-            record_eng_request(channel=channel, ts=ts, sender=sender, status="filed", issue=number, url=url, label=label, test=test)
-        log.info("eng: filed #%s for %s", number, who)
-        reply = f"Filed as #{number}: {url}\nAn agent picks it up shortly and posts a draft PR here."
+            number, url, lin = filed["issue"], filed["url"], filed["linear"]
+            record_eng_request(channel=channel, ts=ts, sender=sender, status="filed", issue=number, url=url, label=label,
+                               test=test, assignee=owner, **lin)
+        log.info("eng: filed #%s%s for %s", number, f" and {lin['linear']}" if lin else "", self.name_of(owner))
+        reply = self.eng_reply(number, url, lin, label, self.name_of(owner) if people is not None else None)
         if test:
             reply += "\nMarked as a test: the issue and its PR close themselves once the agent has reported."
         try:
@@ -1672,6 +1715,104 @@ class Daemon(Slack):
             hint = " — invite the Solo bot to the channel (/invite @Solo)" if "not_in_channel" in str(e) else ""
             self.notify(f"⚠️ Filed #{number} for *{who}* but couldn't say so in {where}: {e}{hint}\n{url}")
         return True
+
+    def file_eng(self, *, raw: str, text: str, who: str, owner: str, person: dict, people: dict | None,
+                 label: str | None, labels: list[str], test: bool, where: str, permalink: str | None) -> dict | None:
+        """Linear first, so the GitHub issue can carry its id and branch name; then GitHub.
+
+        An SR Linear already has (its id in a title) gets this thread added rather than a second
+        ticket. Linear failing costs the Linear ticket, not the request: GitHub is still filed and
+        the owner is told. Returns {issue, url, linear: {...}}, or None when GitHub failed too."""
+        title = issue_title(re.sub(CFG["eng_test_match"], "", raw) if test else raw)
+        source = f"Requested by {who} in {where}" + (f" — {permalink}" if permalink else "")
+        for_whom = self.name_of(owner)
+        team, lin = (people or {}).get("linear_team"), {}
+        if team and linear.enabled():
+            sr = sr_id(raw)
+            try:
+                found = linear.find_sr(team, sr) if sr else None
+                if found:
+                    lin = {**found, "attached": True}
+                else:
+                    note = "" if person.get("linear") else f"\n\nFor {for_whom}, who isn't in Linear."
+                    lin = linear.create_issue(team, title, f"{source}\n\n{quote(text)}{note}", person.get("linear"), labels)
+            except (RuntimeError, OSError, ValueError, KeyError) as e:
+                log.error("eng: Linear refused %s's request: %s", who, e)
+                self.notify(f"⚠️ Linear refused *{who}*'s request from {where}: {e}\nFiling it on GitHub only.")
+                lin = {}
+        linked = f"\n\nLinear: [{lin['identifier']}]({lin['url']})\nBranch: `{lin['branchName']}`" if lin else ""
+        machine = label.split(":", 1)[1] if label else None
+        pickup = (f"A coding agent on {machine} picks up issues labelled `{label}` and answers with a draft PR in the Slack thread."
+                  if label else f"No agent machine works for {for_whom} yet.")
+        body = (f"{source}\n\n{quote(text)}{linked}\n\n<sub>Filed by Solo from Slack. {pickup}"
+                + (" This is a test request: it closes itself once the agent has reported." if test else "") + "</sub>")
+        try:
+            number, url = file_issue(title, body, labels, assignee=person.get("github"))
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as e:
+            log.error("eng: could not file %s's request: %s", who, e)
+            self.notify(f"⚠️ Couldn't file *{who}*'s request from {where} as an issue: {e}"
+                        + (f" (Linear has it as {lin['identifier']})" if lin else "") + f"\n{quote(text[:300])}")
+            return None
+        if lin:
+            try:
+                linear.comment(lin["id"], (f"{source}\n\n{quote(text)}\n\n" if lin.get("attached") else "") + f"GitHub: {url}")
+            except (RuntimeError, OSError) as e:
+                log.warning("eng: could not link %s to %s: %s", lin["identifier"], url, e)
+        return {"issue": number, "url": url,
+                "linear": {"linear": lin["identifier"], "linear_id": lin["id"], "linear_url": lin["url"],
+                           "branch": lin["branchName"], "attached": bool(lin.get("attached"))} if lin else {}}
+
+    @staticmethod
+    def eng_reply(number: int, url: str, lin: dict, label: str | None, for_whom: str | None) -> str:
+        if lin.get("attached"):
+            first = f"Already tracked as {lin['linear']}: {lin['linear_url']}\nAdded this thread to it, and filed #{number}: {url}"
+        elif lin:
+            first = f"Filed as {lin['linear']}: {lin['linear_url']}\nand #{number}: {url}"
+        else:
+            first = f"Filed as #{number}: {url}"
+        if for_whom is None:   # no people table: one cluster, as before
+            return first + "\nAn agent picks it up shortly and posts a draft PR here."
+        if label:
+            return first + f"\nFor {for_whom}. The agent on {label.split(':', 1)[1]} picks it up shortly and posts a draft PR here."
+        return first + f"\nFor {for_whom}. No agent machine works for them yet, so it waits for them."
+
+    def poll_eng(self) -> None:
+        """Say in the request's thread how the agent's work ended.
+
+        The machine that did the work may not be this one, and only this one can post as Solo, so
+        Solo watches the labels of what it filed. A label changed in the last few minutes is left
+        for the machine's own report, which carries more."""
+        if not self.eng_channel or not self.bot:
+            return
+        done, cutoff = eng_reported(), datetime.now() - timedelta(days=14)
+        for row in eng_rows():
+            n = row.get("issue")
+            if row.get("status") != "filed" or not n or not row.get("label") or n in done:
+                continue
+            if datetime.fromisoformat(row["at"]) < cutoff:
+                continue
+            try:
+                v = json.loads(gh("issue", "view", str(n), "--json", "state,updatedAt,labels,comments") or "{}")
+            except (RuntimeError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as e:
+                log.warning("eng: could not check #%s: %s", n, e)
+                continue
+            labels = {lab["name"] for lab in v.get("labels", [])}
+            if not labels & REPORTED_LABELS:
+                continue
+            updated = datetime.fromisoformat(v["updatedAt"].replace("Z", "+00:00"))
+            if datetime.now(updated.tzinfo) - updated < timedelta(minutes=5):
+                continue
+            pr = next((m.group(0) for c in v.get("comments", [])
+                       for m in [re.search(r"https://github\.com/\S+?/pull/\d+", c.get("body") or "")] if m), None)
+            lin = f"\nLinear: {row['linear_url']}" if row.get("linear_url") else ""
+            if "agent:done" in labels and pr:
+                text = f"Draft PR for #{n} is up: {pr}{lin}\nA person still reviews and merges it."
+            else:
+                text = f"The agent looked at #{n} and didn't open a PR; its comment on the issue says why.\n{row['url']}{lin}"
+            try:
+                post_eng_update(self.bot, n, text)
+            except Exception as e:  # noqa: BLE001
+                log.warning("eng: could not report #%s in its thread: %s", n, e)
 
     def on_eng_thread_reply(self, thread_ts: str, who: str, text: str) -> None:
         """A reply under a filed request is the clarification the agent needs: put it on the issue."""
@@ -2063,6 +2204,7 @@ class Daemon(Slack):
                     pass
         self.probe_writer()
         self.nudge_review()
+        self.poll_eng()
 
     def nudge_review(self) -> None:
         """Ask for the reviewer, do not become one.

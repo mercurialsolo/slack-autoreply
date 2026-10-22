@@ -293,9 +293,32 @@ the link in the thread. Replies inside a thread are not new requests. Triage sti
    (`ENG_TEST_MATCH`). It is filed and worked like any other but labelled `sr:test`
    (`ENG_TEST_LABEL`), so `-label:sr:test` filters it out, and the pickup closes the issue and its
    draft PR right after reporting. The branch stays; both reopen with one click.
+   **SRs for anyone: the people table.** With `~/.slack-autoreply/eng.json`, every SR in the
+   channel is filed, whoever it is for, and `ENG_ROUTES` no longer applies:
+   ```json
+   {"linear_team": "ENG",
+    "people": {"U0AKNHXJQ73": {"name": "Barada Sahu", "github": "mercurialsolo",
+                               "linear": "<Linear user id>", "machine": "mini"}}}
+   ```
+   For each SR, Solo opens the Linear issue in `linear_team`. If an issue already names that SR
+   in its title, Solo adds the thread to it instead. Solo then opens the GitHub issue. Both are
+   assigned to the person; in Linear that needs a Linear user, otherwise the description says who
+   it is for. Both carry `agent:<machine>` when the person has one, which is the label Linear
+   already uses. The GitHub body carries `Linear:` and `Branch:` lines, and the pickup works on
+   that branch, so Linear's GitHub app attaches the PR. Slack exposes no emails here, so the table
+   is the only join between Slack, GitHub and Linear. The owner confirms it, because filing
+   assigns and notifies real people.
+
+   **Any machine can pull.** A machine works the SRs labelled for it: it runs the pickup with
+   `ENG_LABEL=agent:<machine>` from cron, and needs only `gh` and `claude` logged in. Solo watches
+   the issues it filed and reports in the Slack thread itself once one is labelled `agent:done` or
+   `agent:needs-human`, so the machine needs no Slack token. With `LINEAR_API_KEY`, for example
+   from Infisical, the pickup also comments on the Linear issue; without it, Linear still
+   attaches the PR by branch name.
+
 5. **Cron on the node**, once a filed issue exists to try it on:
    ```
-   */10 * * * * PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin ~/.slack-autoreply/venv/bin/python3 ~/.claude/skills/slack-autoreply/scripts/eng_pickup.py >> ~/.slack-autoreply/eng_pickup.log 2>&1
+   */10 * * * * PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin ENG_LABEL=agent:mini ~/.slack-autoreply/venv/bin/python3 ~/.claude/skills/slack-autoreply/scripts/eng_pickup.py >> ~/.slack-autoreply/eng_pickup.log 2>&1
    ```
    For Linear, add `ENG_LINEAR_TEAM=ENG` (in `.env` or at the front of the cron line) and write
    `~/.slack-autoreply/eng-mcp.json` with the Linear MCP server (see `.env.example`). Passing it

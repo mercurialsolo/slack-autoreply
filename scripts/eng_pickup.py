@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
+import linear  # noqa: E402
 
 WORKING, DONE, NEEDS_HUMAN = "agent:working", "agent:done", "agent:needs-human"
 TAKEN = {WORKING, DONE, NEEDS_HUMAN}
@@ -93,17 +94,39 @@ LINEAR_FIRST = """
    - in the PR body, after the closing line, add `Refs [KEY](<linear url>)`.
    If the Linear MCP is unavailable, say so in a GitHub issue comment and carry on without it.
 """
+LINEAR_LINKED = """
+This request is tracked in Linear as {identifier} ({url}), and this branch is already named for it,
+which is how Linear's GitHub app attaches the PR. Do not open another Linear issue. In the PR body,
+after the closing line, add `Refs [{identifier}]({url})`.
+"""
 LINEAR_AFTER = """
 5. Comment on the Linear issue with what you did and the PR link — or, if you stopped at step 1,
    with what you found and what you need."""
 
 
-def brief(issue: dict, branch: str, linear_team: str = "") -> str:
+def brief(issue: dict, branch: str, linear_team: str = "", linked: dict | None = None) -> str:
+    """With `linked`, Solo already opened the Linear issue; the pickup comments on it itself.
+    Without, and with a team, the agent opens one first through the Linear MCP."""
     url = issue.get("url", "")
-    linear = LINEAR_FIRST.format(team=linear_team, url=url, number=issue["number"], branch=branch) if linear_team else ""
+    if linked:
+        section, after = LINEAR_LINKED.format(**linked), ""
+    elif linear_team:
+        section = LINEAR_FIRST.format(team=linear_team, url=url, number=issue["number"], branch=branch)
+        after = LINEAR_AFTER
+    else:
+        section, after = "", ""
     return BRIEF.format(repo=REPO, branch=branch, number=issue["number"], title=issue["title"], url=url,
-                        body=(issue.get("body") or "").strip(), linear=linear,
-                        linear_after=LINEAR_AFTER if linear_team else "")
+                        body=(issue.get("body") or "").strip(), linear=section, linear_after=after)
+
+
+def linked(issue: dict) -> dict | None:
+    """The Linear issue and branch Solo wrote into the GitHub issue when it filed both."""
+    body = issue.get("body") or ""
+    lin = re.search(r"^Linear: \[([A-Z]+-\d+)\]\((\S+?)\)\s*$", body, re.M)
+    branch = re.search(r"^Branch: `([^`]+)`\s*$", body, re.M)
+    if not lin or not branch:
+        return None
+    return {"identifier": lin.group(1), "url": lin.group(2), "branch": branch.group(1)}
 
 
 def linear_url(comments: list[dict]) -> str | None:
@@ -119,13 +142,30 @@ def is_test(issue: dict) -> bool:
     return TEST_LABEL in {lab["name"] for lab in issue.get("labels", [])}
 
 
-def close_test(number: int, prs: list[dict]) -> None:
-    """A test SR has done its job once the agent has reported: close it, and its draft PR, so
-    trying the pipeline leaves nothing open. Both reopen with one click; the branch stays."""
+def close_test(number: int, prs: list[dict], linked: dict | None = None) -> None:
+    """A test SR has done its job once the agent has reported: close it, its draft PR and its
+    Linear issue, so trying the pipeline leaves nothing open. All reopen with one click; the
+    branch stays."""
     note = "Test request: closed automatically after the agent reported."
     for pr in prs:
         run([GH, "pr", "close", str(pr["number"]), "--repo", REPO, "--comment", note])
     run([GH, "issue", "close", str(number), "--repo", REPO, "--reason", "not planned", "--comment", note])
+    if linked and linear.enabled():
+        try:
+            linear.cancel(linked["identifier"])
+        except (RuntimeError, OSError) as e:
+            print(f"could not cancel {linked['identifier']}: {e}")
+
+
+def linear_note(link: dict | None, text: str) -> None:
+    """Tell the Linear issue how it went. Optional: a machine without LINEAR_API_KEY skips it, and
+    Linear's GitHub app still attaches the PR by its branch name."""
+    if not link or not linear.enabled():
+        return
+    try:
+        linear.comment(link["identifier"], text)
+    except (RuntimeError, OSError) as e:
+        print(f"could not comment on {link['identifier']}: {e}")
 
 
 def run(cmd: list[str], **kw) -> str:
@@ -163,16 +203,17 @@ def worktree(branch: str, number: int) -> Path:
 
 
 def work(issue: dict) -> None:
-    number, branch = issue["number"], f"agent/issue-{issue['number']}"
+    number, link = issue["number"], linked(issue)
+    branch = link["branch"] if link else f"agent/issue-{issue['number']}"
     relabel(number, WORKING)
     print(f"#{number}: {issue['title']}")
     try:
         path = worktree(branch, number)
         env = dict(os.environ)
         env.pop("ANTHROPIC_API_KEY", None)   # bill the Claude Code login, not the API key
-        team = LINEAR_TEAM if MCP_CONFIG.exists() else ""
+        team = LINEAR_TEAM if MCP_CONFIG.exists() and not link else ""
         tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"] + (["mcp__linear-server__*"] if team else [])
-        subprocess.run([CLAUDE, "-p", brief(issue, branch, team), "--permission-mode", "acceptEdits",
+        subprocess.run([CLAUDE, "-p", brief(issue, branch, team, link), "--permission-mode", "acceptEdits",
                         "--allowedTools", *tools,
                         "--disallowedTools", "Bash(gh pr merge:*)", "Bash(gh pr ready:*)",
                         *(["--mcp-config", str(MCP_CONFIG)] if team else []),
@@ -183,21 +224,25 @@ def work(issue: dict) -> None:
         prs = json.loads(run([GH, "pr", "list", "--repo", REPO, "--head", branch, "--state", "open",
                               "--json", "number,url"]) or "[]")
         comments = json.loads(run([GH, "issue", "view", str(number), "--repo", REPO, "--json", "comments"]) or "{}")
-        linear = linear_url(comments.get("comments", []))
+        lin_url = link["url"] if link else linear_url(comments.get("comments", []))
     except (OSError, subprocess.SubprocessError, RuntimeError, json.JSONDecodeError) as e:
         relabel(number, NEEDS_HUMAN, WORKING)
         report(number, f"The agent couldn't work on #{number}: {str(e)[:300]}\n{issue.get('url', '')}")
         raise
     if prs:
+        # the PR link on the issue is what Solo reads when this machine can't post to Slack itself
+        run([GH, "issue", "comment", str(number), "--repo", REPO, "--body", f"Draft PR: {prs[0]['url']}"])
         relabel(number, DONE, WORKING)
-        report(number, f"Draft PR for #{number} is up: {prs[0]['url']}" + (f"\nLinear: {linear}" if linear else "")
+        linear_note(link, f"Draft PR: {prs[0]['url']} — a person still reviews and merges it.")
+        report(number, f"Draft PR for #{number} is up: {prs[0]['url']}" + (f"\nLinear: {lin_url}" if lin_url else "")
                + "\nA person still reviews and merges it.")
     else:
         relabel(number, NEEDS_HUMAN, WORKING)
+        linear_note(link, f"The agent stopped without a PR; its comment on {issue.get('url', 'the GitHub issue')} says why.")
         report(number, f"The agent looked at #{number} and didn't open a PR; its comment on the issue says why.\n"
-               f"{issue.get('url', '')}" + (f"\nLinear: {linear}" if linear else ""))
+               f"{issue.get('url', '')}" + (f"\nLinear: {lin_url}" if lin_url else ""))
     if is_test(issue):
-        close_test(number, prs)
+        close_test(number, prs, link)
         report(number, f"Test request: #{number}" + (" and its draft PR are" if prs else " is") + " now closed.")
 
 
