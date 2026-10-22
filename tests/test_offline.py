@@ -1595,15 +1595,22 @@ check("a message that is not an SR is not filed", len(_eng("1700000305.000", "<@
 check("…and still reaches Solo like any other mention of the owner", S.item_path(f"{E}-1700000305_000").exists())
 check("an SR with no @ is the poster's own", len(_eng("1700000307.000", "SR-74 Testing auto-assignment", user="UME")) == 2)
 check("…and is not also drafted as a reply", not S.item_path(f"{E}-1700000307_000").exists())
-check("chit-chat triage ignores is not filed", len(_eng("1700000301.000", "*SR-72* <@UME> thanks all", tri=_etri("ignore"))) == 2)
+# SR-70 "testing auto-assignment" scored ignore (status_update, 0.78) live: a post in the SR format,
+# routed to someone, is a request by its shape, and triage second-guessing that drops real SRs.
+check("an SR triage calls ignore is still filed — the SR format already says it is a request",
+      len(_eng("1700000301.000", "*SR-72* <@UME> testing auto-assignment", tri=_etri("ignore"))) == 3)
+S.CFG["eng_match"] = ""
+check("without an SR format, chit-chat triage ignores is not filed",
+      len(_eng("1700000308.000", "<@UME> thanks all", tri=_etri("ignore"))) == 3)
+S.CFG["eng_match"] = r"^\*?SR-\d+"
 _eng("1700000302.000", "also happens on staging", thread_ts="1700000300.000")
-check("a reply inside a request thread is not a new request", len(_gh("issue create")) == 2)
+check("a reply inside a request thread is not a new request", len(_gh("issue create")) == 3)
 check("…it is copied onto the issue, so the agent reads the clarification",
       _gh("issue comment 3101") and "also happens on staging" in GH_LOG.read_text().split("issue comment 3101", 1)[1])
 _eng("1700000306.000", "unrelated", thread_ts="1700000305.000")
 check("a reply in a thread that was never filed goes nowhere", len(_gh("issue comment")) == 1)
 check("a sensitive request is not filed",
-      len(_eng("1700000303.000", "*SR-73* <@UME> fix the payroll export for Bill's salary", tri=_etri(sensitivity=4.5))) == 2)
+      len(_eng("1700000303.000", "*SR-73* <@UME> fix the payroll export for Bill's salary", tri=_etri(sensitivity=4.5))) == 3)
 check("…it goes to the owner instead",
       any(p[0] == d.console and "not filed" in p[1] for p in d.client.posted + d.bot.posted))
 check("the pickup's report lands in the request's thread, as the bot",

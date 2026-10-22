@@ -1635,7 +1635,7 @@ class Daemon(Slack):
                                   "channel_name": where[1:], "sender": who, "latest_message": text,
                                   "recent_conversation": ""})
             triaged = t.source != "default"
-            if triaged and t.route == "ignore":
+            if triaged and t.route == "ignore" and not CFG["eng_match"]:
                 record_eng_request(channel=channel, ts=ts, sender=sender, status="ignored")
                 log.info("eng: not a request (%s): %s", t.summary(), text[:80]); return True
             if triaged and t.sensitivity >= CFG["sensitivity_escalate"]:
