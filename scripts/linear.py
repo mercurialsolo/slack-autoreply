@@ -29,16 +29,17 @@ def gql(query: str, variables: dict | None = None) -> dict:
 
 
 def team(key: str) -> dict:
-    """{id, states: {type: id}, labels: {name: id}} for a team key such as ENG. Cached."""
+    """{id, states: {type: id}, labels: {name: id}} for a team key such as ENG. Cached.
+
+    Labels are looked up one name at a time (label_id): asking for the team's labels alongside
+    its states is refused as "Query too complex"."""
     if key not in _teams:
         nodes = gql("query($k: String!) { teams(filter: {key: {eq: $k}}) { nodes { id "
-                    "states { nodes { id type } } labels(first: 250) { nodes { id name } } } } }", {"k": key})["teams"]["nodes"]
+                    "states { nodes { id type } } } } }", {"k": key})["teams"]["nodes"]
         if not nodes:
             raise RuntimeError(f"Linear has no team {key}")
         t = nodes[0]
-        _teams[key] = {"id": t["id"],
-                       "states": {s["type"]: s["id"] for s in t["states"]["nodes"]},
-                       "labels": {lab["name"]: lab["id"] for lab in t["labels"]["nodes"]}}
+        _teams[key] = {"id": t["id"], "states": {s["type"]: s["id"] for s in t["states"]["nodes"]}, "labels": {}}
     return _teams[key]
 
 
@@ -56,6 +57,12 @@ def find_sr(key: str, sr: str) -> dict | None:
 
 def label_id(key: str, name: str) -> str:
     t = team(key)
+    if name not in t["labels"]:
+        found = gql("query($k: String!, $n: String!) { issueLabels(first: 1, filter: {name: {eq: $n}, "
+                    "or: [{team: {key: {eq: $k}}}, {team: {null: true}}]}) { nodes { id } } }",
+                    {"k": key, "n": name})["issueLabels"]["nodes"]
+        if found:
+            t["labels"][name] = found[0]["id"]
     if name not in t["labels"]:
         made = gql("mutation($i: IssueLabelCreateInput!) { issueLabelCreate(input: $i) { issueLabel { id } } }",
                    {"i": {"name": name, "teamId": t["id"]}})

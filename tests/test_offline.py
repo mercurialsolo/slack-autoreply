@@ -1652,6 +1652,8 @@ class _FakeLinear:
         if "issues(" in q:
             return {"issues": {"nodes": [{"id": "id-" + k, "identifier": k, "url": f"https://linear.app/x/issue/{k}", "branchName": f"barada/{k.lower()}", "title": t}
                                          for k, t in self.titles.items() if v["s"].lower() in t.lower()]}}
+        if "issueLabels(" in q:
+            return {"issueLabels": {"nodes": [{"id": "lab-mini"}] if v["n"] == "agent:mini" else []}}
         if "issueLabelCreate" in q:
             return {"issueLabelCreate": {"issueLabel": {"id": "lab-" + v["i"]["name"]}}}
         if "issueCreate(input" in q:
@@ -1743,6 +1745,16 @@ _eng("1700000405.000", "*SR-84* <@UME> Linear is down today")
 _lin.down = False
 check("Linear down: the GitHub issue is still filed", len(_gh("issue create")) == _n + 1)
 check("…and the owner hears Linear failed", any("Linear" in p[1] for p in d.client.posted + d.bot.posted if p[0] == d.console))
+d.client.history[E] = [{"ts": "1700000405.000", "user": U, "text": "*SR-84* <@UME> Linear is down today"}]
+_n = len(_lin.made())
+check("replaying an SR filed while Linear was down opens its Linear issue", d.replay_eng("1700000405.000").startswith("linked ENG-")
+      and len(_lin.made()) == _n + 1)
+_edit = GH_LOG.read_text().rsplit("issue edit", 1)[-1]
+check("…writes it into the GitHub issue for the pickup", "Linear: [ENG-" in _edit and "Branch: `" in _edit, _edit[:300])
+check("…tells the thread", "ENG-" in d.bot.posted[-1][1] and d.bot.posted[-1][2] == "1700000405.000", str(d.bot.posted[-1]))
+check("…and remembers it", (S.eng_request(channel=E, ts="1700000405.000") or {}).get("linear", "").startswith("ENG-"))
+check("…once", d.replay_eng("1700000405.000") == "already filed")
+d.client.history.pop(E)
 
 # Pull-based pickup on any machine: Solo watches the issues it filed and reports in the thread
 # itself, so a machine needs only gh and claude, not Solo's Slack token.

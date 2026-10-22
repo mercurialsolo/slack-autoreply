@@ -447,13 +447,17 @@ def eng_rows() -> list[dict]:
 
 
 def eng_request(*, channel: str | None = None, ts: str | None = None, issue: int | None = None) -> dict | None:
-    """The recorded request for a Slack message, or for an issue number."""
+    """The recorded request for a Slack message, or for an issue number, with any later
+    `update` rows for its issue (e.g. the Linear issue linked after the fact) merged in."""
+    found = None
     for row in eng_rows():
-        if issue is not None and row.get("issue") == issue:
-            return row
-        if ts is not None and row.get("channel") == channel and row.get("ts") == ts:
-            return row
-    return None
+        if found is None:
+            if (issue is not None and row.get("issue") == issue) or \
+                    (ts is not None and row.get("channel") == channel and row.get("ts") == ts):
+                found = dict(row)
+        elif found.get("issue") and row.get("update") == found["issue"]:
+            found.update({k: v for k, v in row.items() if k not in ("update", "at")})
+    return found
 
 
 def eng_reported() -> set[int]:
@@ -1825,6 +1829,41 @@ class Daemon(Slack):
             except Exception as e:  # noqa: BLE001
                 log.warning("eng: could not report #%s in its thread: %s", n, e)
 
+    def link_eng(self, row: dict, raw: str) -> str:
+        """Give an SR filed on GitHub alone (Linear was down, or not set up yet) its Linear issue:
+        open it or find the one naming the SR, write it into the GitHub issue where the pickup
+        reads it, and say so in the thread."""
+        people = eng_people() or {}
+        team, n = people.get("linear_team"), row["issue"]
+        if not team or not linear.enabled():
+            return "already filed (no Linear team or key to link it to)"
+        person = people.get("people", {}).get(row.get("assignee") or "", {})
+        test = bool(row.get("test"))
+        labels = ([row["label"]] if row.get("label") else []) + ([CFG["eng_test_label"]] if test else [])
+        text = clean_text(raw, self.name_of)
+        permalink = self.permalink(row["channel"], row["ts"])
+        source = f"Requested by {self.name_of(row['sender'])} in #{self.channel_name(row['channel'])}" + (f" — {permalink}" if permalink else "")
+        try:
+            sr = sr_id(raw)
+            lin = (linear.find_sr(team, sr) if sr else None) or linear.create_issue(
+                team, issue_title(re.sub(CFG["eng_test_match"], "", raw) if test else raw),
+                f"{source}\n\n{quote(text)}" + ("" if person.get("linear") or not row.get("assignee")
+                                                 else f"\n\nFor {self.name_of(row['assignee'])}, who isn't in Linear."),
+                person.get("linear"), labels)
+            linear.comment(lin["id"], f"GitHub: {row['url']}")
+            body = json.loads(gh("issue", "view", str(n), "--json", "body") or "{}").get("body") or ""
+            gh("issue", "edit", str(n), "--body",
+               body.rstrip() + f"\n\nLinear: [{lin['identifier']}]({lin['url']})\nBranch: `{lin['branchName']}`")
+        except (RuntimeError, OSError, subprocess.SubprocessError, json.JSONDecodeError, KeyError) as e:
+            return f"filed #{n}, but linking Linear failed: {e}"
+        record_eng_request(update=n, linear=lin["identifier"], linear_id=lin["id"], linear_url=lin["url"], branch=lin["branchName"])
+        if self.bot:
+            try:
+                self.bot.chat_postMessage(channel=row["channel"], thread_ts=row["ts"], text=f"Linear: {lin['identifier']}: {lin['url']}")
+            except Exception as e:  # noqa: BLE001
+                log.warning("eng: could not post the Linear link for #%s: %s", n, e)
+        return f"linked {lin['identifier']} to #{n}"
+
     def replay_eng(self, ts: str) -> str:
         """Put one top-level message in ENG_CHANNEL through intake again, e.g. an SR passed over
         before its person was in the people table. Returns what happened, in a few words."""
@@ -1832,8 +1871,11 @@ class Daemon(Slack):
         m = next((m for m in msgs if m.get("ts") == ts), None)
         if not m:
             return f"no such message in the request channel: {ts}"
-        if eng_request(channel=self.eng_channel, ts=ts):
-            return "already " + eng_request(channel=self.eng_channel, ts=ts).get("status", "seen")
+        row = eng_request(channel=self.eng_channel, ts=ts)
+        if row and row.get("status") == "filed" and row.get("issue") and not row.get("linear"):
+            return self.link_eng(row, m.get("text", ""))
+        if row:
+            return "already " + row.get("status", "seen")
         self.on_eng_request({"type": "message", "user": m.get("user"), "channel": self.eng_channel,
                              "channel_type": "channel", "ts": ts, "text": m.get("text", "")})
         row = eng_request(channel=self.eng_channel, ts=ts) or {}
