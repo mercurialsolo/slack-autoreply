@@ -1668,6 +1668,7 @@ _cli.write_text(f"""#!/usr/bin/env bash
 echo "argv: $* token=$INFISICAL_TOKEN domain=$INFISICAL_DOMAIN" >> {_cli_log}
 [ -n "${{FAKE_INF_FAIL:-}}" ] && {{ echo "could not reach" >&2; exit 1; }}
 case "$*" in
+  *"--projectId vault9"*) echo '[{{"key":"SLACK_BOT_TOKEN","value":"xoxb-vault"}}]' ;;
   *"--path /agents"*) echo '[{{"key":"SLACK_BOT_TOKEN","value":"xoxb-from-infisical"}},{{"key":"LINEAR_API_KEY","value":"lin_1"}}]' ;;
   *) echo '[{{"key":"SLACK_BOT_TOKEN","value":"xoxb-shared"}},{{"key":"TYPESAFE_API_KEY","value":"ts-1"}},{{"key":"ANTHROPIC_API_KEY","value":"sk-no"}},{{"key":"STAFFAI_DB_PASSWORD","value":"pw"}}]' ;;
 esac
@@ -1703,6 +1704,12 @@ check("the log line names keys, never values", "SLACK_BOT_TOKEN" in _line and "x
 _cli_log.unlink()
 check("a command Solo starts inherits the keys and doesn't fetch again",
       "inherited" in _C.load_secrets() and not _cli_log.exists())
+_line = _secrets(INFISICAL_PATHS="vault9:/,/shared")
+check("a folder in another project is read from that project", "--projectId vault9 --env dev --path /" in _cli_log.read_text())
+check("…and the plain path still uses the identity's own", "--projectId proj1 --env dev --path /shared" in _cli_log.read_text())
+check("…with the source named by project", _C.SECRET_SOURCES.get("TYPESAFE_API_KEY") == "infisical dev:/shared"
+      and _C.SECRET_SOURCES.get("SLACK_BOT_TOKEN") == "infisical dev:vault9:/", str(_C.SECRET_SOURCES))
+os.environ.pop("INFISICAL_PATHS", None)
 _line = _secrets(FAKE_INF_FAIL="1")
 check("Infisical down: Solo starts on .env and says why",
       "failed" in _line and "could not reach" in _line and os.environ["SLACK_BOT_TOKEN"] == "xoxb-from-dotenv", _line)

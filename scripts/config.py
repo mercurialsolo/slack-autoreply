@@ -196,6 +196,10 @@ LOADED_MARK = "AUTOREPLY_SECRETS"     # set once loaded, so the commands a dispa
 def _infisical_secrets(node_env: Path, mint: str, cli: str, envname: str, paths: list[str]) -> dict[str, tuple[str, str]]:
     """{key: (value, "dev:/path")} for SECRET_KEYS, the first folder that has a key winning.
 
+    A path is `/folder` in the identity's own project, or `<project id>:/folder` in another one —
+    Solo's Slack user token belongs in a project only Solo's machine can read, not in the one
+    every node and container reads.
+
     The token lives only in this process's memory and the CLI's environment — never in
     os.environ, where every child process would inherit it, and never in argv, where `ps` shows it."""
     ident = dotenv_values(node_env)
@@ -210,14 +214,15 @@ def _infisical_secrets(node_env: Path, mint: str, cli: str, envname: str, paths:
         raise RuntimeError(out.stderr.strip()[:200] or "mint-token gave no token")
     cli_env = {**os.environ, "INFISICAL_TOKEN": out.stdout.strip(), "INFISICAL_DOMAIN": domain}
     found: dict[str, tuple[str, str]] = {}
-    for path in paths:
-        res = subprocess.run([cli, "export", "--projectId", project, "--env", envname, "--path", path,
+    for entry in paths:
+        proj, _, path = entry.rpartition(":")
+        res = subprocess.run([cli, "export", "--projectId", proj or project, "--env", envname, "--path", path,
                               "--format", "json", "--silent"], capture_output=True, text=True, timeout=20, env=cli_env)
         if res.returncode != 0:
-            raise RuntimeError(f"export {envname}:{path} failed: {res.stderr.strip()[:200]}")
+            raise RuntimeError(f"export {envname}:{entry} failed: {res.stderr.strip()[:200]}")
         for row in json.loads(res.stdout or "[]"):
             if row.get("key") in SECRET_KEYS and row.get("value") and row["key"] not in found:
-                found[row["key"]] = (row["value"], f"{envname}:{path}")
+                found[row["key"]] = (row["value"], f"{envname}:{entry}")
     return found
 
 
