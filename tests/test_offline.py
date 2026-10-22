@@ -1630,6 +1630,15 @@ check("…and leaves an issue alone until its thread has had time to settle",
       P.pick(_issues, datetime(2026, 10, 21, 10, 5, tzinfo=P.timezone.utc)) is None)
 _brief = P.brief({"number": 3, "title": "fix proxy", "body": "b", "url": "u"}, "agent/issue-3")
 check("the coding brief says draft PR and never merge", "--draft" in _brief and "never merge" in _brief.lower())
+check("with no Linear team, the brief does not ask for a Linear issue", "Linear" not in _brief)
+_lbrief = P.brief({"number": 3, "title": "fix proxy", "body": "b", "url": "u"}, "agent/issue-3", linear_team="ENG")
+check("with one, the agent creates the Linear issue before any code",
+      "ENG" in _lbrief and _lbrief.index("Linear") < _lbrief.index("smallest change"))
+check("…and names its branch the way Linear's GitHub app matches", "gitBranchName" in _lbrief)
+check("the report carries the Linear issue the agent created",
+      P.linear_url([{"body": "Tracked in [ENG-42](https://linear.app/staffai-dev/issue/ENG-42/fix-proxy)"}])
+      == "https://linear.app/staffai-dev/issue/ENG-42/fix-proxy")
+check("…and nothing when it made none", P.linear_url([{"body": "no link here"}]) is None)
 
 # The voice harness scores drafts against what the owner actually wrote. An empty draft passed
 # every regex at first — no greeting and no full stop because it has nothing — so silence in reply

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -38,6 +39,12 @@ MAX_TURNS = config.env("ENG_MAX_TURNS", "150")
 TIMEOUT = int(config.env("ENG_TIMEOUT", "5400"))
 SETTLE = timedelta(minutes=int(config.env("ENG_SETTLE_MINUTES", "15")))
 LOCK = config.STATE_DIR / "eng_pickup.lock"
+# Linear is optional. With a team key, the agent opens the Linear issue itself before any code, and
+# names its branch from it so Linear's GitHub app attaches the PR and moves the issue. The MCP
+# config is passed explicitly because the owner's Linear MCP is registered for their own checkout,
+# not for the agent's clone; the OAuth login it already holds is reused.
+LINEAR_TEAM = config.env("ENG_LINEAR_TEAM")
+MCP_CONFIG = Path(config.env("ENG_MCP_CONFIG", str(config.STATE_DIR / "eng-mcp.json"))).expanduser()
 
 BRIEF = """You are working on GitHub issue #{number} in {repo}: {title}
 {url}
@@ -48,7 +55,7 @@ Read the comments too (`gh issue view {number} --comments`): the Slack thread's 
 there, and they usually carry the detail the title leaves out.
 
 You are in a fresh git worktree on branch `{branch}`, cut from the default branch.
-
+{linear}
 1. Read the issue and the code it touches. If the request is unclear, too big for one PR, or not a
    code change, do not guess: comment on the issue with what you found and what you need
    (`gh issue comment {number} --body "..."`) and stop there.
@@ -58,7 +65,7 @@ You are in a fresh git worktree on branch `{branch}`, cut from the default branc
      gh pr create --draft --title "<what changed>" --body "Closes #{number}
 
      <what changed, and how you tested it>"
-4. Comment on the issue with the PR link.
+4. Comment on the issue with the PR link.{linear_after}
 
 Never merge, never push to the default branch, never mark the PR ready for review: a person
 reviews and merges. Do not post to Slack — Solo reports your PR in the thread the request came from."""
@@ -75,9 +82,36 @@ def pick(issues: list[dict], now: datetime | None = None) -> dict | None:
     return min(free, key=lambda i: i["createdAt"]) if free else None
 
 
-def brief(issue: dict, branch: str) -> str:
-    return BRIEF.format(repo=REPO, branch=branch, number=issue["number"], title=issue["title"],
-                        url=issue.get("url", ""), body=(issue.get("body") or "").strip())
+LINEAR_FIRST = """
+0. Before anything else, open a Linear issue in team {team} with the Linear MCP: the same title,
+   and a description linking {url} and the Slack request quoted in it. Then:
+   - comment on the GitHub issue: `gh issue comment {number} --body "Tracked in [KEY](<linear url>)"`
+   - rename this branch to the Linear issue's `gitBranchName` (`git branch -m <gitBranchName>`) and
+     use that name wherever this brief says `{branch}`. That is what Linear's GitHub app matches to
+     attach the PR and move the issue.
+   - in the PR body, after the closing line, add `Refs [KEY](<linear url>)`.
+   If the Linear MCP is unavailable, say so in a GitHub issue comment and carry on without it.
+"""
+LINEAR_AFTER = """
+5. Comment on the Linear issue with what you did and the PR link — or, if you stopped at step 1,
+   with what you found and what you need."""
+
+
+def brief(issue: dict, branch: str, linear_team: str = "") -> str:
+    url = issue.get("url", "")
+    linear = LINEAR_FIRST.format(team=linear_team, url=url, number=issue["number"], branch=branch) if linear_team else ""
+    return BRIEF.format(repo=REPO, branch=branch, number=issue["number"], title=issue["title"], url=url,
+                        body=(issue.get("body") or "").strip(), linear=linear,
+                        linear_after=LINEAR_AFTER if linear_team else "")
+
+
+def linear_url(comments: list[dict]) -> str | None:
+    """The Linear issue the agent opened, from its comment on the GitHub issue."""
+    for c in comments:
+        m = re.search(r"https://linear\.app/[^\s)>\]]+/issue/[^\s)>\]]+", c.get("body") or "")
+        if m:
+            return m.group(0)
+    return None
 
 
 def run(cmd: list[str], **kw) -> str:
@@ -122,23 +156,32 @@ def work(issue: dict) -> None:
         path = worktree(branch, number)
         env = dict(os.environ)
         env.pop("ANTHROPIC_API_KEY", None)   # bill the Claude Code login, not the API key
-        subprocess.run([CLAUDE, "-p", brief(issue, branch), "--permission-mode", "acceptEdits",
-                        "--allowedTools", "Bash", "Read", "Edit", "Write", "Glob", "Grep",
+        team = LINEAR_TEAM if MCP_CONFIG.exists() else ""
+        tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"] + (["mcp__linear-server__*"] if team else [])
+        subprocess.run([CLAUDE, "-p", brief(issue, branch, team), "--permission-mode", "acceptEdits",
+                        "--allowedTools", *tools,
                         "--disallowedTools", "Bash(gh pr merge:*)", "Bash(gh pr ready:*)",
+                        *(["--mcp-config", str(MCP_CONFIG)] if team else []),
                         "--max-turns", MAX_TURNS, "--output-format", "json"],
                        cwd=path, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=TIMEOUT)
+        # the agent renames the branch after the Linear issue, so ask the worktree what it is now
+        branch = run(["git", "-C", str(path), "branch", "--show-current"]).strip() or branch
         prs = json.loads(run([GH, "pr", "list", "--repo", REPO, "--head", branch, "--state", "open",
                               "--json", "number,url"]) or "[]")
+        comments = json.loads(run([GH, "issue", "view", str(number), "--repo", REPO, "--json", "comments"]) or "{}")
+        linear = linear_url(comments.get("comments", []))
     except (OSError, subprocess.SubprocessError, RuntimeError, json.JSONDecodeError) as e:
         relabel(number, NEEDS_HUMAN, WORKING)
         report(number, f"The agent couldn't work on #{number}: {str(e)[:300]}\n{issue.get('url', '')}")
         raise
     if prs:
         relabel(number, DONE, WORKING)
-        report(number, f"Draft PR for #{number} is up: {prs[0]['url']}\nA person still reviews and merges it.")
+        report(number, f"Draft PR for #{number} is up: {prs[0]['url']}" + (f"\nLinear: {linear}" if linear else "")
+               + "\nA person still reviews and merges it.")
     else:
         relabel(number, NEEDS_HUMAN, WORKING)
-        report(number, f"The agent looked at #{number} and didn't open a PR; its comment on the issue says why.\n{issue.get('url', '')}")
+        report(number, f"The agent looked at #{number} and didn't open a PR; its comment on the issue says why.\n"
+               f"{issue.get('url', '')}" + (f"\nLinear: {linear}" if linear else ""))
 
 
 def main() -> int:

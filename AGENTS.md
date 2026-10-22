@@ -284,6 +284,11 @@ the link in the thread. Replies inside a thread are not new requests. Triage sti
    ```
    */10 * * * * PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin ~/.slack-autoreply/venv/bin/python3 ~/.claude/skills/slack-autoreply/scripts/eng_pickup.py >> ~/.slack-autoreply/eng_pickup.log 2>&1
    ```
+   For Linear, add `ENG_LINEAR_TEAM=ENG` (in `.env` or at the front of the cron line) and write
+   `~/.slack-autoreply/eng-mcp.json` with the Linear MCP server (see `.env.example`). Passing it
+   explicitly is what lets the agent's clone reuse the Linear login the owner's checkout already
+   has — a project-scoped MCP is not visible from `~/agent-work`. Check from there:
+   `claude -p "list the Linear teams" --mcp-config ~/.slack-autoreply/eng-mcp.json --allowedTools mcp__linear-server__list_teams`
    Verify by running it once by hand: the issue gains `agent:working`, then `agent:done` with a
    draft PR or `agent:needs-human` with a comment, and the bot posts in the thread either way.
 
