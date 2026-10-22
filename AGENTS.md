@@ -247,14 +247,18 @@ the link in the thread. Replies inside a thread are not new requests. Triage sti
 
 **Owner does these — they change what the team's repo and Slack app allow:**
 
-1. **Protect the default branch first.** The node's `gh` is logged in as the owner, so without
-   protection an agent *can* merge; the brief forbidding it is not a boundary. GitHub → repo →
-   Settings → Rules: require a pull request with one approval, and do not exempt admins.
-   Verify: `gh api repos/<owner>/<repo>/rulesets` lists it, or
-   `gh api repos/<owner>/<repo>/branches/main/protection` stops returning 404.
+1. **Check what the default branch enforces.** The node's `gh` is logged in as the owner, so the
+   agent can do anything the owner can; the brief forbidding a merge is not a boundary. Rulesets,
+   not classic protection, are what count — `branches/main/protection` 404s even when a ruleset
+   protects main:
+   `gh api repos/<owner>/<repo>/rules/branches/main --jq '[.[].type]'`
+   On staffai (21 Oct) that is `pull_request` with **0 approvals** + required status checks: no
+   direct push, but a green PR can be merged by its author. Closing that gap takes an org admin
+   (approvals ≥ 1) *and* a separate GitHub identity for the agent, since an author cannot approve
+   their own PR.
 2. **Slack app**: Event Subscriptions → *Subscribe to events on behalf of users* must include
-   `message.channels` (and `message.groups` for a private channel); save, then reinstall when Slack
-   asks. Solo still ignores every other channel unless you are @mentioned.
+   `message.channels` (and `message.groups` for a private channel). On Solo it already does —
+   Solo just ignores every other channel unless you are @mentioned — so no reinstall is needed.
 3. **Invite the bot** in the request channel: `/invite @Solo`. Without it the bot cannot answer in
    the thread, and the owner gets a ⚠️ in the console instead.
 4. **Node `.env`** (back it up first):
