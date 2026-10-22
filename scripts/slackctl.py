@@ -448,6 +448,8 @@ ENG_REQUESTS = config.p("eng_requests.jsonl")
 
 ENG_PEOPLE = config.p("eng.json")
 REPORTED_LABELS = {"agent:done", "agent:needs-human"}
+GO_REACTIONS = {"arrow_forward", "fast_forward"}            # ▶️ / ⏩ on an SR: start its agent now
+GO_WORDS = {"go", "go ahead", "start", "start now"}
 
 
 def eng_rows() -> list[dict]:
@@ -1579,6 +1581,7 @@ class Daemon(Slack):
         self.eng_routes = {uid: label for who, label in CFG["eng_routes"].items()
                            for uid in self.resolve_users([who])}
         self.eng_lock = threading.Lock()
+        self.eng_launched: dict[int, float] = {}   # issue → when Solo last started a pickup for it
         self.pool = ThreadPoolExecutor(max_workers=8)
         self.sem = threading.Semaphore(CFG["dispatch_parallel"])
         self._probe_lock = threading.Lock()   # tick is every 5 min, a probe may take longer
@@ -1677,6 +1680,10 @@ class Daemon(Slack):
         sender, channel, ts, raw = ev["user"], ev["channel"], ev["ts"], ev.get("text", "") or ""
         who, text = self.name_of(sender), clean_text(raw, self.name_of)
         if ev.get("thread_ts") and ev["thread_ts"] != ts:
+            if text.strip().lower().rstrip("!. ") in GO_WORDS:
+                row = eng_request(channel=channel, ts=ev["thread_ts"])
+                if row and row.get("issue") and self.start_eng_now(row, sender):
+                    return True
             self.on_eng_thread_reply(ev["thread_ts"], who, slack_md(raw, self.name_of)); return False
         if self.state.pause_info() is not None:
             log.info("eng: skip (paused) %s: %s", who, text[:80]); return False
@@ -1726,6 +1733,14 @@ class Daemon(Slack):
                                test=test, assignee=owner, **lin)
         log.info("eng: filed #%s%s for %s", number, f" and {lin['linear']}" if lin else "", self.name_of(owner))
         reply = self.eng_reply(number, url, lin, label, self.name_of(owner) if people is not None else None)
+        if label and label == self.local_label():
+            # push: start the agent here once the thread has had time to fill in; the tick
+            # catches it too if Solo restarts first, and cron is the net under both
+            t = threading.Timer(CFG["eng_settle_minutes"] * 60 + 5, lambda: self._submit(self.launch_due))
+            t.daemon = True
+            t.start()
+            reply += (f"\nIt starts in {CFG['eng_settle_minutes']} minutes, once the thread has settled — "
+                      f"react ▶️ or reply \"go\" to start it now.")
         if filed.get("unassigned"):
             reply += f"\nGitHub wouldn't assign {self.name_of(owner)} on this repo, so #{number} is unassigned there."
         if test:
@@ -1882,6 +1897,58 @@ class Daemon(Slack):
         if label:
             return first + f"\nFor {for_whom}. The agent on {label.split(':', 1)[1]} picks it up shortly and posts a draft PR here."
         return first + f"\nFor {for_whom}. No agent machine works for them yet, so it waits for them."
+
+    def local_label(self) -> str | None:
+        """The agent label this machine works: eng.json's "local_machine"."""
+        machine = (eng_people() or {}).get("local_machine")
+        return f"agent:{machine}" if machine else None
+
+    def spawn_pickup(self, label: str, issue: int | None = None, now: bool = False) -> None:
+        """Run eng_pickup.py for this machine's label, detached; it logs where cron's runs do. Its
+        lock means a second start while one is working just exits, and the issue waits its turn."""
+        cmd = [sys.executable, str(Path(SCRIPT).with_name("eng_pickup.py"))]
+        cmd += (["--issue", str(issue)] if issue else []) + (["--now"] if now else [])
+        with open(config.p("eng_pickup.log"), "a", encoding="utf-8") as out:
+            proc = subprocess.Popen(cmd, env={**os.environ, "ENG_LABEL": label}, stdin=subprocess.DEVNULL,
+                                    stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+        threading.Thread(target=proc.wait, daemon=True).start()   # reap it
+        log.info("eng: started the pickup for %s%s", label, f" on #{issue}" + (" now" if now else "") if issue else "")
+
+    def launch_due(self) -> None:
+        """Start the pickup here for the oldest SR labelled for this machine whose wait is over.
+        One per call; the next timer or tick takes the next."""
+        label = self.local_label()
+        if not label:
+            return
+        done, now = eng_reported(), datetime.now()
+        settle = timedelta(minutes=CFG["eng_settle_minutes"])
+        for row in eng_rows():
+            n = row.get("issue")
+            if row.get("status") != "filed" or row.get("label") != label or not n or n in done:
+                continue
+            age = now - datetime.fromisoformat(row["at"])
+            if age < settle or age > timedelta(days=14) or time.time() - self.eng_launched.get(n, 0) < 1800:
+                continue
+            self.eng_launched[n] = time.time()
+            self.spawn_pickup(label, issue=n)
+            return
+
+    def start_eng_now(self, row: dict, who: str | None) -> bool:
+        """▶️ or "go" from the person who asked, the person it's for, or the owner: start now."""
+        label, n = row.get("label"), row["issue"]
+        if not label or label != self.local_label() or who not in {row.get("sender"), row.get("assignee"), self.me}:
+            return False
+        if n in eng_reported() or time.time() - self.eng_launched.get(n, 0) < 60:
+            return False
+        self.eng_launched[n] = time.time()
+        self.spawn_pickup(label, issue=n, now=True)
+        if self.bot:
+            try:
+                self.bot.chat_postMessage(channel=row["channel"], thread_ts=row["ts"],
+                                          text=f"▶️ Starting the agent on #{n} now, at {self.name_of(who)}'s go.")
+            except Exception as e:  # noqa: BLE001
+                log.warning("eng: could not say #%s started: %s", n, e)
+        return True
 
     def poll_eng(self) -> None:
         """Say in the request's thread how the agent's work ended.
@@ -2095,6 +2162,12 @@ class Daemon(Slack):
 
     def on_reaction(self, ev: dict) -> None:
         item_ref = ev.get("item") or {}
+        if self.eng_channel and item_ref.get("channel") == self.eng_channel:
+            if ev.get("reaction") in GO_REACTIONS:
+                row = eng_request(channel=self.eng_channel, ts=item_ref.get("ts"))
+                if row and row.get("issue"):
+                    self.start_eng_now(row, ev.get("user"))
+            return
         consoles = {c for c in (self.bot_dm, self.self_dm) if c}
         if ev.get("user") != self.me or item_ref.get("type") != "message" or item_ref.get("channel") not in consoles:
             return
@@ -2359,6 +2432,7 @@ class Daemon(Slack):
         self.probe_writer()
         self.nudge_review()
         self.poll_eng()
+        self.launch_due()
 
     def nudge_review(self) -> None:
         """Ask for the reviewer, do not become one.

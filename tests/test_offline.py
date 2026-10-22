@@ -1755,6 +1755,38 @@ check("…and the GitHub body, keeping the lines the pickup reads", "stuck since
 _row87 = S.eng_request(channel=E, ts="1700000410.000")
 check("eng-sync rebuilds an issue from its thread on demand", d.sync_eng(_row87).startswith("synced"))
 
+# Push, not just poll: Solo starts the pickup on its own machine once an SR has settled, and at
+# once when someone reacts ▶️ or replies "go". Cron stays as the safety net.
+_spawned = []
+d.spawn_pickup = lambda label, issue=None, now=False: _spawned.append((label, issue, now))
+_data = json.loads((STATE / "eng.json").read_text()); _data["local_machine"] = "mini"
+(STATE / "eng.json").write_text(json.dumps(_data))
+S.CFG["eng_settle_minutes"] = 0
+d.eng_launched.clear()
+d.launch_due()
+check("a settled SR for this machine starts the pickup here", _spawned and _spawned[0][0] == "agent:mini", str(_spawned))
+for _ in range(20):
+    d.launch_due()
+_ids = [x[1] for x in _spawned]
+check("…each SR once, not every tick", len(_ids) == len(set(_ids)), str(_ids))
+S.CFG["eng_settle_minutes"] = 15
+d.eng_launched.clear()
+_n87 = _row87["issue"]
+d.on_event({"type": "reaction_added", "user": U, "reaction": "arrow_forward", "item": {"type": "message", "channel": E, "ts": "1700000410.000"}})
+check("▶️ on the SR starts its agent now, skipping the wait", _spawned[-1] == ("agent:mini", _n87, True), str(_spawned[-1:]))
+check("…and the thread hears it", "start" in d.bot.posted[-1][1].lower() and d.bot.posted[-1][2] == "1700000410.000", d.bot.posted[-1][1])
+_k = len(_spawned)
+d.on_event({"type": "reaction_added", "user": "USTRANGER", "reaction": "arrow_forward", "item": {"type": "message", "channel": E, "ts": "1700000410.000"}})
+check("…but not when someone unrelated reacts", len(_spawned) == _k)
+d.on_event({"type": "reaction_added", "user": U, "reaction": "arrow_forward", "item": {"type": "message", "channel": E, "ts": "1700000401.000"}})
+check("…nor for an SR whose person has no machine", len(_spawned) == _k)
+d.eng_launched.clear()
+_k = len(_spawned)
+_eng("1700000415.000", "go", thread_ts="1700000410.000")
+check("replying \"go\" in the thread does the same", len(_spawned) == _k + 1 and _spawned[-1][2] is True, str(_spawned[-1:]))
+check("…and \"go\" is not copied onto the tickets", "**Priya** in the Slack thread:\n\ngo" not in GH_LOG.read_text())
+_data.pop("local_machine"); (STATE / "eng.json").write_text(json.dumps(_data))
+
 _n = len(_lin.made())
 _eng("1700000403.000", "*SR-49* <@UME> the digest is missing reply rates")
 check("an SR Linear already has is not opened twice", len(_lin.made()) == _n)
@@ -1830,6 +1862,9 @@ _issues = [{"number": 3, "createdAt": "2026-10-21T10:00:00Z", "labels": [{"name"
            {"number": 1, "createdAt": "2026-10-21T11:00:00Z", "labels": [{"name": "agent"}]}]
 _late = datetime(2026, 10, 21, 12, 0, tzinfo=P.timezone.utc)
 check("pickup takes the oldest issue no agent has touched", P.pick(_issues, _late)["number"] == 3)
+check("…or, started for one issue right now, that one regardless of the wait",
+      P.pick(P.only(_issues, 1), datetime(2026, 10, 21, 11, 1, tzinfo=P.timezone.utc), settle=P.timedelta(0))["number"] == 1)
+check("…never one an agent already has", P.pick(P.only(_issues, 2), _late, settle=P.timedelta(0)) is None)
 check("…and nothing when every issue is taken", P.pick([_issues[1]], _late) is None)
 check("…and leaves an issue alone until its thread has had time to settle",
       P.pick(_issues, datetime(2026, 10, 21, 10, 5, tzinfo=P.timezone.utc)) is None)

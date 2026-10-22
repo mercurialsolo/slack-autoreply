@@ -73,14 +73,18 @@ Never merge, never push to the default branch, never mark the PR ready for revie
 reviews and merges. Do not post to Slack — Solo reports your PR in the thread the request came from."""
 
 
-def pick(issues: list[dict], now: datetime | None = None) -> dict | None:
+def only(issues: list[dict], number: int) -> list[dict]:
+    return [i for i in issues if i["number"] == number]
+
+
+def pick(issues: list[dict], now: datetime | None = None, settle: timedelta | None = None) -> dict | None:
     """The oldest open issue no agent has touched, once it is ENG_SETTLE_MINUTES old.
 
     An SR's title is a few words and the detail arrives as thread replies, which Solo copies onto
     the issue. Starting the moment it is filed means reading the title and guessing."""
-    now = now or datetime.now(timezone.utc)
+    now, settle = now or datetime.now(timezone.utc), SETTLE if settle is None else settle
     free = [i for i in issues if not {lab["name"] for lab in i.get("labels", [])} & TAKEN
-            and now - datetime.fromisoformat(i["createdAt"].replace("Z", "+00:00")) >= SETTLE]
+            and now - datetime.fromisoformat(i["createdAt"].replace("Z", "+00:00")) >= settle]
     return min(free, key=lambda i: i["createdAt"]) if free else None
 
 
@@ -247,7 +251,12 @@ def work(issue: dict) -> None:
 
 
 def main() -> int:
-    print(config.load_secrets())
+    import argparse
+    ap = argparse.ArgumentParser(description="take one engineering issue and hand it to Claude Code")
+    ap.add_argument("--issue", type=int, help="only this issue (Solo starts it when its SR has settled, or on ▶️)")
+    ap.add_argument("--now", action="store_true", help="don't wait for the thread to settle")
+    a = ap.parse_args()
+    print(f"{datetime.now():%Y-%m-%d %H:%M} " + config.load_secrets())
     if not REPO:
         sys.exit("ENG_REPO is not set in ~/.slack-autoreply/.env")
     try:
@@ -260,7 +269,7 @@ def main() -> int:
             run([GH, "label", "create", name, "--repo", REPO, "--force", "--color", "BFD4F2"])
         issues = json.loads(run([GH, "issue", "list", "--repo", REPO, "--label", LABEL, "--state", "open",
                                  "--limit", "50", "--json", "number,title,body,url,createdAt,labels"]) or "[]")
-        issue = pick(issues)
+        issue = pick(only(issues, a.issue) if a.issue else issues, settle=timedelta(0) if a.now else None)
         if issue:
             work(issue)
         return 0
