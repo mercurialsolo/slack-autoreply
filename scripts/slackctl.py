@@ -1596,46 +1596,53 @@ class Daemon(Slack):
             if sender == self.me:
                 self.on_console_message(ev)
             return
-        if self.eng_channel and channel == self.eng_channel:
-            self.on_eng_request(ev)
+        # Only what becomes an issue leaves the normal path: a plain @mention of the owner in the
+        # same channel is still a message to answer, as it was before the channel was wired up.
+        if self.eng_channel and channel == self.eng_channel and self.on_eng_request(ev):
             return
         if sender == self.me:
             self.on_owner_message(ev)
             return
         self.on_inbound(ev)
 
-    def on_eng_request(self, ev: dict) -> None:
-        """A message in ENG_CHANNEL: file it for the coding agent and say so in the thread."""
+    def on_eng_request(self, ev: dict) -> bool:
+        """A message in ENG_CHANNEL: file it for the coding agent and say so in the thread.
+        True when it was taken as a request, so nothing else should act on it."""
         sender, channel, ts, raw = ev["user"], ev["channel"], ev["ts"], ev.get("text", "") or ""
         who, text = self.name_of(sender), clean_text(raw, self.name_of)
         if ev.get("thread_ts") and ev["thread_ts"] != ts:
-            self.on_eng_thread_reply(ev["thread_ts"], who, text); return
+            self.on_eng_thread_reply(ev["thread_ts"], who, text); return False
         if self.state.pause_info() is not None:
-            log.info("eng: skip (paused) %s: %s", who, text[:80]); return
+            log.info("eng: skip (paused) %s: %s", who, text[:80]); return False
         if CFG["eng_match"] and not re.match(CFG["eng_match"], raw.strip()):
-            log.info("eng: not a request (no %s): %s", CFG["eng_match"], text[:80]); return
+            log.info("eng: not a request (no %s): %s", CFG["eng_match"], text[:80]); return False
         label = CFG["eng_label"]
         if self.eng_routes:
-            label = self.eng_routes.get(assignee(raw) or "")
+            owner = assignee(raw) or sender   # an SR nobody is @'d on belongs to whoever posted it
+            label = self.eng_routes.get(owner)
             if not label:
-                log.info("eng: for %s, who has no cluster yet — not filed: %s",
-                         self.name_of(assignee(raw)) if assignee(raw) else "nobody", text[:80]); return
+                log.info("eng: for %s, who has no cluster yet — not filed: %s", self.name_of(owner), text[:80])
+                return False
         where = f"#{self.channel_name(channel)}"
         with self.eng_lock:   # Slack redelivers; one message must never become two issues
             if eng_request(channel=channel, ts=ts):
-                return
+                return True
+            try:   # receipt first: whoever posted it sees it was taken before triage or gh run
+                self.react(channel, ts, "eyes")
+            except Exception as e:  # noqa: BLE001
+                log.warning("eng: could not mark %s's request as seen: %s", who, e)
             t = self.triager.run({"owner": self.me_name, "channel_type": ev.get("channel_type"),
                                   "channel_name": where[1:], "sender": who, "latest_message": text,
                                   "recent_conversation": ""})
             triaged = t.source != "default"
             if triaged and t.route == "ignore":
                 record_eng_request(channel=channel, ts=ts, sender=sender, status="ignored")
-                log.info("eng: not a request (%s): %s", t.summary(), text[:80]); return
+                log.info("eng: not a request (%s): %s", t.summary(), text[:80]); return True
             if triaged and t.sensitivity >= CFG["sensitivity_escalate"]:
                 record_eng_request(channel=channel, ts=ts, sender=sender, status="escalated")
                 self.notify(f"🔒 *{who}* asked for this in {where} — not filed, it reads as sensitive "
                             f"({t.sensitivity:.1f}). File it yourself if it should go to an agent.\n{quote(text[:400])}")
-                return
+                return True
             permalink = self.permalink(channel, ts)
             body = (f"Requested by {who} in {where}" + (f" — {permalink}" if permalink else "") + "\n\n"
                     + quote(text) + f"\n\n<sub>Filed by Solo from Slack. A coding agent picks up issues labelled "
@@ -1645,7 +1652,7 @@ class Daemon(Slack):
             except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as e:
                 log.error("eng: could not file %s's request: %s", who, e)
                 self.notify(f"⚠️ Couldn't file *{who}*'s request from {where} as an issue: {e}\n{quote(text[:300])}")
-                return
+                return True
             record_eng_request(channel=channel, ts=ts, sender=sender, status="filed", issue=number, url=url, label=label)
         log.info("eng: filed #%s for %s", number, who)
         reply = f"Filed as #{number}: {url}\nAn agent picks it up shortly and posts a draft PR here."
@@ -1656,6 +1663,7 @@ class Daemon(Slack):
         except Exception as e:  # noqa: BLE001
             hint = " — invite the Solo bot to the channel (/invite @Solo)" if "not_in_channel" in str(e) else ""
             self.notify(f"⚠️ Filed #{number} for *{who}* but couldn't say so in {where}: {e}{hint}\n{url}")
+        return True
 
     def on_eng_thread_reply(self, thread_ts: str, who: str, text: str) -> None:
         """A reply under a filed request is the clarification the agent needs: put it on the issue."""

@@ -1558,13 +1558,13 @@ S.CFG.update(gh_bin=str(FAKE_GH), eng_repo="StaffAI-Inc/staffai", eng_label="age
 d.eng_channel, d.bot, d.eng_routes = E, FakeClient(), {"UME": "agent:barada"}
 
 
-def _eng(ts, text, tri=None, thread_ts=None):
+def _eng(ts, text, tri=None, thread_ts=None, user=U):
     """A message in the request channel; returns every `gh issue create` filed so far."""
     real = d.triager.run
     if tri:
         d.triager.run = lambda state: tri
     try:
-        d.on_event({"type": "message", "user": U, "channel": E, "channel_type": "channel", "ts": ts, "text": text,
+        d.on_event({"type": "message", "user": user, "channel": E, "channel_type": "channel", "ts": ts, "text": text,
                     **({"thread_ts": thread_ts} if thread_ts else {})})
     finally:
         d.triager.run = real
@@ -1583,6 +1583,7 @@ def _etri(route="reply", sensitivity=1.0, confidence=0.8):
 _filed = _eng("1700000300.000", "*SR-70* <@UME> reset-identity leaves the user with no_instance")
 check("an SR assigned to the owner is filed, labelled for the owner's cluster",
       len(_filed) == 1 and "--label agent:barada" in _filed[0] and "--repo StaffAI-Inc/staffai" in _filed[0])
+check("…and Solo marks the SR as seen the moment it is taken", (E, "1700000300.000", "eyes") in d.client.reactions)
 check("…titled by the SR, without the markup or the @", "--title SR-70: reset-identity leaves the user with no_instance" in _filed[0])
 check("…and the bot answers in that thread with the issue link",
       d.bot.posted[-1][0] == E and d.bot.posted[-1][2] == "1700000300.000" and "#3101" in d.bot.posted[-1][1])
@@ -1591,15 +1592,18 @@ check("Slack redelivering the same message files nothing twice",
       len(_eng("1700000300.000", "*SR-70* <@UME> reset-identity leaves the user with no_instance")) == 1)
 check("an SR assigned to someone with no cluster is not filed", len(_eng("1700000304.000", f"*SR-71* <@{U2}> duplicate fleet seats")) == 1)
 check("a message that is not an SR is not filed", len(_eng("1700000305.000", "<@UME> please keep this channel only for SRs")) == 1)
-check("chit-chat triage ignores is not filed", len(_eng("1700000301.000", "*SR-72* <@UME> thanks all", tri=_etri("ignore"))) == 1)
+check("…and still reaches Solo like any other mention of the owner", S.item_path(f"{E}-1700000305_000").exists())
+check("an SR with no @ is the poster's own", len(_eng("1700000307.000", "SR-74 Testing auto-assignment", user="UME")) == 2)
+check("…and is not also drafted as a reply", not S.item_path(f"{E}-1700000307_000").exists())
+check("chit-chat triage ignores is not filed", len(_eng("1700000301.000", "*SR-72* <@UME> thanks all", tri=_etri("ignore"))) == 2)
 _eng("1700000302.000", "also happens on staging", thread_ts="1700000300.000")
-check("a reply inside a request thread is not a new request", len(_gh("issue create")) == 1)
+check("a reply inside a request thread is not a new request", len(_gh("issue create")) == 2)
 check("…it is copied onto the issue, so the agent reads the clarification",
       _gh("issue comment 3101") and "also happens on staging" in GH_LOG.read_text().split("issue comment 3101", 1)[1])
 _eng("1700000306.000", "unrelated", thread_ts="1700000305.000")
 check("a reply in a thread that was never filed goes nowhere", len(_gh("issue comment")) == 1)
 check("a sensitive request is not filed",
-      len(_eng("1700000303.000", "*SR-73* <@UME> fix the payroll export for Bill's salary", tri=_etri(sensitivity=4.5))) == 1)
+      len(_eng("1700000303.000", "*SR-73* <@UME> fix the payroll export for Bill's salary", tri=_etri(sensitivity=4.5))) == 2)
 check("…it goes to the owner instead",
       any(p[0] == d.console and "not filed" in p[1] for p in d.client.posted + d.bot.posted))
 check("the pickup's report lands in the request's thread, as the bot",
