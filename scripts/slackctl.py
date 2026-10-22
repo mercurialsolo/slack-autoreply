@@ -475,13 +475,14 @@ def gh(*args: str) -> str:
     return out.stdout
 
 
-def file_issue(title: str, body: str, label: str) -> tuple[int, str]:
+def file_issue(title: str, body: str, labels: list[str]) -> tuple[int, str]:
     """`gh issue create` on ENG_REPO. Returns (number, url); raises with gh's words."""
-    if label not in _labels_made:   # gh refuses a label the repo does not have yet
-        gh("label", "create", label, "--force", "--color", "0E8A16", "--description", "queue for a coding agent")
-        _labels_made.add(label)
-    cmd = [CFG["gh_bin"], "issue", "create", "--repo", CFG["eng_repo"], "--label", label,
-           "--title", title, "--body", body]
+    for label in labels:
+        if label not in _labels_made:   # gh refuses a label the repo does not have yet
+            gh("label", "create", label, "--force", "--color", "0E8A16", "--description", "queue for a coding agent")
+            _labels_made.add(label)
+    cmd = [CFG["gh_bin"], "issue", "create", "--repo", CFG["eng_repo"],
+           *[a for label in labels for a in ("--label", label)], "--title", title, "--body", body]
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     url = (out.stdout.strip().splitlines() or [""])[-1]
     if out.returncode != 0 or "/issues/" not in url:
@@ -1623,6 +1624,8 @@ class Daemon(Slack):
             if not label:
                 log.info("eng: for %s, who has no cluster yet — not filed: %s", self.name_of(owner), text[:80])
                 return False
+        test = bool(CFG["eng_test_match"] and re.search(CFG["eng_test_match"], raw))
+        labels = [label] + ([CFG["eng_test_label"]] if test else [])
         where = f"#{self.channel_name(channel)}"
         with self.eng_lock:   # Slack redelivers; one message must never become two issues
             if eng_request(channel=channel, ts=ts):
@@ -1646,16 +1649,21 @@ class Daemon(Slack):
             permalink = self.permalink(channel, ts)
             body = (f"Requested by {who} in {where}" + (f" — {permalink}" if permalink else "") + "\n\n"
                     + quote(text) + f"\n\n<sub>Filed by Solo from Slack. A coding agent picks up issues labelled "
-                    f"`{CFG['eng_label']}` and answers with a draft PR in the Slack thread.</sub>")
+                    f"`{label}` and answers with a draft PR in the Slack thread."
+                    + (" This is a test request: it closes itself once the agent has reported." if test else "")
+                    + "</sub>")
             try:
-                number, url = file_issue(issue_title(raw), body, label)
+                title = issue_title(re.sub(CFG["eng_test_match"], "", raw) if test else raw)
+                number, url = file_issue(title, body, labels)
             except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as e:
                 log.error("eng: could not file %s's request: %s", who, e)
                 self.notify(f"⚠️ Couldn't file *{who}*'s request from {where} as an issue: {e}\n{quote(text[:300])}")
                 return True
-            record_eng_request(channel=channel, ts=ts, sender=sender, status="filed", issue=number, url=url, label=label)
+            record_eng_request(channel=channel, ts=ts, sender=sender, status="filed", issue=number, url=url, label=label, test=test)
         log.info("eng: filed #%s for %s", number, who)
         reply = f"Filed as #{number}: {url}\nAn agent picks it up shortly and posts a draft PR here."
+        if test:
+            reply += "\nMarked as a test: the issue and its PR close themselves once the agent has reported."
         try:
             if not self.bot:
                 raise RuntimeError("no bot token")

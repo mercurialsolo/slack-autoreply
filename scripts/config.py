@@ -167,6 +167,8 @@ CFG = dict(
     eng_repo=env("ENG_REPO", ""),
     eng_label=env("ENG_LABEL", "agent"),
     eng_match=env("ENG_MATCH", ""),          # regex a top-level message must start with, e.g. ^\*?SR-\d+
+    eng_test_match=env("ENG_TEST_MATCH", r"(?i)\[test\]"),   # a tag anywhere in the SR marks it a test
+    eng_test_label=env("ENG_TEST_LABEL", "sr:test"),        # filterable; closes itself after the agent reports
     # assignee=label pairs: the first @mention in a request is who it is for, and the label is the
     # queue their cluster's eng_pickup.py takes from. Empty = every request gets ENG_LABEL.
     eng_routes=dict(e.split("=", 1) for e in env_list("ENG_ROUTES") if "=" in e),

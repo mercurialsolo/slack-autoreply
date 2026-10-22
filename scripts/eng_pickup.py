@@ -37,6 +37,7 @@ REPO_DIR = Path(config.env("ENG_REPO_DIR", f"~/agent-work/{REPO.rsplit('/', 1)[-
 WORK_DIR = Path(config.env("ENG_WORK_DIR", "~/agent-work/worktrees")).expanduser()
 MAX_TURNS = config.env("ENG_MAX_TURNS", "150")
 TIMEOUT = int(config.env("ENG_TIMEOUT", "5400"))
+TEST_LABEL = config.env("ENG_TEST_LABEL", "sr:test")
 SETTLE = timedelta(minutes=int(config.env("ENG_SETTLE_MINUTES", "15")))
 LOCK = config.STATE_DIR / "eng_pickup.lock"
 # Linear is optional. With a team key, the agent opens the Linear issue itself before any code, and
@@ -114,6 +115,19 @@ def linear_url(comments: list[dict]) -> str | None:
     return None
 
 
+def is_test(issue: dict) -> bool:
+    return TEST_LABEL in {lab["name"] for lab in issue.get("labels", [])}
+
+
+def close_test(number: int, prs: list[dict]) -> None:
+    """A test SR has done its job once the agent has reported: close it, and its draft PR, so
+    trying the pipeline leaves nothing open. Both reopen with one click; the branch stays."""
+    note = "Test request: closed automatically after the agent reported."
+    for pr in prs:
+        run([GH, "pr", "close", str(pr["number"]), "--repo", REPO, "--comment", note])
+    run([GH, "issue", "close", str(number), "--repo", REPO, "--reason", "not planned", "--comment", note])
+
+
 def run(cmd: list[str], **kw) -> str:
     out = subprocess.run(cmd, capture_output=True, text=True, **kw)
     if out.returncode != 0:
@@ -182,6 +196,9 @@ def work(issue: dict) -> None:
         relabel(number, NEEDS_HUMAN, WORKING)
         report(number, f"The agent looked at #{number} and didn't open a PR; its comment on the issue says why.\n"
                f"{issue.get('url', '')}" + (f"\nLinear: {linear}" if linear else ""))
+    if is_test(issue):
+        close_test(number, prs)
+        report(number, f"Test request: #{number}" + (" and its draft PR are" if prs else " is") + " now closed.")
 
 
 def main() -> int:

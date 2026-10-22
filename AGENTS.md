@@ -289,6 +289,10 @@ the link in the thread. Replies inside a thread are not new requests. Triage sti
    `ENG_SETTLE_MINUTES` (15) after filing so the first ones are there when the agent reads it.
    then `solo restart`. Verify: `solo logs` shows no `ENG_REPO is not set` warning, and a test
    message in the channel logs `eng: filed #N` and gets a bot reply with the link.
+   To try the pipeline without leaving tickets behind, put `[test]` anywhere in the SR
+   (`ENG_TEST_MATCH`). It is filed and worked like any other but labelled `sr:test`
+   (`ENG_TEST_LABEL`), so `-label:sr:test` filters it out, and the pickup closes the issue and its
+   draft PR right after reporting. The branch stays; both reopen with one click.
 5. **Cron on the node**, once a filed issue exists to try it on:
    ```
    */10 * * * * PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin ~/.slack-autoreply/venv/bin/python3 ~/.claude/skills/slack-autoreply/scripts/eng_pickup.py >> ~/.slack-autoreply/eng_pickup.log 2>&1

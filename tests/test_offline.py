@@ -1613,6 +1613,21 @@ check("a sensitive request is not filed",
       len(_eng("1700000303.000", "*SR-73* <@UME> fix the payroll export for Bill's salary", tri=_etri(sensitivity=4.5))) == 3)
 check("…it goes to the owner instead",
       any(p[0] == d.console and "not filed" in p[1] for p in d.client.posted + d.bot.posted))
+# A test SR is filed and worked like any other, but labelled so it can be filtered, and it closes
+# itself once the agent has reported — so trying the pipeline leaves nothing open behind it.
+S.CFG.update(eng_test_match=r"(?i)\[test\]", eng_test_label="sr:test")
+_n = len(_gh("issue create"))
+_eng("1700000309.000", "*SR-75* [test] <@UME> add a last-checked timestamp")
+_create = _gh("issue create")[-1] if len(_gh("issue create")) > _n else ""
+check("an SR tagged [test] is still filed", bool(_create))
+check("…with the test label beside its route", "--label agent:barada" in _create and "--label sr:test" in _create, _create)
+check("…and the tag kept out of its title", "--title SR-75: add a last-checked timestamp" in _create, _create)
+check("…and the thread is told it closes itself", "test" in d.bot.posted[-1][1].lower() and "close" in d.bot.posted[-1][1].lower())
+check("…and it is recorded as a test", S.eng_request(channel=E, ts="1700000309.000").get("test") is True)
+_n = len(_gh("issue create"))
+_eng("1700000310.000", "*SR-76* <@UME> testing the export button")
+check("a real SR that merely mentions testing is not a test", "sr:test" not in _gh("issue create")[-1])
+
 check("the pickup's report lands in the request's thread, as the bot",
       S.post_eng_update(d.bot, 3101, "Draft PR #3200 is up") and d.bot.posted[-1][2] == "1700000300.000")
 check("an issue Solo never filed has nowhere to report", not S.post_eng_update(d.bot, 999, "x"))
@@ -1639,6 +1654,14 @@ check("the report carries the Linear issue the agent created",
       P.linear_url([{"body": "Tracked in [ENG-42](https://linear.app/staffai-dev/issue/ENG-42/fix-proxy)"}])
       == "https://linear.app/staffai-dev/issue/ENG-42/fix-proxy")
 check("…and nothing when it made none", P.linear_url([{"body": "no link here"}]) is None)
+P.GH, P.REPO, P.TEST_LABEL = str(FAKE_GH), "StaffAI-Inc/staffai", "sr:test"
+check("pickup knows a test issue by its label", P.is_test({"labels": [{"name": "agent"}, {"name": "sr:test"}]})
+      and not P.is_test({"labels": [{"name": "agent"}]}))
+P.close_test(4200, [{"number": 5100}])
+check("after the report, a test issue is closed", _gh("issue close 4200"))
+check("…and so is its draft PR", _gh("pr close 5100"))
+P.close_test(4201, [])
+check("…and with no PR only the issue", _gh("issue close 4201") and len(_gh("pr close")) == 1)
 
 # The voice harness scores drafts against what the owner actually wrote. An empty draft passed
 # every regex at first — no greeting and no full stop because it has nothing — so silence in reply
