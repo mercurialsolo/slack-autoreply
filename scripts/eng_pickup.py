@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -35,12 +36,16 @@ REPO_DIR = Path(config.env("ENG_REPO_DIR", f"~/agent-work/{REPO.rsplit('/', 1)[-
 WORK_DIR = Path(config.env("ENG_WORK_DIR", "~/agent-work/worktrees")).expanduser()
 MAX_TURNS = config.env("ENG_MAX_TURNS", "150")
 TIMEOUT = int(config.env("ENG_TIMEOUT", "5400"))
+SETTLE = timedelta(minutes=int(config.env("ENG_SETTLE_MINUTES", "15")))
 LOCK = config.STATE_DIR / "eng_pickup.lock"
 
 BRIEF = """You are working on GitHub issue #{number} in {repo}: {title}
 {url}
 
 {body}
+
+Read the comments too (`gh issue view {number} --comments`): the Slack thread's replies are copied
+there, and they usually carry the detail the title leaves out.
 
 You are in a fresh git worktree on branch `{branch}`, cut from the default branch.
 
@@ -59,9 +64,14 @@ Never merge, never push to the default branch, never mark the PR ready for revie
 reviews and merges. Do not post to Slack — Solo reports your PR in the thread the request came from."""
 
 
-def pick(issues: list[dict]) -> dict | None:
-    """The oldest open issue no agent has touched yet."""
-    free = [i for i in issues if not {lab["name"] for lab in i.get("labels", [])} & TAKEN]
+def pick(issues: list[dict], now: datetime | None = None) -> dict | None:
+    """The oldest open issue no agent has touched, once it is ENG_SETTLE_MINUTES old.
+
+    An SR's title is a few words and the detail arrives as thread replies, which Solo copies onto
+    the issue. Starting the moment it is filed means reading the title and guessing."""
+    now = now or datetime.now(timezone.utc)
+    free = [i for i in issues if not {lab["name"] for lab in i.get("labels", [])} & TAKEN
+            and now - datetime.fromisoformat(i["createdAt"].replace("Z", "+00:00")) >= SETTLE]
     return min(free, key=lambda i: i["createdAt"]) if free else None
 
 

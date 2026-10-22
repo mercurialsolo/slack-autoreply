@@ -451,14 +451,36 @@ def record_eng_request(**row) -> None:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def issue_title(text: str) -> str:
-    line = " ".join((text.strip().splitlines() or [""])[0].split())
+def issue_title(raw: str) -> str:
+    """First line of the Slack message, minus @mentions, with a bold ticket id as a prefix:
+    `*SR-70* <@U1> reset breaks` → `SR-70: reset breaks`."""
+    line = re.sub(r"<@[A-Z0-9]+(\|[^>]*)?>", "", (raw.strip().splitlines() or [""])[0])
+    line = " ".join(re.sub(r"^\s*([*_~]+)(\S+?)\1", r"\2:", line).split())
     return line if len(line) <= 72 else line[:71].rstrip() + "…"
 
 
-def file_issue(title: str, body: str) -> tuple[int, str]:
-    """`gh issue create` on ENG_REPO with ENG_LABEL. Returns (number, url); raises with gh's words."""
-    cmd = [CFG["gh_bin"], "issue", "create", "--repo", CFG["eng_repo"], "--label", CFG["eng_label"],
+def assignee(raw: str) -> str | None:
+    """Who a request is for: the first @mention in it, as the SR queue writes them."""
+    m = re.search(r"<@([A-Z0-9]+)", raw)
+    return m.group(1) if m else None
+
+
+_labels_made: set[str] = set()
+
+
+def gh(*args: str) -> str:
+    out = subprocess.run([CFG["gh_bin"], *args, "--repo", CFG["eng_repo"]], capture_output=True, text=True, timeout=60)
+    if out.returncode != 0:
+        raise RuntimeError((out.stderr or out.stdout).strip()[:200] or f"gh exited {out.returncode}")
+    return out.stdout
+
+
+def file_issue(title: str, body: str, label: str) -> tuple[int, str]:
+    """`gh issue create` on ENG_REPO. Returns (number, url); raises with gh's words."""
+    if label not in _labels_made:   # gh refuses a label the repo does not have yet
+        gh("label", "create", label, "--force", "--color", "0E8A16", "--description", "queue for a coding agent")
+        _labels_made.add(label)
+    cmd = [CFG["gh_bin"], "issue", "create", "--repo", CFG["eng_repo"], "--label", label,
            "--title", title, "--body", body]
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     url = (out.stdout.strip().splitlines() or [""])[-1]
@@ -1483,6 +1505,8 @@ class Daemon(Slack):
         if self.eng_channel and not CFG["eng_repo"]:
             log.warning("ENG_CHANNEL is set but ENG_REPO is not — engineering requests are off")
             self.eng_channel = None
+        self.eng_routes = {uid: label for who, label in CFG["eng_routes"].items()
+                           for uid in self.resolve_users([who])}
         self.eng_lock = threading.Lock()
         self.pool = ThreadPoolExecutor(max_workers=8)
         self.sem = threading.Semaphore(CFG["dispatch_parallel"])
@@ -1577,12 +1601,20 @@ class Daemon(Slack):
 
     def on_eng_request(self, ev: dict) -> None:
         """A message in ENG_CHANNEL: file it for the coding agent and say so in the thread."""
-        sender, channel, ts = ev["user"], ev["channel"], ev["ts"]
-        who, text = self.name_of(sender), clean_text(ev.get("text", "") or "", self.name_of)
+        sender, channel, ts, raw = ev["user"], ev["channel"], ev["ts"], ev.get("text", "") or ""
+        who, text = self.name_of(sender), clean_text(raw, self.name_of)
         if ev.get("thread_ts") and ev["thread_ts"] != ts:
-            log.info("eng: %s replied in a request thread — not a new request", who); return
+            self.on_eng_thread_reply(ev["thread_ts"], who, text); return
         if self.state.pause_info() is not None:
             log.info("eng: skip (paused) %s: %s", who, text[:80]); return
+        if CFG["eng_match"] and not re.match(CFG["eng_match"], raw.strip()):
+            log.info("eng: not a request (no %s): %s", CFG["eng_match"], text[:80]); return
+        label = CFG["eng_label"]
+        if self.eng_routes:
+            label = self.eng_routes.get(assignee(raw) or "")
+            if not label:
+                log.info("eng: for %s, who has no cluster yet — not filed: %s",
+                         self.name_of(assignee(raw)) if assignee(raw) else "nobody", text[:80]); return
         where = f"#{self.channel_name(channel)}"
         with self.eng_lock:   # Slack redelivers; one message must never become two issues
             if eng_request(channel=channel, ts=ts):
@@ -1604,12 +1636,12 @@ class Daemon(Slack):
                     + quote(text) + f"\n\n<sub>Filed by Solo from Slack. A coding agent picks up issues labelled "
                     f"`{CFG['eng_label']}` and answers with a draft PR in the Slack thread.</sub>")
             try:
-                number, url = file_issue(issue_title(text), body)
+                number, url = file_issue(issue_title(raw), body, label)
             except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as e:
                 log.error("eng: could not file %s's request: %s", who, e)
                 self.notify(f"⚠️ Couldn't file *{who}*'s request from {where} as an issue: {e}\n{quote(text[:300])}")
                 return
-            record_eng_request(channel=channel, ts=ts, sender=sender, status="filed", issue=number, url=url)
+            record_eng_request(channel=channel, ts=ts, sender=sender, status="filed", issue=number, url=url, label=label)
         log.info("eng: filed #%s for %s", number, who)
         reply = f"Filed as #{number}: {url}\nAn agent picks it up shortly and posts a draft PR here."
         try:
@@ -1619,6 +1651,17 @@ class Daemon(Slack):
         except Exception as e:  # noqa: BLE001
             hint = " — invite the Solo bot to the channel (/invite @Solo)" if "not_in_channel" in str(e) else ""
             self.notify(f"⚠️ Filed #{number} for *{who}* but couldn't say so in {where}: {e}{hint}\n{url}")
+
+    def on_eng_thread_reply(self, thread_ts: str, who: str, text: str) -> None:
+        """A reply under a filed request is the clarification the agent needs: put it on the issue."""
+        row = eng_request(channel=self.eng_channel, ts=thread_ts)
+        if not row or not row.get("issue"):
+            return
+        try:
+            gh("issue", "comment", str(row["issue"]), "--body", f"**{who}** in the Slack thread:\n\n{quote(text)}")
+            log.info("eng: %s's reply copied to #%s", who, row["issue"])
+        except (OSError, subprocess.SubprocessError, RuntimeError) as e:
+            log.warning("eng: could not copy %s's reply to #%s: %s", who, row["issue"], e)
 
     def on_owner_message(self, ev: dict) -> None:
         """You typed something yourself: close promises, learn from it, keep your voice fresh."""

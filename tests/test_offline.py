@@ -1551,8 +1551,11 @@ if [ "$1 $2" = "issue create" ]; then echo "https://github.com/StaffAI-Inc/staff
 """)
 FAKE_GH.chmod(0o755)
 E = "CENG0001"
-S.CFG.update(gh_bin=str(FAKE_GH), eng_repo="StaffAI-Inc/staffai", eng_label="agent")
-d.eng_channel, d.bot = E, FakeClient()
+# The live channel is an SR queue: "*SR-69* @assignee what is wrong". Only SRs assigned to someone
+# with a cluster are filed, labelled for that cluster, so each person's machines take their own.
+S.CFG.update(gh_bin=str(FAKE_GH), eng_repo="StaffAI-Inc/staffai", eng_label="agent",
+             eng_match=r"^\*?SR-\d+")
+d.eng_channel, d.bot, d.eng_routes = E, FakeClient(), {"UME": "agent:barada"}
 
 
 def _eng(ts, text, tri=None, thread_ts=None):
@@ -1565,7 +1568,11 @@ def _eng(ts, text, tri=None, thread_ts=None):
                     **({"thread_ts": thread_ts} if thread_ts else {})})
     finally:
         d.triager.run = real
-    return [line for line in GH_LOG.read_text().splitlines() if line.startswith("issue create")] if GH_LOG.exists() else []
+    return _gh("issue create")
+
+
+def _gh(prefix):
+    return [line for line in GH_LOG.read_text().splitlines() if line.startswith(prefix)] if GH_LOG.exists() else []
 
 
 def _etri(route="reply", sensitivity=1.0, confidence=0.8):
@@ -1573,17 +1580,26 @@ def _etri(route="reply", sensitivity=1.0, confidence=0.8):
                          asks_for_content=0.1, source="jev:test", topic="request", can_answer=0.2)
 
 
-_filed = _eng("1700000300.000", "reset-identity leaves the user with no_instance, can someone fix the proxy")
-check("a request in the engineering channel files a labelled issue, no @ needed",
-      len(_filed) == 1 and "--label agent" in _filed[0] and "--repo StaffAI-Inc/staffai" in _filed[0])
+_filed = _eng("1700000300.000", "*SR-70* <@UME> reset-identity leaves the user with no_instance")
+check("an SR assigned to the owner is filed, labelled for the owner's cluster",
+      len(_filed) == 1 and "--label agent:barada" in _filed[0] and "--repo StaffAI-Inc/staffai" in _filed[0])
+check("…titled by the SR, without the markup or the @", "--title SR-70: reset-identity leaves the user with no_instance" in _filed[0])
 check("…and the bot answers in that thread with the issue link",
       d.bot.posted[-1][0] == E and d.bot.posted[-1][2] == "1700000300.000" and "#3101" in d.bot.posted[-1][1])
 check("…and nothing is posted as the owner there", not any(p[0] == E for p in d.client.posted))
-check("Slack redelivering the same message files nothing twice", len(_eng("1700000300.000", "reset-identity leaves the user with no_instance, can someone fix the proxy")) == 1)
-check("chit-chat triage ignores is not filed", len(_eng("1700000301.000", "thanks all", tri=_etri("ignore"))) == 1)
-check("a reply inside a request thread is not a new request",
-      len(_eng("1700000302.000", "also happens on staging", thread_ts="1700000300.000")) == 1)
-check("a sensitive request is not filed", len(_eng("1700000303.000", "fix the payroll export for Bill's salary", tri=_etri(sensitivity=4.5))) == 1)
+check("Slack redelivering the same message files nothing twice",
+      len(_eng("1700000300.000", "*SR-70* <@UME> reset-identity leaves the user with no_instance")) == 1)
+check("an SR assigned to someone with no cluster is not filed", len(_eng("1700000304.000", f"*SR-71* <@{U2}> duplicate fleet seats")) == 1)
+check("a message that is not an SR is not filed", len(_eng("1700000305.000", "<@UME> please keep this channel only for SRs")) == 1)
+check("chit-chat triage ignores is not filed", len(_eng("1700000301.000", "*SR-72* <@UME> thanks all", tri=_etri("ignore"))) == 1)
+_eng("1700000302.000", "also happens on staging", thread_ts="1700000300.000")
+check("a reply inside a request thread is not a new request", len(_gh("issue create")) == 1)
+check("…it is copied onto the issue, so the agent reads the clarification",
+      _gh("issue comment 3101") and "also happens on staging" in GH_LOG.read_text().split("issue comment 3101", 1)[1])
+_eng("1700000306.000", "unrelated", thread_ts="1700000305.000")
+check("a reply in a thread that was never filed goes nowhere", len(_gh("issue comment")) == 1)
+check("a sensitive request is not filed",
+      len(_eng("1700000303.000", "*SR-73* <@UME> fix the payroll export for Bill's salary", tri=_etri(sensitivity=4.5))) == 1)
 check("…it goes to the owner instead",
       any(p[0] == d.console and "not filed" in p[1] for p in d.client.posted + d.bot.posted))
 check("the pickup's report lands in the request's thread, as the bot",
@@ -1596,8 +1612,11 @@ import eng_pickup as P  # noqa: E402
 _issues = [{"number": 3, "createdAt": "2026-10-21T10:00:00Z", "labels": [{"name": "agent"}]},
            {"number": 2, "createdAt": "2026-10-21T09:00:00Z", "labels": [{"name": "agent"}, {"name": "agent:working"}]},
            {"number": 1, "createdAt": "2026-10-21T11:00:00Z", "labels": [{"name": "agent"}]}]
-check("pickup takes the oldest issue no agent has touched", P.pick(_issues)["number"] == 3)
-check("…and nothing when every issue is taken", P.pick([_issues[1]]) is None)
+_late = datetime(2026, 10, 21, 12, 0, tzinfo=P.timezone.utc)
+check("pickup takes the oldest issue no agent has touched", P.pick(_issues, _late)["number"] == 3)
+check("…and nothing when every issue is taken", P.pick([_issues[1]], _late) is None)
+check("…and leaves an issue alone until its thread has had time to settle",
+      P.pick(_issues, datetime(2026, 10, 21, 10, 5, tzinfo=P.timezone.utc)) is None)
 _brief = P.brief({"number": 3, "title": "fix proxy", "body": "b", "url": "u"}, "agent/issue-3")
 check("the coding brief says draft PR and never merge", "--draft" in _brief and "never merge" in _brief.lower())
 

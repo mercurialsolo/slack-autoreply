@@ -238,6 +238,13 @@ Measured on the first real round trip, rather than assumed:
 
 ## Phase 9 — engineering requests: Slack channel → issue → draft PR (optional)
 
+**Routing between people's clusters is by label, not by network.** Each person's machines form
+their own cluster and run `eng_pickup.py` against their own label (`ENG_LABEL=agent:bill`); Solo
+labels each request for its assignee from `ENG_ROUTES`. No cluster connects to another or to Solo,
+so adding someone is one `ENG_ROUTES` entry plus the cron line on their node. Not built yet: a
+cluster other than Solo's own reports back through `eng-report`, which needs Solo's bot token — a
+second cluster's PR shows on the issue but not in the Slack thread.
+
 One channel where anyone on the team asks for a code change. Solo files each top-level message
 there as a GitHub issue labelled `agent` and says so in the thread **as the bot**, so nothing waits
 on the owner's ✅. `scripts/eng_pickup.py`, on cron on the node, hands the oldest unclaimed issue to
@@ -263,9 +270,14 @@ the link in the thread. Replies inside a thread are not new requests. Triage sti
    the thread, and the owner gets a ⚠️ in the console instead.
 4. **Node `.env`** (back it up first):
    ```
-   ENG_CHANNEL=#eng-requests
+   ENG_CHANNEL=#pop-priorities
    ENG_REPO=StaffAI-Inc/staffai
+   ENG_MATCH=^\*?SR-\d+
+   ENG_ROUTES=U0AKNHXJQ73=agent:barada
+   ENG_LABEL=agent:barada
    ```
+   Replies in a filed SR's thread are copied onto the issue as comments; the pickup waits
+   `ENG_SETTLE_MINUTES` (15) after filing so the first ones are there when the agent reads it.
    then `solo restart`. Verify: `solo logs` shows no `ENG_REPO is not set` warning, and a test
    message in the channel logs `eng: filed #N` and gets a bot reply with the link.
 5. **Cron on the node**, once a filed issue exists to try it on:
