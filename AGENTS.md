@@ -270,7 +270,7 @@ the link in the thread. Replies inside a thread are not new requests. Triage sti
    the thread, and the owner gets a ⚠️ in the console instead.
 4. **Node `.env`** (back it up first):
    ```
-   ENG_CHANNEL=#pop-priorities
+   ENG_CHANNEL=C0C3J97SZ8D            # #pop-priorities; never write the '#', it reads as a comment
    ENG_REPO=StaffAI-Inc/staffai
    ENG_MATCH=^\*?SR-\d+
    ENG_ROUTES=U0AKNHXJQ73=agent:barada

@@ -1502,6 +1502,11 @@ class Daemon(Slack):
         self.allow_channels = self.resolve_channels(CFG["allow_channels"])
         self.block_channels = self.resolve_channels(CFG["block_channels"])
         self.eng_channel = next(iter(self.resolve_channels([CFG["eng_channel"]])), None) if CFG["eng_channel"] else None
+        if os.getenv("ENG_CHANNEL", "").strip().startswith("#"):
+            log.warning("ENG_CHANNEL starts with '#', which .env reads as a comment — engineering requests "
+                        "are off. Use the channel ID or the bare name.")
+        elif CFG["eng_channel"] and not self.eng_channel:
+            log.warning("ENG_CHANNEL=%s matches no channel you are in — engineering requests are off", CFG["eng_channel"])
         if self.eng_channel and not CFG["eng_repo"]:
             log.warning("ENG_CHANNEL is set but ENG_REPO is not — engineering requests are off")
             self.eng_channel = None
