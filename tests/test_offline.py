@@ -1657,5 +1657,59 @@ check("an invented time fails — Solo has no calendar and must not promise one"
 check("the bare hold passes — it is what they actually write",
       vscore("Checking", {"inbound": "when will it be done?", "actual": "Checking"})["clean"])
 
+# Secrets from Infisical. Solo takes only its own keys from the team's folders, Infisical beats a
+# stale .env copy, and the access token never lands where a child process or `ps` could see it.
+import config as _C  # noqa: E402
+_INF = TMP / "infisical"; _INF.mkdir()
+_node = _INF / "node.env"
+_mint, _cli, _cli_log = _INF / "mint-token", _INF / "infisical", _INF / "cli.log"
+_mint.write_text("#!/usr/bin/env bash\necho tok-123\n"); _mint.chmod(0o755)
+_cli.write_text(f"""#!/usr/bin/env bash
+echo "argv: $* token=$INFISICAL_TOKEN domain=$INFISICAL_DOMAIN" >> {_cli_log}
+[ -n "${{FAKE_INF_FAIL:-}}" ] && {{ echo "could not reach" >&2; exit 1; }}
+case "$*" in
+  *"--path /agents"*) echo '[{{"key":"SLACK_BOT_TOKEN","value":"xoxb-from-infisical"}},{{"key":"LINEAR_API_KEY","value":"lin_1"}}]' ;;
+  *) echo '[{{"key":"SLACK_BOT_TOKEN","value":"xoxb-shared"}},{{"key":"TYPESAFE_API_KEY","value":"ts-1"}},{{"key":"ANTHROPIC_API_KEY","value":"sk-no"}},{{"key":"STAFFAI_DB_PASSWORD","value":"pw"}}]' ;;
+esac
+""")
+_cli.chmod(0o755)
+
+
+def _secrets(**extra):
+    for k in (*_C.SECRET_KEYS, _C.LOADED_MARK, "ANTHROPIC_API_KEY", "STAFFAI_DB_PASSWORD", "INFISICAL_TOKEN", "FAKE_INF_FAIL"):
+        os.environ.pop(k, None)
+    _C.SECRET_SOURCES.clear()
+    os.environ.update({"INFISICAL_NODE_ENV": str(_node), "INFISICAL_MINT_TOKEN": str(_mint),
+                       "INFISICAL_BIN": str(_cli), "SLACK_BOT_TOKEN": "xoxb-from-dotenv", **extra})
+    return _C.load_secrets()
+
+
+_line = _secrets()
+check("no Infisical identity on the machine: keys come from .env as before",
+      "no Infisical identity" in _line and os.environ["SLACK_BOT_TOKEN"] == "xoxb-from-dotenv", _line)
+_node.write_text("INFISICAL_DOMAIN=https://inf.example:8443\nINFISICAL_PROJECT_ID=proj1\n"
+                 "INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=id\nINFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=s\n")
+_line = _secrets()
+check("with one, Infisical's value replaces the .env copy", os.environ.get("SLACK_BOT_TOKEN") == "xoxb-from-infisical", _line)
+check("…the first folder listed wins (/agents before /shared)", _C.SECRET_SOURCES.get("SLACK_BOT_TOKEN") == "infisical dev:/agents")
+check("…and keys only in /shared still arrive", os.environ.get("TYPESAFE_API_KEY") == "ts-1" and os.environ.get("LINEAR_API_KEY") == "lin_1")
+check("the API key in /shared is not taken: Solo bills the Claude Code login", "ANTHROPIC_API_KEY" not in os.environ)
+check("…nor anything else in the folder", "STAFFAI_DB_PASSWORD" not in os.environ)
+check("the access token stays out of Solo's environment", "INFISICAL_TOKEN" not in os.environ)
+_cl = _cli_log.read_text()
+check("…reaches the CLI by environment, never argv", "token=tok-123" in _cl and all("tok-123" not in ln.split(" token=")[0] for ln in _cl.splitlines()))
+check("…against the instance's /api", "domain=https://inf.example:8443/api" in _cl)
+check("the log line names keys, never values", "SLACK_BOT_TOKEN" in _line and "xoxb" not in _line and "ts-1" not in _line, _line)
+_cli_log.unlink()
+check("a command Solo starts inherits the keys and doesn't fetch again",
+      "inherited" in _C.load_secrets() and not _cli_log.exists())
+_line = _secrets(FAKE_INF_FAIL="1")
+check("Infisical down: Solo starts on .env and says why",
+      "failed" in _line and "could not reach" in _line and os.environ["SLACK_BOT_TOKEN"] == "xoxb-from-dotenv", _line)
+_line = _secrets(SOLO_INFISICAL="off")
+check("SOLO_INFISICAL=off keeps a machine on .env", "SOLO_INFISICAL=off" in _line and os.environ["SLACK_BOT_TOKEN"] == "xoxb-from-dotenv", _line)
+for _k in (*_C.SECRET_KEYS, _C.LOADED_MARK, "SOLO_INFISICAL", "INFISICAL_NODE_ENV", "INFISICAL_MINT_TOKEN", "INFISICAL_BIN"):
+    os.environ.pop(_k, None)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{passed} checks passed")

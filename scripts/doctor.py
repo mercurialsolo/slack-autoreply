@@ -233,10 +233,18 @@ def check_voice(r: Report):
         r.add(OK, f"MODE={CFG['mode']}" + ("  (recommended to start)" if CFG["mode"] == "learn" else ""))
 
 
+def check_secrets(r: Report):
+    line = config.load_secrets()
+    r.add(WARN if "failed" in line else OK, line)
+    for k, where in sorted(config.SECRET_SOURCES.items()):
+        r.add(OK, f"{k} from {where}")
+
+
 def run() -> int:
     r = Report()
     check_python(r)
     check_state(r)
+    check_secrets(r)
     check_slack(r)
     check_socket_mode(r)
     check_claude(r)

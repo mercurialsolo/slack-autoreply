@@ -185,6 +185,7 @@ def work(issue: dict) -> None:
 
 
 def main() -> int:
+    print(config.load_secrets())
     if not REPO:
         sys.exit("ENG_REPO is not set in ~/.slack-autoreply/.env")
     try:

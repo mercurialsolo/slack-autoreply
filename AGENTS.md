@@ -80,6 +80,15 @@ Edit `~/.slack-autoreply/.env` (it was copied from `.env.example`, every key is 
 
 Leave everything else at defaults for the first deployment.
 
+**Keys from Infisical instead (StaffAI machines).** On a machine with an Infisical identity
+(`~/.config/infisical-staffai/node.env`; see the infisical skill), Solo reads `SLACK_APP_TOKEN`,
+`SLACK_USER_TOKEN`, `SLACK_BOT_TOKEN`, `TYPESAFE_API_KEY` and `LINEAR_API_KEY` from Infisical
+(`dev`, folders `/agents` then `/shared`) at start, and those values beat the `.env` copies.
+Nothing else is taken from those folders — notably not `ANTHROPIC_API_KEY`. A key Infisical doesn't
+have, or Infisical being unreachable, falls back to `.env`. Sessions can't write to Infisical: the
+owner adds keys in its web UI. `listen.log` and `doctor` say where each key came from, by name only.
+To keep a machine on `.env`: `SOLO_INFISICAL=off`.
+
 Verify:
 ```
 python3 ~/.claude/skills/slack-autoreply/scripts/slackctl.py doctor      # or: make doctor

@@ -15,10 +15,12 @@ State lives outside the skill dir so a skill update never touches your data:
 """
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -175,3 +177,81 @@ SEND_REACTIONS = {"white_check_mark", "heavy_check_mark", "ballot_box_with_check
 DROP_REACTIONS = {"x", "negative_squared_cross_mark", "no_entry_sign", "-1", "thumbsdown", "wastebasket"}
 DELEGATE_REACTIONS = {"robot_face", "robot"}   # 🤖 on a proposal hands it to an agent
 OK_SUBTYPES = {None, "file_share"}
+
+
+# ------------------------------------------------------------- shared secrets (Infisical)
+# Opt-in per machine, like every StaffAI service: a machine with an Infisical identity
+# (~/.config/infisical-staffai/node.env) reads Solo's keys from the team's Infisical, and a key
+# changed there reaches Solo on its next restart. Without the identity, or when Infisical can't be
+# reached, the keys come from ~/.slack-autoreply/.env exactly as before.
+#
+# Only the keys named here are loaded, never a whole folder: /shared also holds an
+# ANTHROPIC_API_KEY, and Solo bills the Claude Code login, not the API key; the rest (database
+# passwords, proxies) would only leak into every `claude -p` Solo starts.
+SECRET_KEYS = ("SLACK_APP_TOKEN", "SLACK_USER_TOKEN", "SLACK_BOT_TOKEN", "TYPESAFE_API_KEY", "LINEAR_API_KEY")
+SECRET_SOURCES: dict[str, str] = {}   # key -> "infisical dev:/agents" | ".env"; names only, never values
+LOADED_MARK = "AUTOREPLY_SECRETS"     # set once loaded, so the commands a dispatched agent runs inherit them
+
+
+def _infisical_secrets(node_env: Path, mint: str, cli: str, envname: str, paths: list[str]) -> dict[str, tuple[str, str]]:
+    """{key: (value, "dev:/path")} for SECRET_KEYS, the first folder that has a key winning.
+
+    The token lives only in this process's memory and the CLI's environment — never in
+    os.environ, where every child process would inherit it, and never in argv, where `ps` shows it."""
+    ident = dotenv_values(node_env)
+    domain = (ident.get("INFISICAL_DOMAIN") or "").rstrip("/")
+    project = ident.get("INFISICAL_PROJECT_ID") or ""
+    if not domain or not project:
+        raise RuntimeError(f"{node_env} has no INFISICAL_DOMAIN / INFISICAL_PROJECT_ID")
+    if not domain.endswith("/api"):
+        domain += "/api"
+    out = subprocess.run([mint], capture_output=True, text=True, timeout=20)
+    if out.returncode != 0 or not out.stdout.strip():
+        raise RuntimeError(out.stderr.strip()[:200] or "mint-token gave no token")
+    cli_env = {**os.environ, "INFISICAL_TOKEN": out.stdout.strip(), "INFISICAL_DOMAIN": domain}
+    found: dict[str, tuple[str, str]] = {}
+    for path in paths:
+        res = subprocess.run([cli, "export", "--projectId", project, "--env", envname, "--path", path,
+                              "--format", "json", "--silent"], capture_output=True, text=True, timeout=20, env=cli_env)
+        if res.returncode != 0:
+            raise RuntimeError(f"export {envname}:{path} failed: {res.stderr.strip()[:200]}")
+        for row in json.loads(res.stdout or "[]"):
+            if row.get("key") in SECRET_KEYS and row.get("value") and row["key"] not in found:
+                found[row["key"]] = (row["value"], f"{envname}:{path}")
+    return found
+
+
+def load_secrets() -> str:
+    """Overlay Solo's keys from Infisical onto os.environ. Returns one line for the log, names only.
+
+    Infisical wins over .env: it is where a key gets rotated, so a stale .env copy must not shadow it."""
+    if os.getenv(LOADED_MARK):
+        return f"secrets: {os.environ[LOADED_MARK]} (inherited)"
+    for k in SECRET_KEYS:
+        if env(k):
+            SECRET_SOURCES[k] = ".env"
+    node_env = Path(os.getenv("INFISICAL_NODE_ENV", "~/.config/infisical-staffai/node.env")).expanduser()
+    if env("SOLO_INFISICAL", "on").lower() in ("0", "off", "false", "no"):
+        line = "secrets: .env only (SOLO_INFISICAL=off)"
+    elif not node_env.exists():
+        line = "secrets: .env only (no Infisical identity on this machine)"
+    else:
+        envname = env("INFISICAL_ENV", "dev")
+        try:
+            found = _infisical_secrets(node_env,
+                                       os.path.expanduser(env("INFISICAL_MINT_TOKEN", "~/.claude/skills/infisical/scripts/mint-token")),
+                                       env("INFISICAL_BIN", "infisical"), envname,
+                                       env_list("INFISICAL_PATHS", "/agents,/shared"))
+        except (OSError, subprocess.SubprocessError, RuntimeError, json.JSONDecodeError) as e:
+            line = f"secrets: .env only — Infisical failed: {e}"
+        else:
+            for k, (value, where) in found.items():
+                os.environ[k] = value
+                SECRET_SOURCES[k] = f"infisical {where}"
+            gave = ", ".join(sorted(found)) or "none of Solo's keys"
+            line = f"secrets: Infisical {envname} gave {gave}"
+    missing = [k for k in SECRET_KEYS if k not in SECRET_SOURCES]
+    if missing:
+        line += f"; not set anywhere: {', '.join(missing)}"
+    os.environ[LOADED_MARK] = line.removeprefix("secrets: ")
+    return line
