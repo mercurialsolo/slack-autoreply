@@ -112,6 +112,18 @@ def clean_text(text: str, name_of) -> str:
     return html.unescape(text).strip()
 
 
+def slack_md(text: str, name_of) -> str:
+    """Slack's mrkdwn as Markdown, for tickets: *bold* → **bold**, ~strike~ → ~~strike~~, • → -,
+    <url|text> → [text](url), mentions as names. Code spans and blocks are left exactly as written."""
+    t = re.sub(r"<(https?://[^|>]+)\|([^>]+)>", r"[\2](\1)", text or "")
+    parts = re.split(r"(```.*?```|`[^`\n]*`)", clean_text(t, name_of), flags=re.S)
+    for i in range(0, len(parts), 2):
+        p = re.sub(r"(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])", r"**\1**", parts[i])
+        p = re.sub(r"(?<![\w~])~(?!\s)([^~\n]+?)(?<!\s)~(?![\w~])", r"~~\1~~", p)
+        parts[i] = re.sub(r"(?m)^(\s*)[•◦▪]\s+", r"\1- ", p)
+    return "".join(parts)
+
+
 def quote(text: str) -> str:
     return "\n".join("> " + line for line in (text or "").splitlines())
 
@@ -1661,7 +1673,7 @@ class Daemon(Slack):
         sender, channel, ts, raw = ev["user"], ev["channel"], ev["ts"], ev.get("text", "") or ""
         who, text = self.name_of(sender), clean_text(raw, self.name_of)
         if ev.get("thread_ts") and ev["thread_ts"] != ts:
-            self.on_eng_thread_reply(ev["thread_ts"], who, text); return False
+            self.on_eng_thread_reply(ev["thread_ts"], who, slack_md(raw, self.name_of)); return False
         if self.state.pause_info() is not None:
             log.info("eng: skip (paused) %s: %s", who, text[:80]); return False
         if CFG["eng_match"] and not re.match(CFG["eng_match"], raw.strip()):
@@ -1701,7 +1713,8 @@ class Daemon(Slack):
                             f"({t.sensitivity:.1f}). File it yourself if it should go to an agent.\n{quote(text[:400])}")
                 return True
             filed = self.file_eng(raw=raw, text=text, who=who, owner=owner, person=person, people=people,
-                                  label=label, labels=labels, test=test, where=where, permalink=self.permalink(channel, ts))
+                                  label=label, labels=labels, test=test, where=where, permalink=self.permalink(channel, ts),
+                                  msgs=self.eng_thread(channel, ts))
             if not filed:
                 return True
             number, url, lin = filed["issue"], filed["url"], filed["linear"]
@@ -1722,8 +1735,87 @@ class Daemon(Slack):
             self.notify(f"⚠️ Filed #{number} for *{who}* but couldn't say so in {where}: {e}{hint}\n{url}")
         return True
 
+    def eng_thread(self, channel: str, ts: str) -> list[dict]:
+        """The SR and everything people have said under it, oldest first. Solo's own replies left out."""
+        try:
+            msgs = self.client.conversations_replies(channel=channel, ts=ts, limit=200)["messages"]
+        except Exception as e:  # noqa: BLE001
+            log.warning("eng: could not read the thread of %s: %s", ts, e)
+            return []
+        return [m for m in msgs if not m.get("bot_id") and m.get("subtype") in OK_SUBTYPES]
+
+    def eng_message_md(self, m: dict) -> str:
+        files = "".join(f"\n- 📎 [{f.get('name') or f.get('title') or 'file'}]({f['permalink']})"
+                        for f in m.get("files") or [] if f.get("permalink"))
+        return slack_md(m.get("text", ""), self.name_of) + files
+
+    def eng_description(self, source: str, msgs: list[dict], for_note: str = "") -> str:
+        """What goes in the Linear description and at the top of the GitHub body: the request and
+        its whole thread, so an agent can work from the ticket alone."""
+        out = f"{source}\n\n{self.eng_message_md(msgs[0])}"
+        if msgs[1:]:
+            out += "\n\n## Slack thread\n\n" + "\n\n".join(
+                f"**{self.name_of(m.get('user'))}** · {datetime.fromtimestamp(float(m['ts'])).strftime('%b %d %H:%M')}\n\n"
+                + self.eng_message_md(m) for m in msgs[1:])
+        return out + for_note
+
+    @staticmethod
+    def eng_tail(lin: dict | None, label: str | None, for_whom: str, test: bool) -> str:
+        """What follows the description in the GitHub body: the lines the pickup reads, and the footer."""
+        linked = f"\n\nLinear: [{lin['identifier']}]({lin['url']})\nBranch: `{lin['branchName']}`" if lin else ""
+        pickup = (f"A coding agent on {label.split(':', 1)[1]} picks up issues labelled `{label}` and answers with a draft PR "
+                  f"in the Slack thread." if label else f"No agent machine works for {for_whom} yet.")
+        return (f"{linked}\n\n<sub>Filed by Solo from Slack. {pickup}"
+                + (" This is a test request: it closes itself once the agent has reported." if test else "") + "</sub>")
+
+    def eng_source(self, row: dict) -> str:
+        permalink = self.permalink(row["channel"], row["ts"])
+        return (f"Requested by {self.name_of(row['sender'])} in #{self.channel_name(row['channel'])}"
+                + (f" — {permalink}" if permalink else ""))
+
+    def sync_eng(self, row: dict, reply: tuple[str, str] | None = None) -> str:
+        """Rebuild an SR's tickets from its thread; with `reply` (who, text), also post it as a comment
+        on both. A Linear issue Solo didn't write (one that already named the SR) is never rewritten:
+        replies go on it as comments only."""
+        n = row["issue"]
+        msgs = self.eng_thread(row["channel"], row["ts"])
+        done = []
+        if msgs:
+            people = eng_people() or {}
+            person = people.get("people", {}).get(row.get("assignee") or "", {})
+            for_whom = self.name_of(row.get("assignee") or row["sender"])
+            note = "" if person.get("linear") or not people else f"\n\nFor {for_whom}, who isn't in Linear."
+            desc = self.eng_description(self.eng_source(row), msgs)
+            lin = ({"identifier": row["linear"], "url": row["linear_url"], "branchName": row["branch"]}
+                   if row.get("linear") else None)
+            try:
+                gh("issue", "edit", str(n), "--body", desc + self.eng_tail(lin, row.get("label"), for_whom, bool(row.get("test"))))
+                done.append(f"#{n}")
+            except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+                log.warning("eng: could not update #%s: %s", n, e)
+            if row.get("linear_id") and not row.get("attached") and linear.enabled():
+                try:
+                    linear.set_description(row["linear_id"], desc + note)
+                    done.append(row["linear"])
+                except (RuntimeError, OSError) as e:
+                    log.warning("eng: could not update %s: %s", row["linear"], e)
+        if reply:
+            who, text = reply
+            body = f"**{who}** in the Slack thread:\n\n{text}"
+            try:
+                gh("issue", "comment", str(n), "--body", body)
+            except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+                log.warning("eng: could not copy %s's reply to #%s: %s", who, n, e)
+            if row.get("linear_id") and linear.enabled():
+                try:
+                    linear.comment(row["linear_id"], body)
+                except (RuntimeError, OSError) as e:
+                    log.warning("eng: could not copy %s's reply to %s: %s", who, row["linear"], e)
+        return ("synced " + ", ".join(done)) if done else "synced nothing (thread unreadable)"
+
     def file_eng(self, *, raw: str, text: str, who: str, owner: str, person: dict, people: dict | None,
-                 label: str | None, labels: list[str], test: bool, where: str, permalink: str | None) -> dict | None:
+                 label: str | None, labels: list[str], test: bool, where: str, permalink: str | None,
+                 msgs: list[dict] | None = None) -> dict | None:
         """Linear first, so the GitHub issue can carry its id and branch name; then GitHub.
 
         An SR Linear already has (its id in a title) gets this thread added rather than a second
@@ -1732,6 +1824,7 @@ class Daemon(Slack):
         title = issue_title(re.sub(CFG["eng_test_match"], "", raw) if test else raw)
         source = f"Requested by {who} in {where}" + (f" — {permalink}" if permalink else "")
         for_whom = self.name_of(owner)
+        desc = self.eng_description(source, msgs) if msgs else f"{source}\n\n{quote(text)}"
         team, lin = (people or {}).get("linear_team"), {}
         if team and linear.enabled():
             sr = sr_id(raw)
@@ -1741,17 +1834,12 @@ class Daemon(Slack):
                     lin = {**found, "attached": True}
                 else:
                     note = "" if person.get("linear") else f"\n\nFor {for_whom}, who isn't in Linear."
-                    lin = linear.create_issue(team, title, f"{source}\n\n{quote(text)}{note}", person.get("linear"), labels)
+                    lin = linear.create_issue(team, title, desc + note, person.get("linear"), labels)
             except (RuntimeError, OSError, ValueError, KeyError) as e:
                 log.error("eng: Linear refused %s's request: %s", who, e)
                 self.notify(f"⚠️ Linear refused *{who}*'s request from {where}: {e}\nFiling it on GitHub only.")
                 lin = {}
-        linked = f"\n\nLinear: [{lin['identifier']}]({lin['url']})\nBranch: `{lin['branchName']}`" if lin else ""
-        machine = label.split(":", 1)[1] if label else None
-        pickup = (f"A coding agent on {machine} picks up issues labelled `{label}` and answers with a draft PR in the Slack thread."
-                  if label else f"No agent machine works for {for_whom} yet.")
-        body = (f"{source}\n\n{quote(text)}{linked}\n\n<sub>Filed by Solo from Slack. {pickup}"
-                + (" This is a test request: it closes itself once the agent has reported." if test else "") + "</sub>")
+        body = desc + self.eng_tail(lin or None, label, for_whom, test)
         login, unassigned = person.get("github"), False
         try:
             try:
@@ -1770,7 +1858,7 @@ class Daemon(Slack):
             return None
         if lin:
             try:
-                linear.comment(lin["id"], (f"{source}\n\n{quote(text)}\n\n" if lin.get("attached") else "") + f"GitHub: {url}")
+                linear.comment(lin["id"], (f"{desc}\n\n" if lin.get("attached") else "") + f"GitHub: {url}")
             except (RuntimeError, OSError) as e:
                 log.warning("eng: could not link %s to %s: %s", lin["identifier"], url, e)
         return {"issue": number, "url": url, "unassigned": unassigned,
@@ -1840,14 +1928,13 @@ class Daemon(Slack):
         person = people.get("people", {}).get(row.get("assignee") or "", {})
         test = bool(row.get("test"))
         labels = ([row["label"]] if row.get("label") else []) + ([CFG["eng_test_label"]] if test else [])
-        text = clean_text(raw, self.name_of)
-        permalink = self.permalink(row["channel"], row["ts"])
-        source = f"Requested by {self.name_of(row['sender'])} in #{self.channel_name(row['channel'])}" + (f" — {permalink}" if permalink else "")
+        msgs = self.eng_thread(row["channel"], row["ts"]) or [{"ts": row["ts"], "user": row["sender"], "text": raw}]
+        desc = self.eng_description(self.eng_source(row), msgs)
         try:
             sr = sr_id(raw)
             lin = (linear.find_sr(team, sr) if sr else None) or linear.create_issue(
                 team, issue_title(re.sub(CFG["eng_test_match"], "", raw) if test else raw),
-                f"{source}\n\n{quote(text)}" + ("" if person.get("linear") or not row.get("assignee")
+                desc + ("" if person.get("linear") or not row.get("assignee")
                                                  else f"\n\nFor {self.name_of(row['assignee'])}, who isn't in Linear."),
                 person.get("linear"), labels)
             linear.comment(lin["id"], f"GitHub: {row['url']}")
@@ -1886,11 +1973,7 @@ class Daemon(Slack):
         row = eng_request(channel=self.eng_channel, ts=thread_ts)
         if not row or not row.get("issue"):
             return
-        try:
-            gh("issue", "comment", str(row["issue"]), "--body", f"**{who}** in the Slack thread:\n\n{quote(text)}")
-            log.info("eng: %s's reply copied to #%s", who, row["issue"])
-        except (OSError, subprocess.SubprocessError, RuntimeError) as e:
-            log.warning("eng: could not copy %s's reply to #%s: %s", who, row["issue"], e)
+        log.info("eng: %s's reply → %s", who, self.sync_eng(row, reply=(who, text)))
 
     def on_owner_message(self, ev: dict) -> None:
         """You typed something yourself: close promises, learn from it, keep your voice fresh."""
@@ -3205,6 +3288,20 @@ def cmd_eng_replay(a):
         print(f"{ts}: {d.replay_eng(ts)}")
 
 
+def cmd_eng_sync(a):
+    """Rebuild filed SRs' Linear and GitHub descriptions from their Slack threads. Owner-run."""
+    logging.getLogger().setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+    d = Daemon("none")
+    if not d.eng_channel:
+        sys.exit("ENG_CHANNEL / ENG_REPO are not set, so there is no request channel")
+    rows = ([eng_request(channel=d.eng_channel, ts=ts) for ts in a.ts] if a.ts else
+            [eng_request(channel=r["channel"], ts=r["ts"]) for r in eng_rows() if r.get("status") == "filed" and r.get("ts")])
+    for row in rows:
+        if not row or not row.get("issue"):
+            print("not a filed SR"); continue
+        print(f"#{row['issue']}: {d.sync_eng(row)}")
+
+
 def cmd_review_data(a):
     ledger, _ = load_services()
     print(ledger.review_text(a.days))
@@ -3231,7 +3328,7 @@ def cmd_review_data(a):
 # The writer proposes an investigation with `act --task`; it may not dispatch one, nor read the
 # record of what the owner has handed over.
 DISPATCH_FORBIDDEN = frozenset({"approve", "drop", "dispatch", "pause", "resume", "listen", "done",
-                                "build-voice", "delegations", "eng-report", "eng-replay"})
+                                "build-voice", "delegations", "eng-report", "eng-replay", "eng-sync"})
 
 # A rehearsal scored against real history is only honest if the writer cannot read the future.
 # The eval pairs are real threads, so these four would hand it the very reply it is being scored
@@ -3297,6 +3394,8 @@ def main():
     p = sub.add_parser("drop"); p.add_argument("item"); p.set_defaults(fn=cmd_drop)
     p = sub.add_parser("eng-replay", help="file SRs in the request channel that Solo passed over, by message ts")
     p.add_argument("ts", nargs="+"); p.set_defaults(fn=cmd_eng_replay)
+    p = sub.add_parser("eng-sync", help="rebuild filed SRs' Linear and GitHub descriptions from their Slack threads")
+    p.add_argument("ts", nargs="*"); p.set_defaults(fn=cmd_eng_sync)
     p = sub.add_parser("eng-report", help="answer in the Slack thread an engineering issue came from, as the bot")
     p.add_argument("issue", type=int); p.add_argument("text"); p.set_defaults(fn=cmd_eng_report)
     p = sub.add_parser("review-data"); p.add_argument("--days", type=int, default=14); p.set_defaults(fn=cmd_review_data)

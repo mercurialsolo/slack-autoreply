@@ -88,6 +88,11 @@ def comment(issue_id: str, body: str) -> None:
         {"i": {"issueId": issue_id, "body": body}})
 
 
+def set_description(issue_id: str, description: str) -> None:
+    gql("mutation($id: String!, $i: IssueUpdateInput!) { issueUpdate(id: $id, input: $i) { success } }",
+        {"id": issue_id, "i": {"description": description}})
+
+
 def cancel(issue: str) -> None:
     """Move an issue (id or identifier such as ENG-45) to its team's canceled state. Asks the issue
     for its team, so a machine that only has the GitHub issue's `Linear:` line can do it."""

@@ -75,7 +75,7 @@ class FakeClient:
         if k.get("latest"): msgs = [m for m in msgs if float(m["ts"]) < float(k["latest"]) or (k.get("inclusive") and m["ts"] == k["latest"])]
         if k.get("oldest"): msgs = [m for m in msgs if float(m["ts"]) > float(k["oldest"])]
         return {"messages": list(reversed(msgs))[: k.get("limit", 50)], "response_metadata": {}}
-    def conversations_replies(self, channel, ts, **k): return {"messages": [], "response_metadata": {}}
+    def conversations_replies(self, channel, ts, **k): return {"messages": getattr(self, "replies", {}).get(ts, []), "response_metadata": {}}
     def chat_postMessage(self, channel, text, thread_ts=None):
         self.counter += 1; ts = f"{2000000000 + self.counter}.000000"; self.posted.append((channel, text, thread_ts, ts)); return {"ts": ts}
     def reactions_add(self, channel, timestamp, name): self.reactions.append((channel, timestamp, name)); return {}
@@ -1727,12 +1727,44 @@ check("…and only once", d.replay_eng("1700000407.000") == "already filed")
 check("…and says when there is no such message", "no such message" in d.replay_eng("1700000499.000"))
 d.client.history.pop(E)
 
+# The detail of an SR lives in its thread, not its title line. The tickets carry all of it, as
+# Markdown, so an agent can work from Linear or GitHub without opening Slack.
+check("Slack bold becomes Markdown bold, but not inside code",
+      S.slack_md("*13 listings* sit at `status: *x*`", d.name_of) == "**13 listings** sit at `status: *x*`")
+check("…bullets become list items", S.slack_md("• one\n• two", d.name_of) == "- one\n- two")
+check("…links keep their text", S.slack_md("see <https://x.io/a|the doc>", d.name_of) == "see [the doc](https://x.io/a)")
+check("…mentions become names", S.slack_md(f"<@{U}> look", d.name_of) == "@Priya look")
+d.client.replies = {"1700000410.000": [
+    {"ts": "1700000410.000", "user": U, "text": "*SR-87* <@UME> CMAS-0 listings stuck"},
+    {"ts": "1700000411.000", "user": U, "text": "• *13 listings* sit at `pending_send`", "files": [{"name": "rows.csv", "permalink": "https://slack/f/1"}]},
+    {"ts": "1700000412.000", "bot_id": "B1", "text": "Filed as ENG-1"}]}
+_eng("1700000410.000", "*SR-87* <@UME> CMAS-0 listings stuck")
+_desc = _lin.made()[-1]["description"]
+check("filing puts the whole thread in the Linear issue", "## Slack thread" in _desc and "- **13 listings** sit at `pending_send`" in _desc, _desc)
+check("…with attached files linked", "[rows.csv](https://slack/f/1)" in _desc, _desc)
+check("…and not Solo's own replies", "Filed as ENG-1" not in _desc)
+check("…and in the GitHub issue", "**13 listings**" in GH_LOG.read_text().rsplit("issue create", 1)[1])
+d.client.replies["1700000410.000"].append({"ts": "1700000413.000", "user": U, "text": "Four have been stuck since *1 Oct*"})
+_eng("1700000413.000", "Four have been stuck since *1 Oct*", thread_ts="1700000410.000")
+_upd = [v for q, v in _lin.calls if "issueUpdate" in q and "description" in v.get("i", {})]
+check("a later reply rebuilds the Linear description", _upd and "stuck since **1 Oct**" in _upd[-1]["i"]["description"], str(_upd[-1:])[:300])
+_edit = GH_LOG.read_text().rsplit("issue edit", 1)[-1]
+check("…and the GitHub body, keeping the lines the pickup reads", "stuck since **1 Oct**" in _edit and "Linear: [ENG-" in _edit and "Branch: `" in _edit, _edit[:400])
+_row87 = S.eng_request(channel=E, ts="1700000410.000")
+check("eng-sync rebuilds an issue from its thread on demand", d.sync_eng(_row87).startswith("synced"))
+
 _n = len(_lin.made())
 _eng("1700000403.000", "*SR-49* <@UME> the digest is missing reply rates")
 check("an SR Linear already has is not opened twice", len(_lin.made()) == _n)
 check("…the thread is added to that issue instead", _lin.comments()[-1]["issueId"] == "id-ENG-44"
       and "slack" in _lin.comments()[-1]["body"].lower(), str(_lin.comments()[-1]))
 check("…and GitHub points at it", "Linear: [ENG-44]" in GH_LOG.read_text().rsplit("issue create", 1)[1])
+d.client.replies["1700000403.000"] = [{"ts": "1700000403.000", "user": U, "text": "*SR-49* <@UME> the digest is missing reply rates"},
+                                      {"ts": "1700000414.000", "user": U, "text": "and open rates"}]
+_eng("1700000414.000", "and open rates", thread_ts="1700000403.000")
+check("a reply on an SR joined to an existing Linear issue becomes a comment, not a rewrite",
+      _lin.comments()[-1]["issueId"] == "id-ENG-44" and "open rates" in _lin.comments()[-1]["body"]
+      and not any("issueUpdate" in q and v.get("id") == "id-ENG-44" for q, v in _lin.calls))
 check("…and the thread is told it was already tracked", "ENG-44" in d.bot.posted[-1][1] and "already" in d.bot.posted[-1][1].lower(), d.bot.posted[-1][1])
 check("SR-7 is not SR-72", L.find_sr("ENG", "SR-7") is None and L.find_sr("ENG", "SR-72")["identifier"] == "ENG-50")
 
