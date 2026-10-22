@@ -1825,6 +1825,20 @@ class Daemon(Slack):
             except Exception as e:  # noqa: BLE001
                 log.warning("eng: could not report #%s in its thread: %s", n, e)
 
+    def replay_eng(self, ts: str) -> str:
+        """Put one top-level message in ENG_CHANNEL through intake again, e.g. an SR passed over
+        before its person was in the people table. Returns what happened, in a few words."""
+        msgs = self.client.conversations_history(channel=self.eng_channel, latest=ts, inclusive=True, limit=1)["messages"]
+        m = next((m for m in msgs if m.get("ts") == ts), None)
+        if not m:
+            return f"no such message in the request channel: {ts}"
+        if eng_request(channel=self.eng_channel, ts=ts):
+            return "already " + eng_request(channel=self.eng_channel, ts=ts).get("status", "seen")
+        self.on_eng_request({"type": "message", "user": m.get("user"), "channel": self.eng_channel,
+                             "channel_type": "channel", "ts": ts, "text": m.get("text", "")})
+        row = eng_request(channel=self.eng_channel, ts=ts) or {}
+        return f"filed #{row['issue']}" if row.get("issue") else row.get("status", "not taken — see the log for why")
+
     def on_eng_thread_reply(self, thread_ts: str, who: str, text: str) -> None:
         """A reply under a filed request is the clarification the agent needs: put it on the issue."""
         row = eng_request(channel=self.eng_channel, ts=thread_ts)
@@ -3139,6 +3153,16 @@ def cmd_eng_report(a):
     print(f"posted to the thread for #{a.issue}")
 
 
+def cmd_eng_replay(a):
+    """File SRs Solo saw but passed over. Owner-run: it files tickets and posts in their threads."""
+    logging.getLogger().setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+    d = Daemon("none")
+    if not d.eng_channel:
+        sys.exit("ENG_CHANNEL / ENG_REPO are not set, so there is no request channel")
+    for ts in a.ts:
+        print(f"{ts}: {d.replay_eng(ts)}")
+
+
 def cmd_review_data(a):
     ledger, _ = load_services()
     print(ledger.review_text(a.days))
@@ -3165,7 +3189,7 @@ def cmd_review_data(a):
 # The writer proposes an investigation with `act --task`; it may not dispatch one, nor read the
 # record of what the owner has handed over.
 DISPATCH_FORBIDDEN = frozenset({"approve", "drop", "dispatch", "pause", "resume", "listen", "done",
-                                "build-voice", "delegations", "eng-report"})
+                                "build-voice", "delegations", "eng-report", "eng-replay"})
 
 # A rehearsal scored against real history is only honest if the writer cannot read the future.
 # The eval pairs are real threads, so these four would hand it the very reply it is being scored
@@ -3229,6 +3253,8 @@ def main():
     sub.add_parser("drafts").set_defaults(fn=cmd_drafts)
     p = sub.add_parser("approve"); p.add_argument("item"); p.set_defaults(fn=cmd_approve)
     p = sub.add_parser("drop"); p.add_argument("item"); p.set_defaults(fn=cmd_drop)
+    p = sub.add_parser("eng-replay", help="file SRs in the request channel that Solo passed over, by message ts")
+    p.add_argument("ts", nargs="+"); p.set_defaults(fn=cmd_eng_replay)
     p = sub.add_parser("eng-report", help="answer in the Slack thread an engineering issue came from, as the bot")
     p.add_argument("issue", type=int); p.add_argument("text"); p.set_defaults(fn=cmd_eng_report)
     p = sub.add_parser("review-data"); p.add_argument("--days", type=int, default=14); p.set_defaults(fn=cmd_review_data)

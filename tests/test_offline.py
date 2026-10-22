@@ -72,7 +72,7 @@ class FakeClient:
     def conversations_list(self, **k): return {"channels": [{"id": C, "name": "growth"}], "response_metadata": {}}
     def conversations_history(self, channel, **k):
         msgs = self.history.get(channel, [])
-        if k.get("latest"): msgs = [m for m in msgs if float(m["ts"]) < float(k["latest"])]
+        if k.get("latest"): msgs = [m for m in msgs if float(m["ts"]) < float(k["latest"]) or (k.get("inclusive") and m["ts"] == k["latest"])]
         if k.get("oldest"): msgs = [m for m in msgs if float(m["ts"]) > float(k["oldest"])]
         return {"messages": list(reversed(msgs))[: k.get("limit", 50)], "response_metadata": {}}
     def conversations_replies(self, channel, ts, **k): return {"messages": [], "response_metadata": {}}
@@ -1717,6 +1717,13 @@ _eng("1700000406.000", "*SR-85* <@UNOGH> someone GitHub won't assign")
 check("someone GitHub can't assign on the repo: filed unassigned instead of lost",
       len(_gh("issue create")) == _n + 2 and "--assignee" not in _last_create(), _last_create())
 check("…and the thread says it couldn't assign them", "assign" in d.bot.posted[-1][1].lower(), d.bot.posted[-1][1])
+
+# An SR Solo saw but didn't take (its person had no machine then) can be filed later, by hand.
+d.client.history[E] = [{"ts": "1700000407.000", "user": U, "text": f"*SR-86* <@{U2}> missed before the table existed"}]
+check("eng-replay files an SR Solo passed over", d.replay_eng("1700000407.000").startswith("filed #"))
+check("…and only once", d.replay_eng("1700000407.000") == "already filed")
+check("…and says when there is no such message", "no such message" in d.replay_eng("1700000499.000"))
+d.client.history.pop(E)
 
 _n = len(_lin.made())
 _eng("1700000403.000", "*SR-49* <@UME> the digest is missing reply rates")
