@@ -4,7 +4,7 @@ Your logged-in **Claude Code** replies to your Slack messages **from your own ac
 
 No bot user, no proxy handle, no API key for the replies. A small Python daemon listens to Slack and hands each message to `claude -p "/solo:slack-autoreply handle …"` on your login, with your MCP servers, your folders, your CLAUDE.md. **Jev** (TypeSafe AI's System One model) decides in ~10 ms what each message deserves; Claude Code writes it; the daemon either posts as you or parks it in your self-DM for a ✅. Every correction you make is recorded, and a trust ledger graduates each (route, sender) pair from draft to auto once it has a track record.
 
-**Deploying with a coding agent?** Install the plugin and run `/solo:deploy`, or hand it this folder and say "follow AGENTS.md". It is a phase-by-phase runbook with a verification command for every step.
+**New here?** [docs/getting-started.md](docs/getting-started.md) is one instruction you paste into your coding assistant; it installs the plugin, runs `/solo:deploy`, and follows AGENTS.md phase by phase with a verification for every step.
 
 ![architecture](docs/architecture.svg)
 
