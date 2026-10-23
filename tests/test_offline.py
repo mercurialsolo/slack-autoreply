@@ -29,6 +29,7 @@ FAKE_CLAUDE.write_text(f"""#!/usr/bin/env bash
 # pretend Claude Code: records a decision via slackctl act, emits stream-json like the real CLI
 prompt="$2"; item="${{prompt##* }}"
 if [ -n "${{FAKE_FAIL_RESUME:-}}" ] && printf '%s ' "$@" | grep -q -- '--resume'; then echo "No conversation found" >&2; exit 1; fi
+if [ -f "${{FAKE_LIMIT:-/nonexistent}}" ]; then echo '{{"type":"result","subtype":"success","is_error":true,"num_turns":1,"total_cost_usd":0,"terminal_reason":"api_error","result":"You'"'"'ve hit your weekly limit · resets 12pm (America/Los_Angeles)"}}'; exit 1; fi
 if [ -f "${{FAKE_SKIP_ONCE:-/nonexistent}}" ]; then rm -f "$FAKE_SKIP_ONCE"; printf '%s\\n' "$@" > "$FAKE_SKIP_ONCE.argv"; echo '{{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.0,"result":"nothing to do"}}'; exit 0; fi
 {sys.executable} {SCRIPTS}/slackctl.py act "$item" --action reply --text "yep, latest one is in Drive: https://x.io/deck\\nping me if the link doesn't open" --sources drive >/dev/null
 echo '{{"type":"system","subtype":"init","mcp_servers":[{{"name":"drive","status":"connected"}}]}}'
@@ -839,6 +840,24 @@ check("…in a fresh session, not a resume of the empty one",
       f"first={_first_sid} then={_then} status={_rt.get('status')}")
 check("what a run said is one readable line", S.run_said({"result": "a\nb", "subtype": "success"}, "") == "a b"
       and S.run_said(None, "exit 1: boom") == "exit 1: boom" and S.run_said({"subtype": "success"}, "") == "success")
+
+# ------------------------------------------------------- a refused run marks the writer down
+# Logged in is not able to draft. The node was refused every run for most of a morning with a
+# usage limit while `auth status` said fine; nothing told the owner. A real run decides, both ways.
+_lim = TMP / "limit"; _lim.write_text("x"); os.environ["FAKE_LIMIT"] = str(_lim)
+_notes_before = len(d.client.posted) if hasattr(d.client, "posted") else None
+_lim_item = {"id": "LIM-1.000", "channel": D, "channel_type": "im", "sender": U, "sender_name": "Priya", "text": "around?",
+             "created": S.now_iso(), "status": "queued", "reply_thread_ts": None, "ts": "2.000", "triage": None, "context": "(none)"}
+S.save_item(_lim_item); d.handle_with_claude(dict(_lim_item))
+_h = d.state.read().get("health") or {}
+check("a refused run marks the writer down with the model's own words", _h.get("ok") is False and "weekly limit" in _h.get("why", ""), str(_h))
+check("…and the item says why it failed, not 'success'", "weekly limit" in (S.load_item("LIM-1.000").get("outcome") or {}).get("why", ""),
+      str(S.load_item("LIM-1.000").get("outcome")))
+_said_down = [m for m in S.NOTIFIED if "cannot draft" in m] if hasattr(S, "NOTIFIED") else None
+_lim.unlink(); os.environ.pop("FAKE_LIMIT", None)
+_ok_item = {**_lim_item, "id": "LIM-2.000", "ts": "3.000"}; S.save_item(_ok_item); d.handle_with_claude(dict(_ok_item))
+_h2 = d.state.read().get("health") or {}
+check("the next run that reaches the model clears it", _h2.get("ok") is True and not _h2.get("why"), str(_h2))
 
 # ------------------------------------------------------------------- pause
 # Pause lives in state.json, not .env, so a running daemon honours it without a restart.

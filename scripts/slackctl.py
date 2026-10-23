@@ -2370,6 +2370,7 @@ class Daemon(Slack):
                             item["id"], run_said(result, err))
                 tools, result, err = run_claude(item, self.state, fresh=True)
                 retried = True
+            self.writer_verdict(result, err)
             session = item.get("session")
             item = load_item(item["id"])  # Claude's `act` wrote the decision
             item["session"] = session
@@ -2506,11 +2507,14 @@ class Daemon(Slack):
                     return
                 _, result, err = _run_claude_once({"id": "PROBE"}, (str(uuid.uuid4()), False), prompt=PROBE_PROMPT)
                 ok, why = writer_healthy(result, err)
-            elif ok and h.get("ok", True):
-                return   # logged in, nothing changed, and the paid probe is off — say nothing
+            elif ok and (h.get("ok", True) or h.get("source") == "run"):
+                # Logged in, paid probe off. Nothing changed — or a real run marked the writer
+                # down for a reason login cannot see (a usage limit), and only a real run clears
+                # that: see writer_verdict.
+                return
             was_ok = h.get("ok", True)
             self.state.update(lambda d: d.update(health={
-                "ok": ok, "why": why, "last_probe": now_iso(),
+                "ok": ok, "why": why, "last_probe": now_iso(), "source": "tick",
                 "last_ok": now_iso() if ok else (h.get("last_ok") or ""),
                 "since": now_iso() if ok != was_ok else (h.get("since") or now_iso())}))
             log.info("writer probe: %s", "ok" if ok else f"DOWN — {why}")
@@ -2523,6 +2527,27 @@ class Daemon(Slack):
                             f"{datetime.now():%H:%M}. Nothing was lost while it was down.")
         finally:
             self._probe_lock.release()
+
+    def writer_verdict(self, result: dict | None, err: str) -> None:
+        """A real run is the arbiter of writer health, in both directions.
+
+        `claude auth status` cannot see a usage limit: on 23 Oct the node was logged in and every
+        run came back in a second with "You've hit your weekly limit", and nothing told the owner
+        because only a *successful* run ever touched health. A run that reached the model clears
+        a down state and says so; a run the model refused marks it down and says why, once."""
+        h = self.state.read().get("health") or {}
+        was_ok = h.get("ok", True)
+        ok, why = writer_healthy(result, err)
+        if ok == was_ok:
+            return
+        self.state.update(lambda d: d.update(health={**(d.get("health") or {}), "ok": ok, "why": why if not ok else "",
+                                                     "source": "run", "since": now_iso(), **({"last_ok": now_iso()} if ok else {})}))
+        if ok:
+            self.notify(f"✅ *Solo can draft again* — the writer answered at {datetime.now():%H:%M}. Nothing was lost while it was down.")
+        else:
+            self.notify(f"⚠️ *Solo cannot draft* — {why}\n"
+                        f"_triage still runs and pending drafts can still be ✅'d, but every new "
+                        f"message will fail until this is fixed._")
 
     def run(self) -> None:
         from slack_sdk.socket_mode import SocketModeClient
