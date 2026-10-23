@@ -8,6 +8,21 @@ No bot user, no proxy handle, no API key for the replies. A small Python daemon 
 
 ![architecture](docs/architecture.svg)
 
+## Requirements
+
+- A Slack workspace where you can create an app (or an admin who will approve one). One app per
+  person, created from `manifest.yaml`; nothing is shared between people.
+- [Claude Code](https://code.claude.com/docs) installed and logged in on the machine that will run
+  the daemon. Replies bill your Claude plan, not an API key.
+- Python 3.10+, macOS or Linux. The machine should be the one your projects and `claude mcp list`
+  servers live on, because that is what gives replies real context.
+- Optional: a TypeSafe AI key for Jev triage (console.typesafe.ai), or an `ANTHROPIC_API_KEY` for
+  the Claude Haiku fallback. Without either, Claude Code decides the route itself.
+
+Everything else in this README past *Day to day* is optional: running on a second machine, a wiki
+for the voice guide, letting your coding agents report through Solo, an engineering-request
+channel (AGENTS.md Phase 9), a team secret store.
+
 ## What's in the box
 
 ```
@@ -26,7 +41,8 @@ scripts/voice.py         VOICE.md template, sample pulling/picking, continuous c
 scripts/recall.py        dossiers (people/, channels/), history, search, about
 scripts/config.py        paths + settings
 deploy/                  launchd plist, systemd unit, install-service.sh
-tests/test_offline.py    42 end-to-end checks with a fake Slack and a fake claude — no tokens needed
+tests/test_offline.py    379 end-to-end checks with a fake Slack and a fake claude — no tokens needed
+LICENSE                  MIT
 docs/architecture.svg    the diagram above
 ```
 
@@ -43,7 +59,7 @@ Each step ends with how you know it worked.
 ```
 ./install.sh && python3 tests/test_offline.py
 ```
-Last line: `42 checks passed`.
+Last line: `379 checks passed`.
 
 **3. Slack app.** api.slack.com/apps → *Create New App* → *From a manifest* → paste `manifest.yaml`. Then:
 *Basic Information → App-Level Tokens → Generate* with `connections:write` → `xapp-…`.
@@ -118,7 +134,9 @@ The **share gate** watches which tools Claude actually called, not what it claim
 | `history @who\|#chan`, `search "words" --with @who`, `about @who`, `note @who "fact"` | memory |
 | `build-voice`, `voice`, `review-data` | voice + learning data |
 
-## Running it on another machine, driving it from yours
+## Optional: team and multi-machine setups
+
+### Running it on another machine, driving it from yours
 
 A laptop that sleeps is a Solo that misses messages. Move the daemon to an always-on Mac and keep
 the control surface where you are:
@@ -133,8 +151,16 @@ deploy/install-service.sh --remove on the laptop   ← do this FIRST
 the same app ("each payload may be sent to *any* of the connections"), so two daemons means your DMs
 arrive at whichever one Slack picked. Remove the old service before starting the new one.
 
-`deploy/solo` (symlink it to `~/.local/bin/solo`) drives the node from your laptop. There is no
-second copy of the state — every command runs against the node's:
+`deploy/solo` (symlink it to `~/.local/bin/solo`) drives the node from your laptop. Tell it where
+the node is once, in `~/.slack-autoreply/solo.env`:
+
+```
+SOLO_NODE=<ssh alias of the node>
+SOLO_REMOTE_HOME=/Users/<user on the node>
+SOLO_REMOTE_REPO=/path/to/this/checkout/on/the/node     # for solo deploy / sync-check
+```
+
+There is no second copy of the state — every command runs against the node's:
 
 | | |
 |---|---|
@@ -146,11 +172,11 @@ second copy of the state — every command runs against the node's:
 | `solo voice` · `solo pull` · `solo push` | read the voice guide, edit it in the wiki, send it back |
 | `solo train [review\|setup]` | run the training skill **on the node**, interactively |
 
-### The knowledge base lives in a wiki, not in the state dir
+### The knowledge base can live in a wiki, not in the state dir
 
-`VOICE.md` and the dossiers are the only things a human needs to read and edit, so they live in a
-markdown wiki (`business-wiki/solo/`) rather than buried in `~/.slack-autoreply`. On the node the
-daemon reads them through symlinks:
+`VOICE.md` and the dossiers are the only things a human needs to read and edit, so you can keep
+them in a `solo/` folder of whatever markdown wiki or notes repo you already have, rather than
+buried in `~/.slack-autoreply`. On the node the daemon reads them through symlinks:
 
 ```
 ~/.slack-autoreply/VOICE.md  ->  <wiki>/solo/voice.md
@@ -159,25 +185,24 @@ daemon reads them through symlinks:
 
 Both directions are live. `voice.md` is read fresh for **every** message, so an edit changes the
 next reply with no restart; and `slackctl note` writes straight into `solo/people/`, so what Solo
-learns shows up in the wiki as a normal file change you can read in a diff. Point `SOLO_WIKI` /
-`SOLO_REMOTE_WIKI` elsewhere if your wiki lives somewhere else.
+learns shows up in the wiki as a normal file change you can read in a diff. `solo pull` / `push`
+need `SOLO_WIKI` (the folder here) and `SOLO_REMOTE_WIKI` (the folder on the node) in `solo.env`.
 
 Training runs on the node on purpose — VOICE.md, the samples and the outcomes live there, and
 running `setup` or `review` locally would quietly fork them. `pull` and `push` are for hand edits.
 Anything not listed falls through to `slackctl`, so new subcommands work without touching the script.
 
-Set `SOLO_NODE` / `SOLO_REMOTE_HOME` if your node's ssh alias or home differs. Note the node's
-`CONTEXT_DIRS` must be **absolute paths that exist on the node** — a path twin like
+Note the node's `CONTEXT_DIRS` must be **absolute paths that exist on the node** — a path twin like
 `/Users/you/Sandbox` is not the same as the service account's `~/Sandbox`.
 
-## Other agents, one voice
+### Other agents, one voice
 
 Solo is the only thing that writes as you. Anything else that wants to reach a person goes through
 it, so a workspace never ends up with one name and five registers:
 
 ```
 slackctl say @sri "the overnight warmup finished, 4 accounts active, 2 still pending" --from scout
-solo say '#adair-homes' "flag that Thursday's E2E run is clean" --from validator --why "gate for go-live"
+solo say '#acme-homes' "flag that Thursday's E2E run is clean" --from validator --why "gate for go-live"
 ```
 
 The agent supplies the **intent**, never finished prose — Solo reads the recipient's dossier and the

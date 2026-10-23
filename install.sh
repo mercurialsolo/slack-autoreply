@@ -33,7 +33,7 @@ else
   if [ "$SRC" != "$DEST" ]; then
     mkdir -p "$DEST"
     # copy the skill files; leave anything else in DEST alone
-    for f in SKILL.md README.md AGENTS.md CLAUDE.md manifest.yaml requirements.txt .env.example VERSION CHANGELOG.md install.sh Makefile; do
+    for f in SKILL.md README.md AGENTS.md CLAUDE.md LICENSE manifest.yaml requirements.txt .env.example VERSION CHANGELOG.md install.sh Makefile; do
       [ -e "$SRC/$f" ] && cp "$SRC/$f" "$DEST/$f"
     done
     rm -rf "$DEST/scripts" "$DEST/deploy" "$DEST/tests" "$DEST/docs"
