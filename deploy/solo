@@ -25,10 +25,29 @@
 # without changing this file.
 set -euo pipefail
 
-# `mini` tries LAN mDNS, then MagicDNS, then the tailnet address. Those probes must not die by
-# signal or ssh aborts the whole config — see the note in ~/.ssh/config. Override with SOLO_NODE.
-NODE="${SOLO_NODE:-mini}"
-REMOTE_HOME="${SOLO_REMOTE_HOME:-/Users/baradas}"
+# Where Solo runs. Set these once in ~/.slack-autoreply/solo.env (plain KEY=value lines, no
+# quotes); a variable already in the environment wins over the file.
+#   SOLO_NODE          ssh alias or host of the machine running the daemon        (required)
+#   SOLO_REMOTE_HOME   the home directory there                                   (default: asked of the node)
+#   SOLO_REMOTE_REPO   this repo's checkout on the node, for deploy / sync-check  (required by those)
+#   SOLO_TRAIN_CWD     where `train` starts Claude Code on the node               (default: SOLO_REMOTE_HOME)
+#   SOLO_WIKI          local folder holding voice.md + people/, for pull / push    (required by those)
+#   SOLO_REMOTE_WIKI   the same folder on the node                                (required by those)
+CONF="${SOLO_CONF:-$HOME/.slack-autoreply/solo.env}"
+if [ -f "$CONF" ]; then
+  while IFS='=' read -r k v || [ -n "$k" ]; do
+    case "$k" in SOLO_*) [ -n "${!k:-}" ] || export "$k=$v";; esac
+  done < "$CONF"
+fi
+die() { printf '%s\n' "$*" >&2; exit 1; }
+need() { [ -n "${!1:-}" ] || die "$1 is not set — put it in $CONF (see the header of $0)"; }
+need SOLO_NODE
+NODE="$SOLO_NODE"
+# One ssh round trip per call when the home is not configured; set SOLO_REMOTE_HOME to skip it.
+REMOTE_HOME="${SOLO_REMOTE_HOME:-$(ssh "$NODE" 'printf %s "$HOME"' 2>/dev/null || true)}"
+[ -n "$REMOTE_HOME" ] || die "could not reach $NODE over ssh to find its home — set SOLO_REMOTE_HOME in $CONF"
+REMOTE_REPO="${SOLO_REMOTE_REPO:-}"
+TRAIN_CWD="${SOLO_TRAIN_CWD:-$REMOTE_HOME}"
 # Solo owns its interpreter (see install.sh), so prefer its venv and fall back to the node's
 # python3. Resolved on the node inside the call we already make, not with an extra probe round
 # trip: a non-interactive ssh does not get the service's PATH, so it cannot simply be inherited.
@@ -38,8 +57,8 @@ STATE="$REMOTE_HOME/.slack-autoreply"
 LOCAL_STATE="$HOME/.slack-autoreply"
 # Solo's knowledge base (voice + dossiers) lives in the wiki, not the state dir. On the node
 # the daemon reads it through symlinks, so an edit here is live on the next message.
-WIKI_SOLO="${SOLO_WIKI:-$HOME/Sandbox/business-wiki/solo}"
-REMOTE_WIKI="${SOLO_REMOTE_WIKI:-/Users/barada/Sandbox/business-wiki/solo}"
+WIKI_SOLO="${SOLO_WIKI:-}"
+REMOTE_WIKI="${SOLO_REMOTE_WIKI:-}"
 
 # This script is normally invoked through a symlink in ~/.local/bin, so $0 is not in the repo.
 # Resolve the link before deriving the repo root, or `solo deploy` runs git in ~/.local.
@@ -47,7 +66,6 @@ _self="$0"
 while [ -L "$_self" ]; do _t="$(readlink "$_self")"; case "$_t" in /*) _self="$_t";; *) _self="$(dirname "$_self")/$_t";; esac; done
 REPO="$(cd "$(dirname "$_self")/.." && pwd)"
 
-die() { printf '%s\n' "$*" >&2; exit 1; }
 on_node() { ssh "$NODE" "$@"; }
 
 case "${1:-status}" in
@@ -71,13 +89,15 @@ case "${1:-status}" in
   pull)
     # Solo's knowledge base lives in the wiki; on the node the daemon reads it through symlinks.
     # Pull brings back what Solo has learned (it appends to people/ as it works).
-    [ -d "$WIKI_SOLO" ] || die "no wiki at $WIKI_SOLO — set SOLO_WIKI"
+    need SOLO_WIKI; need SOLO_REMOTE_WIKI
+    [ -d "$WIKI_SOLO" ] || die "no wiki at $WIKI_SOLO — check SOLO_WIKI"
     rsync -a "$NODE:$REMOTE_WIKI/" "$WIKI_SOLO/"
     echo "pulled into $WIKI_SOLO — voice.md ($(grep -c . "$WIKI_SOLO/voice.md") lines), $(ls -1 "$WIKI_SOLO/people" | wc -l | tr -d ' ') dossiers"
     git -C "$(dirname "$WIKI_SOLO")" status --short -- "$(basename "$WIKI_SOLO")" | head -10
     ;;
 
   push)
+    need SOLO_WIKI; need SOLO_REMOTE_WIKI
     [ -f "$WIKI_SOLO/voice.md" ] || die "no $WIKI_SOLO/voice.md — run: solo pull"
     # Never push .env; tokens are the node's business. voice.md is read per message,
     # so this takes effect on the next DM without restarting anything.
@@ -92,6 +112,9 @@ case "${1:-status}" in
     # here and the node ends up holding files that match no commit — which is exactly how
     # `node-push` came to refuse a later deploy, saying the node had work this machine did not.
     # So: refuse a dirty tree, then prove afterwards that the node is on the same commit.
+    need SOLO_REMOTE_REPO
+    command -v node-push >/dev/null 2>&1 \
+      || die "deploy needs node-push (mirrors this checkout to the node, .git included). Without it: push this branch, then on the node: git -C $REMOTE_REPO pull --ff-only && ./install.sh, and restart the service."
     cd "$REPO"
     dirty=$(git status --porcelain)
     if [ -n "$dirty" ] && [ "${2:-}" != "--allow-dirty" ]; then
@@ -101,11 +124,11 @@ case "${1:-status}" in
     here=$(git rev-parse HEAD)
     echo "→ deploying $(git log --oneline -1)"
     node-push -n "$NODE" >/dev/null || die "push refused — run: node-push -n $NODE   and read why"
-    ssh "$NODE" "cd /Users/barada/Sandbox/Personal/slack-autoreply && ./install.sh >/dev/null 2>&1 && $PICK_PY \"\$V\" tests/test_offline.py 2>&1 | tail -1" \
+    ssh "$NODE" "cd $REMOTE_REPO && ./install.sh >/dev/null 2>&1 && $PICK_PY \"\$V\" tests/test_offline.py 2>&1 | tail -1" \
       || die "tests failed on $NODE — not restarting; the old daemon is still running"
     ssh "$NODE" "launchctl kickstart -k gui/\$(id -u)/com.slack-autoreply" >/dev/null 2>&1
     sleep 5
-    there=$(ssh "$NODE" "cd /Users/barada/Sandbox/Personal/slack-autoreply && git rev-parse HEAD")
+    there=$(ssh "$NODE" "cd $REMOTE_REPO && git rev-parse HEAD")
     [ "$here" = "$there" ] || die "node is on $there, expected $here — deploy did not take"
     ssh "$NODE" "grep 'listening as' $STATE/listen.log | tail -1" \
       || die "daemon did not come back — check: solo logs"
@@ -114,10 +137,11 @@ case "${1:-status}" in
 
   sync-check)
     # Is the node running what this repo says it should be?
+    need SOLO_REMOTE_REPO
     cd "$REPO"
-    here=$(git rev-parse HEAD); there=$(ssh "$NODE" "cd /Users/barada/Sandbox/Personal/slack-autoreply && git rev-parse HEAD" 2>/dev/null || echo "?")
+    here=$(git rev-parse HEAD); there=$(ssh "$NODE" "cd $REMOTE_REPO && git rev-parse HEAD" 2>/dev/null || echo "?")
     dirty=$(git status --porcelain | wc -l | tr -d ' ')
-    nodedirty=$(ssh "$NODE" "cd /Users/barada/Sandbox/Personal/slack-autoreply && git status --porcelain | wc -l" 2>/dev/null | tr -d ' ')
+    nodedirty=$(ssh "$NODE" "cd $REMOTE_REPO && git status --porcelain | wc -l" 2>/dev/null | tr -d ' ')
     echo "here: $(git rev-parse --short HEAD) ($dirty uncommitted)"
     echo "node: ${there:0:7} (${nodedirty:-?} uncommitted)"
     if [ "$here" = "$there" ] && [ "$dirty" = "0" ] && [ "${nodedirty:-1}" = "0" ]; then
@@ -132,7 +156,7 @@ case "${1:-status}" in
     mode="${2:-review}"
     case "$mode" in review|setup|status|run) ;; *) die "solo train [review|setup|run|status]";; esac
     echo "running /slack-autoreply $mode on $NODE (this is interactive — answer in place)"
-    ssh -t "$NODE" "cd /Users/barada/Sandbox && claude \"/slack-autoreply $mode\""
+    ssh -t "$NODE" "cd $TRAIN_CWD && claude \"/slack-autoreply $mode\""
     ;;
 
   ssh)

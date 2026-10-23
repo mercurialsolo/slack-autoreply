@@ -183,7 +183,7 @@ OK_SUBTYPES = {None, "file_share"}
 
 
 # ------------------------------------------------------------- shared secrets (Infisical)
-# Opt-in per machine, like every StaffAI service: a machine with an Infisical identity
+# Optional team secret store. Opt-in per machine: a machine with an Infisical identity file
 # (~/.config/infisical-staffai/node.env) reads Solo's keys from the team's Infisical, and a key
 # changed there reaches Solo on its next restart. Without the identity, or when Infisical can't be
 # reached, the keys come from ~/.slack-autoreply/.env exactly as before.
@@ -236,7 +236,7 @@ def load_secrets() -> str:
     if os.getenv(LOADED_MARK):
         return f"secrets: {os.environ[LOADED_MARK]} (inherited)"
     for k in SECRET_KEYS:
-        if env(k):
+        if env(k) and not env(k).endswith("..."):   # `xapp-...` is .env.example's placeholder, not a key
             SECRET_SOURCES[k] = ".env"
     node_env = Path(os.getenv("INFISICAL_NODE_ENV", "~/.config/infisical-staffai/node.env")).expanduser()
     if env("SOLO_INFISICAL", "on").lower() in ("0", "off", "false", "no"):
