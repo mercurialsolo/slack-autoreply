@@ -137,7 +137,7 @@ The **share gate** watches which tools Claude actually called, not what it claim
 | `/solo:slack-autoreply review` | 14 days of outcomes + correction pairs → VOICE.md edits, dossier consolidation, who's earned auto |
 | `/solo:slack-autoreply simulate "…" --from Name` | dry run; nothing is sent |
 
-| CLI (`python3 ~/.claude/skills/slack-autoreply/scripts/slackctl.py …`) | |
+| CLI (`python3 <plugin root>/scripts/slackctl.py …`; the root is `~/.claude/skills/solo` from a clone, or what `claude plugin list` shows) | |
 |---|---|
 | `doctor` | preflight; sends nothing |
 | `status`, `drafts`, `followups`, `inbox` | what's waiting |
