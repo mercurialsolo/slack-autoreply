@@ -1462,10 +1462,13 @@ def writer_healthy(result: dict | None, err: str = "") -> tuple[bool, str]:
     return True, ""
 
 
-def run_claude(item: dict, state: "State | None" = None, prompt: str | None = None) -> tuple[list[str], dict | None, str]:
-    """Run Claude Code on an item in that conversation's session. Returns (tools used, result object, stderr tail)."""
+def run_claude(item: dict, state: "State | None" = None, prompt: str | None = None, fresh: bool = False) -> tuple[list[str], dict | None, str]:
+    """Run Claude Code on an item in that conversation's session. Returns (tools used, result object, stderr tail).
+
+    `fresh` ignores the conversation's session and starts a new one: the retry path, where
+    resuming would replay a transcript in which the writer already declined to act."""
     state = state or State()
-    session = pick_session(item, state)
+    session = (str(uuid.uuid4()), False) if fresh else pick_session(item, state)
     tools, result, err = _run_claude_once(item, session, prompt)
     if result is None and session[1]:
         log.warning("resume of session %s failed (%s) — starting a fresh one", session[0][:8], err[:120])
@@ -1500,6 +1503,12 @@ def run_claude(item: dict, state: "State | None" = None, prompt: str | None = No
         state.update(lambda d: d.update(health={**(d.get("health") or {}), "ok": True, "why": "",
                                                  "last_ok": now_iso()}))
     return tools, result, err
+
+
+def run_said(result: dict | None, err: str) -> str:
+    """One line of what a run returned: the result text if any, else stderr, else its subtype."""
+    text = ((result or {}).get("result") or "").strip().replace("\n", " ")
+    return (text or err.strip() or (result or {}).get("subtype") or "no output")[:300]
 
 
 def _run_claude_once(item: dict, session: tuple[str, bool], prompt: str | None = None) -> tuple[list[str], dict | None, str]:
@@ -2350,13 +2359,28 @@ class Daemon(Slack):
             item["status"] = "handling"
             save_item(item)
             tools, result, err = run_claude(item, self.state)
+            retried = False
+            if not tools and not load_item(item["id"]).get("decision"):
+                # The writer never reached slackctl: no tools, no `act`. That is not a judgement
+                # about the message, it is the skill not running — seen once on the first dispatch
+                # after the plugin was installed, a one-second "success" with no decision, while
+                # the next dispatch worked. Resuming would replay a transcript in which nothing
+                # happened, so the retry is a fresh session, and it happens once.
+                log.warning("writer used no tools and left no decision for %s (%s) — retrying once in a fresh session",
+                            item["id"], run_said(result, err))
+                tools, result, err = run_claude(item, self.state, fresh=True)
+                retried = True
             session = item.get("session")
             item = load_item(item["id"])  # Claude's `act` wrote the decision
             item["session"] = session
             decision = item.get("decision")
             cost = (result or {}).get("total_cost_usd")
             if not decision:
-                item["status"], item["outcome"] = "failed", {"status": "failed", "why": err or (result or {}).get("subtype") or "no decision"}
+                item["status"], item["outcome"] = "failed", {"status": "failed", "why": err or run_said(result, err)}
+                # Keep what the run returned, so a failure can be read afterwards instead of
+                # being reproduced by hand.
+                item["run"] = {"tools": tools, "turns": (result or {}).get("num_turns"), "subtype": (result or {}).get("subtype"),
+                               "said": run_said(result, err), "retried": retried}
                 save_item(item)
                 log.error("Claude returned no decision for %s: %s", item["id"], item["outcome"]["why"])
                 self.notify(f"⚠️ Couldn't handle a message from *{item['sender_name']}* ({describe_where(item)}): {item['outcome']['why'][:200]}\n{quote(item['text'][:300])}"
@@ -2364,7 +2388,7 @@ class Daemon(Slack):
                 return
             item["run"] = {"tools": tools, "cost_usd": (result or {}).get("marginal_cost_usd"),
                            "cost_session_total": cost, "turns": (result or {}).get("num_turns"),
-                           "subtype": (result or {}).get("subtype")}
+                           "subtype": (result or {}).get("subtype"), "retried": retried}
             summary = execute_decision(self, item, decision, self.ledger, self.followups, self.share_trusted, observed_tools=tools, state=self.state)
             self.hand_over(item, decision)
             self._count(item["channel"])

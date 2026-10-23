@@ -29,6 +29,7 @@ FAKE_CLAUDE.write_text(f"""#!/usr/bin/env bash
 # pretend Claude Code: records a decision via slackctl act, emits stream-json like the real CLI
 prompt="$2"; item="${{prompt##* }}"
 if [ -n "${{FAKE_FAIL_RESUME:-}}" ] && printf '%s ' "$@" | grep -q -- '--resume'; then echo "No conversation found" >&2; exit 1; fi
+if [ -f "${{FAKE_SKIP_ONCE:-/nonexistent}}" ]; then rm -f "$FAKE_SKIP_ONCE"; printf '%s\\n' "$@" > "$FAKE_SKIP_ONCE.argv"; echo '{{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.0,"result":"nothing to do"}}'; exit 0; fi
 {sys.executable} {SCRIPTS}/slackctl.py act "$item" --action reply --text "yep, latest one is in Drive: https://x.io/deck\\nping me if the link doesn't open" --sources drive >/dev/null
 echo '{{"type":"system","subtype":"init","mcp_servers":[{{"name":"drive","status":"connected"}}]}}'
 echo '{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"t1","name":"mcp__drive__search","input":{{}}}},{{"type":"text","text":"ok"}}]}}}}'
@@ -814,6 +815,30 @@ out = ctl("deadline", "--urgency", "4"); check("deadline cli", out.returncode ==
 out = ctl("note", U, "prefers short answers"); check("note cli (offline id)", out.returncode == 0)
 out = ctl("review-data", "--days", "1"); check("review-data cli", "Recent corrections" in out.stdout and "dossiers" in out.stdout)
 out = ctl("doctor"); check("doctor exits 1 with clear FAILs when unconfigured", out.returncode == 1 and "SLACK_USER_TOKEN" in out.stdout)
+
+# ------------------------------------------------- a run that never reached slackctl
+# The first dispatch after the plugin was installed came back in one second as "success" with no
+# tools and no decision, while the next one worked. That is the skill not running, not the writer
+# deciding, so it is retried once, in a fresh session, and what the run said is kept.
+_skip = TMP / "skip-once"; _skip.write_text("x")
+os.environ["FAKE_SKIP_ONCE"] = str(_skip)
+_rt_item = {"id": "RT-1.000", "channel": D, "channel_type": "im", "sender": U, "sender_name": "Priya", "text": "ping?",
+            "created": S.now_iso(), "status": "queued", "reply_thread_ts": None, "ts": "1.000", "triage": None, "context": "(none)"}
+S.save_item(_rt_item)
+d.handle_with_claude(dict(_rt_item))
+_rt = S.load_item("RT-1.000")
+os.environ.pop("FAKE_SKIP_ONCE", None)
+check("a run with no tools and no decision is retried once, and the retry decides",
+      _rt.get("decision") is not None and (_rt.get("run") or {}).get("retried") is True, str(_rt.get("run")))
+_argv_file = Path(str(_skip) + ".argv")
+_first_argv = _argv_file.read_text().split("\n") if _argv_file.exists() else []
+_first_sid = _first_argv[_first_argv.index("--session-id") + 1] if "--session-id" in _first_argv else None
+_then = _rt.get("session") or {}
+check("…in a fresh session, not a resume of the empty one",
+      _then.get("resumed") is False and _then.get("id") not in (None, _first_sid) and _rt.get("status") != "failed",
+      f"first={_first_sid} then={_then} status={_rt.get('status')}")
+check("what a run said is one readable line", S.run_said({"result": "a\nb", "subtype": "success"}, "") == "a b"
+      and S.run_said(None, "exit 1: boom") == "exit 1: boom" and S.run_said({"subtype": "success"}, "") == "success")
 
 # ------------------------------------------------------------------- pause
 # Pause lives in state.json, not .env, so a running daemon honours it without a restart.
