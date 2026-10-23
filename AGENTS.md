@@ -44,7 +44,7 @@ What it did: copied the skill to `~/.claude/skills/slack-autoreply`, installed `
 `python-dotenv`, `httpx`, created `~/.slack-autoreply/{.env,inbox,people,channels}`.
 It never overwrites an existing `.env` or `VOICE.md`.
 
-Verify: `python3 tests/test_offline.py` → last line `42 checks passed`. This needs no tokens.
+Verify: `python3 tests/test_offline.py` → last line `379 checks passed`. This needs no tokens.
 If it fails, the environment is wrong (Python version, deps); report the failing check verbatim.
 
 ## Phase 2 — Slack app (owner does the clicks; you hand them the manifest)
@@ -80,8 +80,9 @@ Edit `~/.slack-autoreply/.env` (it was copied from `.env.example`, every key is 
 
 Leave everything else at defaults for the first deployment.
 
-**Keys from Infisical instead (StaffAI machines).** On a machine with an Infisical identity
-(`~/.config/infisical-staffai/node.env`; see the infisical skill), Solo reads `SLACK_APP_TOKEN`,
+**Optional: keys from a team secret store (Infisical).** Skip this unless the team runs one. On a
+machine with an Infisical identity file (`~/.config/infisical-staffai/node.env`, or wherever
+`INFISICAL_NODE_ENV` points), Solo reads `SLACK_APP_TOKEN`,
 `SLACK_USER_TOKEN`, `SLACK_BOT_TOKEN`, `TYPESAFE_API_KEY` and `LINEAR_API_KEY` from Infisical
 (`dev`, folders `/agents` then `/shared`) at start, and those values beat the `.env` copies.
 Nothing else is taken from those folders — notably not `ANTHROPIC_API_KEY`. A key Infisical doesn't
@@ -181,7 +182,7 @@ claudectl bus role bind <role-name> "/path/to/project*"
 
 **Peek before you bind.** A role is an address, and mail addressed to a name that has no role
 sits `pending` indefinitely. Binding that name **arms everything already queued to it**, which all
-lands in the first agent to finish a turn. Binding `staffai` here surfaced 16 stray dictation
+lands in the first agent to finish a turn. Binding one role here surfaced 16 stray dictation
 fragments from a week earlier — ambient speech a dictation daemon had published as tasks. Check,
 and drain the queue yourself if it is not what you want an agent reading:
 
@@ -268,7 +269,7 @@ the link in the thread. Replies inside a thread are not new requests. Triage sti
    not classic protection, are what count — `branches/main/protection` 404s even when a ruleset
    protects main:
    `gh api repos/<owner>/<repo>/rules/branches/main --jq '[.[].type]'`
-   On staffai (21 Oct) that is `pull_request` with **0 approvals** + required status checks: no
+   On one team repo (21 Oct) that was `pull_request` with **0 approvals** + required status checks: no
    direct push, but a green PR can be merged by its author. Closing that gap takes an org admin
    (approvals ≥ 1) *and* a separate GitHub identity for the agent, since an author cannot approve
    their own PR.
@@ -279,11 +280,11 @@ the link in the thread. Replies inside a thread are not new requests. Triage sti
    the thread, and the owner gets a ⚠️ in the console instead.
 4. **Node `.env`** (back it up first):
    ```
-   ENG_CHANNEL=C0C3J97SZ8D            # #pop-priorities; never write the '#', it reads as a comment
-   ENG_REPO=StaffAI-Inc/staffai
+   ENG_CHANNEL=C0123ABCDEF            # #eng-requests; never write the '#', it reads as a comment
+   ENG_REPO=example-org/example-repo
    ENG_MATCH=^\*?SR-\d+
-   ENG_ROUTES=U0AKNHXJQ73=agent:barada
-   ENG_LABEL=agent:barada
+   ENG_ROUTES=U0123ABCDEF=agent:alice
+   ENG_LABEL=agent:alice
    ```
    Replies in a filed SR's thread are copied onto the issue as comments; the pickup waits
    `ENG_SETTLE_MINUTES` (15) after filing so the first ones are there when the agent reads it.
@@ -297,7 +298,7 @@ the link in the thread. Replies inside a thread are not new requests. Triage sti
    channel is filed, whoever it is for, and `ENG_ROUTES` no longer applies:
    ```json
    {"linear_team": "ENG", "local_machine": "mini",
-    "people": {"U0AKNHXJQ73": {"name": "Barada Sahu", "github": "mercurialsolo",
+    "people": {"U0123ABCDEF": {"name": "<their name>", "github": "<their GitHub login>",
                                "linear": "<Linear user id>", "machine": "mini"}}}
    ```
    For each SR, Solo opens the Linear issue in `linear_team`. If an issue already names that SR

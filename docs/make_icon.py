@@ -51,5 +51,5 @@ svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {V} {V}" width="{
 {die(2, 330, 316, 196, 11, TWO)}
 </svg>
 '''
-open("/Users/barada/Sandbox/Personal/slack-autoreply/docs/icon.svg", "w").write(svg)
+open(__import__("pathlib").Path(__file__).with_name("icon.svg"), "w").write(svg)
 print("wrote docs/icon.svg")

@@ -76,8 +76,8 @@ def in_quiet_hours(spec: str, now: datetime | None = None) -> bool:
 # put it back on the way out, so a draft that mirrored the name it had just read posted "@Sri" as
 # literal grey text that never pinged anyone. Slack only renders a mention from <@ID>; it does not
 # linkify a bare @name posted through the API, and "Sri" is a display name rather than the handle
-# (@srivatsan), so link_names would not have caught it either. This is the inverse of that rule.
-# The lookbehind keeps us out of emails (barada@kubric.io) and URLs (x.com/@sri); an apostrophe is
+# (@sri.k), so link_names would not have caught it either. This is the inverse of that rule.
+# The lookbehind keeps us out of emails (owner@example.com) and URLs (x.com/@sri); an apostrophe is
 # allowed inside the name so O'Brien resolves, and a trailing possessive is handed back unchanged.
 MENTION_RE = re.compile(r"(?<![A-Za-z0-9._%+\-/:])@([A-Za-z][A-Za-z0-9._'\u2019-]*[A-Za-z0-9]|[A-Za-z])")
 MENTION_KEEP = {"here", "channel", "everyone"}   # leave these inert rather than make Solo able to blast
@@ -306,7 +306,7 @@ REPORT_STATE = {
 def channel_reports(item: dict, limit: int = 3) -> list[dict]:
     """What agents have already been asked, and have already answered, in this channel.
 
-    Every message is handled alone, so on 19 Oct Solo proposed the same Adair lookup at 16:34 —
+    Every message is handled alone, so on 19 Oct Solo proposed the same Acme lookup at 16:34 —
     three hours after the agent had answered it at 13:27, and while that answer still sat
     unapproved in the self-DM. Asking again is not judgement. Reading what came back is, and the
     writer could not: nothing ever put a returned report in front of it.
@@ -343,7 +343,7 @@ def channel_reports(item: dict, limit: int = 3) -> list[dict]:
     for rec in list(asked.values())[-limit:]:
         back = rec.pop("back")
         if back is None:
-            # A dispatch that never came back is not a question in flight. The 16 Oct Adair
+            # A dispatch that never came back is not a question in flight. The 16 Oct Acme
             # lookup still had no return row three days later; calling that "still out" would
             # tell the writer to wait for an answer that is not coming.
             try:
@@ -1254,7 +1254,7 @@ def mcp_config_for(cwd: str | None, allow: list[str]) -> tuple[list[str], Path |
     """(server names, a file holding only those definitions) for use with --strict-mcp-config.
 
     `--allowedTools` is a pre-approval list, not a boundary. On 2026-10-15, answering Sri's "any of
-    the 15 accounts being warmed up ready for deployment?" (item C0BV5ECCFFT-1792079120_386789),
+    the 15 accounts being warmed up ready for deployment?" (item C0123ABCDEF-1792079120_386789),
     the writer used `ToolSearch` and then `mcp__claude_ai_Google_Drive__read_file_content` — with
     CONTEXT_MCP_ALLOW=deepwiki, and with neither tool in the allowlist. Nothing was denied because
     nothing was ever denying: `--permission-mode dontAsk` plus whatever the install has configured
@@ -2268,7 +2268,7 @@ class Daemon(Slack):
             # A thread Solo has already drafted in is a conversation it is part of, so the next
             # message in it is addressed to you whether or not your name is typed a second time.
             # On 18 Oct Sri's "we should send a reply to Danielle today" — a reply in the
-            # #adair-homes thread Solo had drafted in twice that day — was dropped right here,
+            # #acme-homes thread Solo had drafted in twice that day — was dropped right here,
             # without even a log line, for want of an @.
             if CFG["channels"] != "mentions":
                 return
@@ -2374,7 +2374,7 @@ class Daemon(Slack):
     def hand_over(self, item: dict, decision: dict) -> None:
         """Under DELEGATE_MODE=auto, send the proposal the writer made instead of waiting for 🤖.
 
-        The gate was never the hard part — Solo proposed the same Adair lookup six times in three
+        The gate was never the hard part — Solo proposed the same Acme lookup six times in three
         days and every one sat unread, because a tap on a phone is a worse bottleneck than no
         automation at all. What the gate was protecting is unchanged: the brief is read-only, the
         agent reports through `say`, and that draft still waits for the owner's ✅. Nothing reaches
@@ -2835,7 +2835,7 @@ def cmd_learn_channels(a):
     Solo knowing the owner's voice is not enough — a message in the wrong channel is wrong
     however well it is written. This writes one dossier per channel the owner is actually in,
     from Slack's own topic/purpose plus a sample of real traffic, so the writer can tell
-    #adair-homes (internal coordination about a customer) from a channel that faces anyone.
+    #acme-homes (internal coordination about a customer) from a channel that faces anyone.
 
     Facts only: Slack's declared purpose, who posts most, and real recent lines. What a channel
     is *for* is then obvious to a reader, and the owner can correct it in the wiki.

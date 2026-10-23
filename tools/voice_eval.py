@@ -36,12 +36,16 @@ PADDING = re.compile(r"^\s*(thanks for|thank you for|great question|hope you|hap
 INVENTED_TIME = re.compile(r"\b(by|back by|before|at)\s+(\d{1,2}\s*(am|pm|:\d\d)|noon|eod|tomorrow|morrow|monday|tuesday|wednesday|thursday|friday)\b", re.I)
 
 
-def build_pairs(since: str, limit: int) -> list[dict]:
-    """A pair is (what they said) → (what the owner actually replied)."""
+def build_pairs(since: str, limit: int, targets: list[str]) -> list[dict]:
+    """A pair is (what they said) → (what the owner actually replied).
+
+    `targets` are the conversations to mine: `@handle` for your DM with someone, `#channel` for a
+    channel. Pick the ones where you reply most; they are what the draft is scored against."""
     s = S.Slack()
     cutoff = datetime.fromisoformat(since).replace(tzinfo=timezone.utc).timestamp()
-    out, targets = [], [("@srivatsan", "im"), ("#adair-homes", "channel"), ("#pop-priorities", "channel")]
-    for ref, ctype in targets:
+    out = []
+    for ref in targets:
+        ctype = "im" if ref.startswith("@") else "channel"
         try:
             ch = (s.resolve_users([ref[1:]]) if ref.startswith("@") else s.resolve_channels([ref[1:]]))
             cid = s.client.conversations_open(users=list(ch)[0])["channel"]["id"] if ref.startswith("@") else list(ch)[0]
@@ -115,6 +119,8 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("pairs", help="build the held-out set from live history")
     p.add_argument("--since", default="2026-10-11"); p.add_argument("--limit", type=int, default=60)
+    p.add_argument("--targets", default=os.getenv("VOICE_EVAL_TARGETS", ""),
+                   help="comma-separated @handle (your DM with them) or #channel to mine; or VOICE_EVAL_TARGETS")
     p = sub.add_parser("rescore", help="re-score drafts already produced, without paying to draft again")
     p.add_argument("--bar", type=float, default=0.8)
     p = sub.add_parser("run", help="draft each pair and score it")
@@ -122,7 +128,10 @@ def main() -> None:
     a = ap.parse_args()
 
     if a.cmd == "pairs":
-        pairs = build_pairs(a.since, a.limit)
+        targets = [t.strip() for t in a.targets.split(",") if t.strip()]
+        if not targets:
+            sys.exit("no conversations to mine: pass --targets '@someone,#channel' (or set VOICE_EVAL_TARGETS)")
+        pairs = build_pairs(a.since, a.limit, targets)
         print(f"{len(pairs)} held-out pairs since {a.since} → {PAIRS}")
         for q in pairs[-8:]:
             print(f"  {q['when']}  {q['sender']}: {q['inbound'][:52]!r} → {q['actual'][:42]!r}")

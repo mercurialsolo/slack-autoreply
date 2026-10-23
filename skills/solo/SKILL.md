@@ -13,7 +13,7 @@ who hears it, which channel it belongs in, and whether it goes out at all.
 
 ```
 solo say "the overnight warmup finished — 4 accounts active, 2 still pending verification" --from scout
-solo say "blocked on the Adair import: the work order sheet has no zip column" --from builder
+solo say "blocked on the Acme import: the work order sheet has no zip column" --from builder
 ```
 
 That is the whole interface. **Do not name a channel or a person.** You do not have the channel
@@ -27,7 +27,7 @@ One exception to "do not name a channel or a person": when you are **answering w
 dispatched to you**, the brief you were given carries a `--re <id>`. Pass it exactly as written:
 
 ```
-solo say "RH-1 finished at 02:14; caseyk and erinn were logged out before the timeouts, not after" --re DPRIYA01-1760... --from staffai
+solo say "RH-1 finished at 02:14; the two test accounts were logged out before the timeouts, not after" --re DPRIYA01-1760... --from builder
 ```
 
 That id is the message that caused your work, and it sends your answer back to the conversation

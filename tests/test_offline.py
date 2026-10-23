@@ -259,7 +259,7 @@ check("dispatch is refused in a dispatched run too",
 check("CONTEXT_MCP_ALLOW=none grants no mcp servers", S.discover_mcp_names(None, ["none"]) == [])
 
 # `--allowedTools` pre-approves; it does not deny. Answering "any of the 15 accounts being warmed
-# up ready for deployment?" on 2026-10-15 (item C0BV5ECCFFT-1792079120_386789) the writer used
+# up ready for deployment?" on 2026-10-15 (item C0123ABCDEF-1792079120_386789) the writer used
 # ToolSearch and then mcp__claude_ai_Google_Drive__read_file_content, with CONTEXT_MCP_ALLOW=deepwiki
 # and with neither tool in the allowlist. The agents are the ones with privileged access; Solo is
 # supposed to ask them, not to hold the same reach itself.
@@ -447,7 +447,7 @@ def _ignore_a_mention():
     return ""
 
 
-# Sri replied "we should send a reply to Danielle today" in a #adair-homes thread Solo had
+# Sri replied "we should send a reply to Danielle today" in a #acme-homes thread Solo had
 # already drafted in twice that day. No @, so the channel filter dropped it before the log line.
 def _thread_reply(thread_ts):
     """A channel message with no mention, as a reply inside `thread_ts`."""
@@ -513,9 +513,9 @@ check("the seal reaches the writer's environment",
       and "AUTOREPLY_SEALED" not in S.claude_command(S.load_item(iid3b))[1])
 
 # `auto` was a config value nine checks accepted and nothing branched on, so Solo proposed the
-# same Adair lookup six times in three days and every one waited for a tap. The daemon hands it
+# same Acme lookup six times in three days and every one waited for a tap. The daemon hands it
 # over now — and must ask one question once.
-def _hand_over(mode, task="check Lexi's threads for Danielle since Oct 15", twice=False):
+def _hand_over(mode, task="check the outreach threads for Danielle since Oct 15", twice=False):
     sent, notes = [], []
     real_d, real_n = S.dispatch_task, S.Daemon.notify
     S.dispatch_task = lambda it, who, where: (sent.append(it["id"]),
@@ -554,25 +554,25 @@ check("but not once it has gone stale", S.open_dispatch(_conv, 0) is None)
 # Recorded exactly as `cmd_say` records it: the item id it was handed, and no conversation —
 # the agent reporting back has never heard of a session key. Writing it here with one is what
 # let a dedupe that could never clear ship green.
-S.record_delegation(item="CLOOP-1", role="staffai", outcome="reported", say="say-x")
+S.record_delegation(item="CLOOP-1", role="builder", outcome="reported", say="say-x")
 check("and stops being open once the agent reports back", S.open_dispatch(_conv, 6) is None)
 
-# Asking again is not judgement. On 19 Oct Solo proposed the Adair lookup at 16:34, three hours
+# Asking again is not judgement. On 19 Oct Solo proposed the Acme lookup at 16:34, three hours
 # after the agent had answered it at 13:27 — a different thread, so `open_dispatch` was blind to
 # it, and nothing else ever put a returned report in front of the writer.
 _r_src = {"id": "CREP-900.000", "channel": "CREP", "channel_type": "channel", "sender_name": "Sri",
           "sender": "U9", "text": "any replies yet?", "created": S.now_iso(), "status": "done",
           "reply_thread_ts": "900.000", "ts": "900.000"}
 _r_say = {"id": "say-rep1", "channel": "CREP", "channel_type": "channel", "sender_name": "growth",
-          "sender": "CREP", "text": "[staffai reporting]", "created": S.now_iso(), "status": "done",
-          "reply_thread_ts": None, "ts": "901.000", "origin": "agent:staffai",
+          "sender": "CREP", "text": "[builder reporting]", "created": S.now_iso(), "status": "done",
+          "reply_thread_ts": None, "ts": "901.000", "origin": "agent:builder",
           "intent": "2 of 3 have replied — Danielle this AM, Kerry Saturday, Ryan nothing",
           "outcome": {"status": "drafted", "at": S.now_iso()}}
 S.save_item(_r_src); S.save_item(_r_say)
-S.record_delegation(item=_r_src["id"], peer="p", role="staffai", outcome="dispatched",
-                    task="check Lexi's Adair threads for replies", conversation="CREP:900.000")
+S.record_delegation(item=_r_src["id"], peer="p", role="builder", outcome="dispatched",
+                    task="check the Acme outreach threads for replies", conversation="CREP:900.000")
 # …recorded the way `cmd_say` records it: the item id and the say id, no conversation.
-S.record_delegation(item=_r_src["id"], role="staffai", outcome="reported", say="say-rep1",
+S.record_delegation(item=_r_src["id"], role="builder", outcome="reported", say="say-rep1",
                     report="2 of 3 have replied")
 
 _later = {"id": "CREP-999.000", "channel": "CREP", "channel_type": "channel", "sender_name": "Sri",
@@ -585,7 +585,7 @@ check("a report that came back is carried to the next message in that channel",
 check("and the writer is told nobody has seen it yet",
       "NOT seen it" in _rep[0]["state"])
 check("the question it answered comes with it, so a new ask can be narrower",
-      "Adair" in _rep[0]["task"])
+      "Acme" in _rep[0]["task"])
 check("a thread-keyed dedupe would have missed it — this is a different conversation",
       S.open_dispatch(_later, 6) is None and S.session_key(_later) != "CREP:900.000")
 check("it reaches the writer's prompt, under a heading that says what it is",
@@ -598,16 +598,16 @@ S.save_item({**_r_say, "outcome": {"status": "sent_from_draft", "at": S.now_iso(
 check("once it has gone out the writer is told that instead",
       "already been told" in S.channel_reports(_later)[0]["state"])
 
-S.record_delegation(item="CREP-998.000", peer="p", role="staffai", outcome="dispatched",
+S.record_delegation(item="CREP-998.000", peer="p", role="builder", outcome="dispatched",
                     task="transcripts for the uncovered scenarios", conversation="CREP:998.000")
 _out = [r for r in S.channel_reports(_later, limit=5) if r["task"].startswith("transcripts")]
 check("a question still out is shown as still out, so it is not asked twice",
       len(_out) == 1 and "still out" in _out[0]["state"] and not _out[0].get("answer"))
 
-# The 16 Oct Adair dispatch still had no return row on the 19th. Reading that as "an answer is
+# The 16 Oct Acme dispatch still had no return row on the 19th. Reading that as "an answer is
 # coming" would park the question forever on a run that died three days ago.
 _old_at = (S.datetime.now() - S.timedelta(hours=48)).isoformat(timespec="seconds")
-S.record_delegation(item="CREP-997.000", peer="p", role="staffai", outcome="dispatched",
+S.record_delegation(item="CREP-997.000", peer="p", role="builder", outcome="dispatched",
                     task="a lookup nothing ever answered", conversation="CREP:997.000")
 import json as _json
 _rows = [_json.loads(l) for l in S.DELEGATIONS.read_text().splitlines() if l.strip()]
@@ -643,9 +643,9 @@ check("in auto it is not promised unconditionally", "already has a question out"
 # else's register is the longest prose Solo ever writes. It was the one route that got no worked
 # examples: a say item carries no triage, so the `route == "reply"` gate read `unknown`.
 _say_item = {"id": "say-voice1", "channel": D, "channel_type": "im", "sender": U, "sender_name": "Dana",
-             "text": "[staffai reporting on what you asked Dana about]: …", "created": S.now_iso(),
+             "text": "[builder reporting on what you asked Dana about]: …", "created": S.now_iso(),
              "status": "queued", "reply_thread_ts": None, "ts": "1000.000", "outbound": True,
-             "origin": "agent:staffai", "context": "(outbound)", "triage": None,
+             "origin": "agent:builder", "context": "(outbound)", "triage": None,
              "intent": "Two of three replied. Danielle responded this morning regarding the lot."}
 _say_txt = S.render_item(_say_item, d.ledger, set())
 check("an agent's report is shown how the owner actually writes",
@@ -673,12 +673,12 @@ _t_low = {"route": "hold", "confidence": 0.7, "topic": "action_request", "sensit
           "source": "test"}
 _was_reach, _was_mode = S.CFG["delegate_reach"], S.CFG["delegate_mode"]
 S.CFG["delegate_mode"] = "auto"
-S.CFG["delegate_reach"] = "the staffai prod DB, HubSpot, Gmail, RingCentral"
+S.CFG["delegate_reach"] = "the prod DB, the CRM, Gmail"
 _with = S.render_item({**_later, "triage": _t_low}, d.ledger, set())
 S.CFG["delegate_reach"] = ""
 _without = S.render_item({**_later, "triage": _t_low}, d.ledger, set())
 S.CFG["delegate_reach"], S.CFG["delegate_mode"] = _was_reach, _was_mode
-check("the writer is told what the agent can actually see", "HubSpot" in _with)
+check("the writer is told what the agent can actually see", "the CRM" in _with)
 check("and only where the offer is made", _with.count("the agent you can ask reaches") == 1)
 check("an unset reach says nothing rather than something empty",
       "the agent you can ask reaches" not in _without and "--task" in _without)
@@ -739,7 +739,7 @@ check("an ack is silence too, so it is not forced either",
 check("a short instruction the model did not drop still reaches them",
       _gate("and dont have it run", 0.89, "hold").route == "escalate")
 check("and a long action request is untouched by any of this",
-      _gate("@Barada Sahu please fix login for Bill Katsak on guest-web", 0.97, "ignore").route == "escalate")
+      _gate("@Barada Sahu please fix login for Jamie Park on guest-web", 0.97, "ignore").route == "escalate")
 check("the length that counts is the message's own, measured where the text still is",
       _gate("i think is the issue", 0.55, "ignore").chars == 20)
 check("the exemption is a dial, not a constant",
@@ -1145,7 +1145,7 @@ check("a report Solo could not compose is not recorded as having come back",
 check("and the failure is recorded, rather than the task just going quiet",
       any(r.get("outcome") == "report_failed" for r in _no_draft))
 
-# The first report ever to come back through this loop was refused at 3.5/5 for naming HubSpot
+# The first report ever to come back through this loop was refused at 3.5/5 for naming CRM
 # contact record ids — correctly, and then silently. It survived only in a relay task record the
 # owner has no reason to open, while `delegations` read "handed over, nothing back yet". Declining
 # to pick a room is the gate working; losing the report is not.
@@ -1182,13 +1182,13 @@ check("and is told plainly that nobody else received it",
 # Inbound <@U123> is flattened to "@Sri" for the writer to read, so a draft that mirrored the name
 # it had just read went out as literal grey text that pinged nobody. Slack renders a mention only
 # from <@ID> and will not linkify a bare @name posted through the API.
-_names = {"sri": "U0SRI", "srivatsan": "U0SRI", "nick": "U0NICK"}
+_names = {"sri": "U0SRI", "sri.k": "U0SRI", "nick": "U0NICK"}
 _look = lambda n: _names.get(n.lower())
 
 check("a bare @name is restored to a real mention",
       S.restore_mentions("@Sri on the 3", _look) == "<@U0SRI> on the 3")
 check("an email address is not mistaken for a mention",
-      S.restore_mentions("mail me at barada@kubric.io", _look) == "mail me at barada@kubric.io")
+      S.restore_mentions("mail me at owner@example.com", _look) == "mail me at owner@example.com")
 check("an @name inside a URL is left alone",
       S.restore_mentions("see https://x.com/@sri", _look) == "see https://x.com/@sri")
 check("a possessive keeps its apostrophe",
@@ -1548,14 +1548,14 @@ FAKE_GH, GH_LOG = TMP / "fakegh", TMP / "gh.log"
 FAKE_GH.write_text(f"""#!/usr/bin/env bash
 printf '%s\\n' "$*" >> {GH_LOG}
 case "$*" in *"--assignee nobody-gh"*) echo "could not assign user: 'nobody-gh' not found" >&2; exit 1 ;; esac
-if [ "$1 $2" = "issue create" ]; then echo "https://github.com/StaffAI-Inc/staffai/issues/$(( $(grep -c '^issue create' {GH_LOG}) + 3100 ))"; fi
+if [ "$1 $2" = "issue create" ]; then echo "https://github.com/example-org/example-repo/issues/$(( $(grep -c '^issue create' {GH_LOG}) + 3100 ))"; fi
 if [ "$1 $2" = "issue view" ] && [ -f {TMP}/ghview-$3.json ]; then cat {TMP}/ghview-$3.json; fi
 """)
 FAKE_GH.chmod(0o755)
 E = "CENG0001"
 # The live channel is an SR queue: "*SR-69* @assignee what is wrong". Only SRs assigned to someone
 # with a cluster are filed, labelled for that cluster, so each person's machines take their own.
-S.CFG.update(gh_bin=str(FAKE_GH), eng_repo="StaffAI-Inc/staffai", eng_label="agent",
+S.CFG.update(gh_bin=str(FAKE_GH), eng_repo="example-org/example-repo", eng_label="agent",
              eng_match=r"^\*?SR-\d+")
 d.eng_channel, d.bot, d.eng_routes = E, FakeClient(), {"UME": "agent:barada"}
 
@@ -1584,7 +1584,7 @@ def _etri(route="reply", sensitivity=1.0, confidence=0.8):
 
 _filed = _eng("1700000300.000", "*SR-70* <@UME> reset-identity leaves the user with no_instance")
 check("an SR assigned to the owner is filed, labelled for the owner's cluster",
-      len(_filed) == 1 and "--label agent:barada" in _filed[0] and "--repo StaffAI-Inc/staffai" in _filed[0])
+      len(_filed) == 1 and "--label agent:barada" in _filed[0] and "--repo example-org/example-repo" in _filed[0])
 check("…and Solo marks the SR as seen the moment it is taken", (E, "1700000300.000", "eyes") in d.client.reactions)
 check("…titled by the SR, without the markup or the @", "--title SR-70: reset-identity leaves the user with no_instance" in _filed[0])
 check("…and the bot answers in that thread with the issue link",
@@ -1679,7 +1679,7 @@ _lin = _FakeLinear()
 _real_gql, L.gql = L.gql, _lin
 os.environ["LINEAR_API_KEY"] = "lin_test"
 (STATE / "eng.json").write_text(json.dumps({"linear_team": "ENG", "people": {
-    "UME": {"name": "Barada", "github": "mercurialsolo", "linear": "lin-barada", "machine": "mini"},
+    "UME": {"name": "Barada", "github": "owner-gh", "linear": "lin-barada", "machine": "mini"},
     U2: {"name": "Ana", "github": "ana-gh"}, "UNOGH": {"name": "Vic", "github": "nobody-gh"}}}))
 
 
@@ -1693,7 +1693,7 @@ check("an SR for someone with a machine opens a Linear issue assigned to them", 
 check("…labelled for their machine, in Todo", "lab-mini" in _li["labelIds"] and _li.get("stateId") == "st-todo", str(_li))
 check("…titled from the SR", _li["title"] == "SR-80: add a last-checked timestamp", _li["title"])
 check("the GitHub issue is assigned to their login and labelled for the machine",
-      "--assignee mercurialsolo" in _gc and "--label agent:mini" in _gc, _gc)
+      "--assignee owner-gh" in _gc and "--label agent:mini" in _gc, _gc)
 _gbody = GH_LOG.read_text().rsplit("issue create", 1)[1]
 check("…and names the Linear issue and its branch, for the pickup", "Linear: [ENG-101](https://linear.app/x/issue/ENG-101)" in _gbody
       and "Branch: `barada/eng-101-x`" in _gbody, _gbody[:400])
@@ -1827,7 +1827,7 @@ d.client.history.pop(E)
 _num = int(_row["url"].rsplit("/", 1)[1])
 (TMP / f"ghview-{_num}.json").write_text(json.dumps({"state": "OPEN", "updatedAt": "2026-01-01T00:00:00Z",
     "labels": [{"name": "agent:mini"}, {"name": "agent:done"}],
-    "comments": [{"body": "Draft PR: https://github.com/StaffAI-Inc/staffai/pull/5300"}]}))
+    "comments": [{"body": "Draft PR: https://github.com/example-org/example-repo/pull/5300"}]}))
 _before = len(d.bot.posted)
 d.poll_eng()
 _mine = [p for p in d.bot.posted[_before:] if p[2] == "1700000400.000"]
@@ -1876,8 +1876,8 @@ check("with one, the agent creates the Linear issue before any code",
       "ENG" in _lbrief and _lbrief.index("Linear") < _lbrief.index("smallest change"))
 check("…and names its branch the way Linear's GitHub app matches", "gitBranchName" in _lbrief)
 check("the report carries the Linear issue the agent created",
-      P.linear_url([{"body": "Tracked in [ENG-42](https://linear.app/staffai-dev/issue/ENG-42/fix-proxy)"}])
-      == "https://linear.app/staffai-dev/issue/ENG-42/fix-proxy")
+      P.linear_url([{"body": "Tracked in [ENG-42](https://linear.app/example-dev/issue/ENG-42/fix-proxy)"}])
+      == "https://linear.app/example-dev/issue/ENG-42/fix-proxy")
 check("…and nothing when it made none", P.linear_url([{"body": "no link here"}]) is None)
 _lbody = "Requested by Barada\n\nLinear: [ENG-101](https://linear.app/x/issue/ENG-101)\nBranch: `barada/eng-101-x`\n"
 check("pickup reads the Linear issue and branch Solo recorded", P.linked({"body": _lbody})
@@ -1887,7 +1887,7 @@ _kbrief = P.brief({"number": 7, "title": "t", "body": _lbody, "url": "u"}, "bara
                   linked=P.linked({"body": _lbody}))
 check("with the Linear issue already open, the agent must not open another",
       "gitBranchName" not in _kbrief and "open a Linear issue" not in _kbrief and "ENG-101" in _kbrief, _kbrief[:600])
-P.GH, P.REPO, P.TEST_LABEL = str(FAKE_GH), "StaffAI-Inc/staffai", "sr:test"
+P.GH, P.REPO, P.TEST_LABEL = str(FAKE_GH), "example-org/example-repo", "sr:test"
 check("pickup knows a test issue by its label", P.is_test({"labels": [{"name": "agent"}, {"name": "sr:test"}]})
       and not P.is_test({"labels": [{"name": "agent"}]}))
 P.close_test(4200, [{"number": 5100}])
@@ -1931,14 +1931,14 @@ echo "argv: $* token=$INFISICAL_TOKEN domain=$INFISICAL_DOMAIN" >> {_cli_log}
 case "$*" in
   *"--projectId vault9"*) echo '[{{"key":"SLACK_BOT_TOKEN","value":"xoxb-vault"}}]' ;;
   *"--path /agents"*) echo '[{{"key":"SLACK_BOT_TOKEN","value":"xoxb-from-infisical"}},{{"key":"LINEAR_API_KEY","value":"lin_1"}}]' ;;
-  *) echo '[{{"key":"SLACK_BOT_TOKEN","value":"xoxb-shared"}},{{"key":"TYPESAFE_API_KEY","value":"ts-1"}},{{"key":"ANTHROPIC_API_KEY","value":"sk-no"}},{{"key":"STAFFAI_DB_PASSWORD","value":"pw"}}]' ;;
+  *) echo '[{{"key":"SLACK_BOT_TOKEN","value":"xoxb-shared"}},{{"key":"TYPESAFE_API_KEY","value":"ts-1"}},{{"key":"ANTHROPIC_API_KEY","value":"sk-no"}},{{"key":"TEAM_DB_PASSWORD","value":"pw"}}]' ;;
 esac
 """)
 _cli.chmod(0o755)
 
 
 def _secrets(**extra):
-    for k in (*_C.SECRET_KEYS, _C.LOADED_MARK, "ANTHROPIC_API_KEY", "STAFFAI_DB_PASSWORD", "INFISICAL_TOKEN", "FAKE_INF_FAIL"):
+    for k in (*_C.SECRET_KEYS, _C.LOADED_MARK, "ANTHROPIC_API_KEY", "TEAM_DB_PASSWORD", "INFISICAL_TOKEN", "FAKE_INF_FAIL"):
         os.environ.pop(k, None)
     _C.SECRET_SOURCES.clear()
     os.environ.update({"INFISICAL_NODE_ENV": str(_node), "INFISICAL_MINT_TOKEN": str(_mint),
@@ -1956,7 +1956,7 @@ check("with one, Infisical's value replaces the .env copy", os.environ.get("SLAC
 check("…the first folder listed wins (/agents before /shared)", _C.SECRET_SOURCES.get("SLACK_BOT_TOKEN") == "infisical dev:/agents")
 check("…and keys only in /shared still arrive", os.environ.get("TYPESAFE_API_KEY") == "ts-1" and os.environ.get("LINEAR_API_KEY") == "lin_1")
 check("the API key in /shared is not taken: Solo bills the Claude Code login", "ANTHROPIC_API_KEY" not in os.environ)
-check("…nor anything else in the folder", "STAFFAI_DB_PASSWORD" not in os.environ)
+check("…nor anything else in the folder", "TEAM_DB_PASSWORD" not in os.environ)
 check("the access token stays out of Solo's environment", "INFISICAL_TOKEN" not in os.environ)
 _cl = _cli_log.read_text()
 check("…reaches the CLI by environment, never argv", "token=tok-123" in _cl and all("tok-123" not in ln.split(" token=")[0] for ln in _cl.splitlines()))
