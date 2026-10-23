@@ -4,10 +4,10 @@
 Claude Code is the brain; this is the nervous system. It never writes a reply.
 
   listen        daemon: Socket Mode → guards → Jev triage → inbox item → delay +
-                stand-down → hands the item to Claude Code (`claude -p "/slack-autoreply handle …"`)
+                stand-down → hands the item to Claude Code (`claude -p "/solo:slack-autoreply handle …"`)
                 → executes Claude's decision under policy. Also: ✅/❌ on drafts,
                 follow-up reminders, learning signals, keeps your voice samples fresh.
-  inbox         queued items (for `/slack-autoreply run` when DISPATCH=none)
+  inbox         queued items (for `/solo:slack-autoreply run` when DISPATCH=none)
   show ID       everything Claude needs to compose: message, thread, triage, policy, voice
   act ID …      Claude's decision: --action ignore|ack|hold|reply|escalate [--text …] [--sources …] [--task …]
   simulate TXT  make a pretend inbound message (nothing is sent) to dry-run the skill
@@ -1041,7 +1041,7 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
             f"  python3 {SCRIPT} search \"<words>\" --with {item['sender']}",
             f"  python3 {SCRIPT} about {item['sender']}",
             f"  python3 {SCRIPT} note {item['sender']} \"<one durable fact about them>\""]
-    out += ["", "--- your voice (VOICE.md) ---", voice.load_notes() or "(VOICE.md is empty — run /slack-autoreply setup)"]
+    out += ["", "--- your voice (VOICE.md) ---", voice.load_notes() or "(VOICE.md is empty — run /solo:slack-autoreply setup)"]
     # The worked examples are 13KB of the 37KB this prints, and they only earn that where real
     # prose gets written — four routes in five end in a word or two ("Checking", "Will do") or in
     # nothing at all, and VOICE.md alone covers those. So they are fetched when they are needed.
@@ -1393,7 +1393,7 @@ def claude_command(item: dict, session: tuple[str, bool] | None = None, prompt: 
     allowed += ["Glob", "Grep", "WebFetch", "WebSearch"]
     allowed += ["Read"] if any_dir else [f"Read(//{d.lstrip('/')}/**)" for d in dirs]
     allowed += [f"mcp__{n}__*" for n in mcp]
-    cmd = [CFG["claude_bin"], "-p", prompt or f"/slack-autoreply handle {item_path(item['id'])}",
+    cmd = [CFG["claude_bin"], "-p", prompt or f"{config.SKILL_COMMAND} handle {item_path(item['id'])}",
            "--output-format", "stream-json", "--verbose",
            "--permission-mode", "dontAsk",
            "--allowedTools", ",".join(allowed),
@@ -2330,7 +2330,7 @@ class Daemon(Slack):
             return
 
         delay = CFG["delay_min"] if (item["triage"] and t.urgency >= 4) else random.uniform(CFG["delay_min"], CFG["delay_max"])
-        log.info("…%s in %.0fs", "handing to Claude" if self.dispatch == "claude" else "queued; drain with /slack-autoreply run", delay)
+        log.info("…%s in %.0fs", "handing to Claude" if self.dispatch == "claude" else "queued; drain with /solo:slack-autoreply run", delay)
         time.sleep(delay)
         newer = self.newer_messages(channel, reply_thread_ts, ev["ts"])
         if any(m.get("user") == self.me for m in newer):
@@ -2678,7 +2678,7 @@ def cmd_build_voice(a):
     created = voice.ensure_voice_file()
     print(f"saved {len(samples)} samples ({paired} with the message they replied to) → {voice.SAMPLES_FILE}")
     if created:
-        print(f"created {voice.VOICE_FILE} from the template — fill it in (or let /slack-autoreply setup draft it)")
+        print(f"created {voice.VOICE_FILE} from the template — fill it in (or let /solo:slack-autoreply setup draft it)")
 
 
 def cmd_voice(a):
@@ -2804,9 +2804,9 @@ def cmd_say(a):
     save_item(item)
     print(f"queued {item['id']} → {name} (asked by {a.from_})")
     if CFG["dispatch"] != "claude":
-        print(f"compose it with: claude -p '/slack-autoreply compose {item_path(item['id'])}'")
+        print(f"compose it with: claude -p '/solo:slack-autoreply compose {item_path(item['id'])}'")
         return
-    tools, result, err = run_claude(item, State(), prompt=f"/slack-autoreply compose {item_path(item['id'])}")
+    tools, result, err = run_claude(item, State(), prompt=f"{config.SKILL_COMMAND} compose {item_path(item['id'])}")
     item = load_item(item["id"])
     why_not = err or (result or {}).get("subtype") or "no decision"
     if not item.get("decision"):
@@ -3052,7 +3052,7 @@ def cmd_ask(a):
             if d.strip() and d.strip() != "*"]
     cwd = CFG["claude_cwd"] or (dirs[0] if dirs else str(config.STATE_DIR))
     allowed = bash_rules() + ["Glob", "Grep", f"Read(//{str(config.STATE_DIR).lstrip('/')}/**)"]
-    cmd = [CFG["claude_bin"], "-p", f"/slack-autoreply ask {a.question}",
+    cmd = [CFG["claude_bin"], "-p", f"{config.SKILL_COMMAND} ask {a.question}",
            "--permission-mode", "dontAsk",
            "--allowedTools", ",".join(allowed),
            "--disallowedTools", "Write,Edit,NotebookEdit,Agent,WebFetch,WebSearch,ToolSearch",

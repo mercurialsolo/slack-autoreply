@@ -9,7 +9,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=__HOME__/.slack-autoreply
-ExecStart=__PYTHON__ __HOME__/.claude/skills/slack-autoreply/scripts/slackctl.py listen
+ExecStart=__PYTHON__ __ROOT__/scripts/slackctl.py listen
 Restart=always
 RestartSec=15
 Environment=PATH=__PATH__

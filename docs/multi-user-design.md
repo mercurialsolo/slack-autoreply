@@ -119,7 +119,7 @@ Nothing crosses the box boundary except Slack traffic on the person's own tokens
    - asks for `CONTEXT_DIRS`, offering candidates: the cwd's parent, `~/Projects`, `~/Documents`, plus any `projects` keys in `~/.claude.json` that exist on disk (reusing `discover_mcp_names`'s file reading) `[verified the file is already parsed: slackctl.py:discover_mcp_names]`;
    - writes `MODE=shadow`, runs `doctor`, then runs `build-voice` so the later `setup` session starts with samples already pulled (that is the slow, rate-limited step; doing it here takes it off the interactive clock);
    - ends with the exact next command.
-3. `claude "/slack-autoreply setup"`, ~10 min now that samples exist. The three questions (who to be careful with, what never to commit to, what is fine on autopilot) stay human; everything else in SKILL.md `setup` is already automated by the skill.
+3. `claude "/solo:slack-autoreply setup"`, ~10 min now that samples exist. The three questions (who to be careful with, what never to commit to, what is fine on autopilot) stay human; everything else in SKILL.md `setup` is already automated by the skill.
 4. `make service`. The daemon starts in shadow. First self-DM from Solo: "Shadow mode: I'm watching how you reply and will show you what I'd have said. I post nothing to anyone. `status`, `pause`, `mode` work here."
 
 Which of today's phases that removes: Phase 2 steps 2–3 (token generation stays a browser click; the paste, validate and store is automated), all of Phase 3, all of Phase 4 (`pair` runs `simulate` and shows the result), the `build-voice` half of Phase 5. Phases 0, 1, 6 are already commands. Phase 7's hand-over text becomes Solo's first self-DM.
@@ -248,12 +248,12 @@ Recommendation: **the Slack self-DM is the console, the CLI is the console's eng
 - The self-DM is already the inbox for drafts and the person already reacts there. Adding comparisons, commands and a digest costs about 200 lines in `slackctl.py`, works on the phone, needs no auth, and dies with the daemon (nothing to keep running).
 - Block Kit buttons would be nicer than reactions, but interactive payloads on a user-scopes-only app with no bot user are unverified `[inferred]`. Reactions and text commands are the baseline; buttons are an upgrade if a ten-minute test shows they arrive over Socket Mode.
 - A local web page (`slackctl console` on `127.0.0.1`, stdlib `http.server`, one HTML file, reads the same JSON) is realistic to build in a day and is the right place for side-by-side shadow comparisons over weeks, a trust matrix, and VOICE.md editing. It is also another thing to keep working across Python versions and browsers. Defer to Phase 3 and build it only if people complain that the self-DM is noisy or they cannot find old comparisons.
-- `/slack-autoreply status|review|simulate` in Claude Code remain for people who like the terminal.
+- `/solo:slack-autoreply status|review|simulate` in Claude Code remain for people who like the terminal.
 
 ### The training loop without a coding agent
 
 The loop is: Solo drafts or shadows → the person reacts, replies, edits or overrules → outcomes and correction pairs accumulate → `review` folds patterns into VOICE.md and dossiers. Only the last step needs Claude Code, and today it needs a human to start it and watch it. Make it headless and scheduled:
-- `slackctl review --apply` spawns `claude -p "/slack-autoreply review" --allowedTools "Edit(~/.slack-autoreply/VOICE.md),Edit(~/.slack-autoreply/people/**),Edit(~/.slack-autoreply/channels/**),Bash(python3 …/slackctl.py review-data*)"`, snapshots VOICE.md before and after, and posts the diff (unified, truncated to 40 lines) to the self-DM with "revert" as a reaction option (keep `VOICE.md.prev`).
+- `slackctl review --apply` spawns `claude -p "/solo:slack-autoreply review" --allowedTools "Edit(~/.slack-autoreply/VOICE.md),Edit(~/.slack-autoreply/people/**),Edit(~/.slack-autoreply/channels/**),Bash(python3 …/slackctl.py review-data*)"`, snapshots VOICE.md before and after, and posts the diff (unified, truncated to 40 lines) to the self-DM with "revert" as a reaction option (keep `VOICE.md.prev`).
 - `tick` runs it weekly at `REVIEW_WEEKLY=mon 09:00` and the Monday digest links it.
 - SKILL.md `review` step 5 ("report in a few lines") already produces the summary that goes into the digest.
 This is the difference between "an engineer ran review for the owner every week" and "every teammate's Solo reviews itself and shows them ten lines". Setup's three questions remain the only human-in-the-loop requirement, and they happen once.

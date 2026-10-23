@@ -5,6 +5,14 @@
 Packaged for other people's workspaces. Everything below shipped between 1.0.0 and this tag.
 
 **Packaging**
+- Solo is a Claude Code plugin, and the repo is its own marketplace:
+  `/plugin install solo --marketplace mercurialsolo/slack-autoreply`, then `/solo:deploy` follows
+  AGENTS.md phase by phase. The writer's skill is `/solo:slack-autoreply` (was `/slack-autoreply`);
+  the daemon runs from the plugin root, and `doctor` checks that the plugin Claude Code loads is
+  the directory the service runs from. From a clone, `install.sh` installs the same plugin under
+  `~/.claude/skills/solo`. **Upgrading from 1.0.x:** re-run `install.sh`, then
+  `deploy/install-service.sh`, then remove `~/.claude/skills/slack-autoreply`; set
+  `SKILL_COMMAND=/slack-autoreply` in `.env` only for the gap between the two.
 - MIT license. Real workspace, channel, user, repo and customer identifiers replaced with
   placeholders throughout docs, examples and tests. `deploy/solo` no longer assumes the author's
   machine: it reads `~/.slack-autoreply/solo.env` (`SOLO_NODE`, `SOLO_REMOTE_HOME`,
@@ -56,7 +64,7 @@ Packaged for other people's workspaces. Everything below shipped between 1.0.0 a
 
 First packaged release.
 
-- Claude Code skill (`/slack-autoreply setup | handle | run | review | simulate | status`)
+- Claude Code skill (`/solo:slack-autoreply setup | handle | run | review | simulate | status`)
   with `slackctl` daemon: Socket Mode listener on the owner's user token, replies posted from
   their own account.
 - Jev (TypeSafe AI System One) triage with Claude Haiku fallback and policy thresholds;

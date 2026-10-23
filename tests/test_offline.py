@@ -1259,7 +1259,21 @@ _ACT_NOT_THE_WRITERS = {
 _act_help = subprocess.run([sys.executable, str(SCRIPTS / "slackctl.py"), "act", "--help"],
                            capture_output=True, text=True, env=dict(os.environ)).stdout
 _act_opts = set(_re.findall(r"(--[a-z][a-z-]+)", _act_help))
-_skill_md = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+_skill_md = (ROOT / "skills" / "slack-autoreply" / "SKILL.md").read_text(encoding="utf-8")
+
+# The plugin. Claude Code namespaces its skills by the manifest name, so the daemon's prompt,
+# the marketplace entry and plugin.json have to agree, and the version is the one VERSION says.
+_pj = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+_mj = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+check("plugin.json version is VERSION", _pj["version"] == (ROOT / "VERSION").read_text().strip(), _pj["version"])
+check("the marketplace's one entry is the plugin, at the repo root",
+      [(p["name"], p["source"]) for p in _mj["plugins"]] == [(_pj["name"], "./")], str(_mj["plugins"]))
+check("the daemon's slash command is the plugin's namespace", S.config.SKILL_COMMAND == f"/{_pj['name']}:slack-autoreply",
+      S.config.SKILL_COMMAND)
+check("the skill reaches slackctl through the plugin root, in body and allowed-tools",
+      _skill_md.count("${CLAUDE_PLUGIN_ROOT}/scripts/slackctl.py") >= 2 and "${CLAUDE_SKILL_DIR}" not in _skill_md)
+check("there is a deploy skill the marketplace user can run first",
+      "AGENTS.md" in (ROOT / "skills" / "deploy" / "SKILL.md").read_text(encoding="utf-8"))
 _unreachable = sorted(o for o in _act_opts if o not in _ACT_NOT_THE_WRITERS and o not in _skill_md)
 
 check("the act options are discoverable at all", len(_act_opts) >= 8, f"parsed: {sorted(_act_opts)}")
@@ -1333,7 +1347,7 @@ check("and told that anything beyond it belongs to an agent",
       "belongs to an agent, not to you" in _reach)
 check("the reach is read off the same config that builds the invocation",
       all(d.strip() in _reach for d in S.CFG["context_dirs"] if d.strip()))
-_skill_md_now = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+_skill_md_now = (ROOT / "skills" / "slack-autoreply" / "SKILL.md").read_text(encoding="utf-8")
 check("the writer is told that being denied is not the same as finding nothing",
       "Being denied is not the same as finding nothing" in _skill_md_now)
 check("it is not offered when the writer can answer unaided",

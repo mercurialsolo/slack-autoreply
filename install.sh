@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Installs the skill into ~/.claude/skills/slack-autoreply, creates ~/.slack-autoreply, installs deps.
+# Installs the Solo plugin (to ~/.claude/skills/solo from a checkout; in place from a marketplace install),
+# creates ~/.slack-autoreply, installs deps.
 # Idempotent. Re-run after unzipping a new version. Never overwrites your .env or VOICE.md.
 #
 #   ./install.sh            copy (default)
@@ -8,7 +9,6 @@ set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
-DEST="$SKILLS_DIR/slack-autoreply"
 STATE="${AUTOREPLY_HOME:-$HOME/.slack-autoreply}"
 MODE="${1:-copy}"
 PY="${PYTHON:-python3}"
@@ -23,46 +23,68 @@ fi
 import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)
 EOF
 
-# --- skill
-mkdir -p "$SKILLS_DIR"
-if [ "$MODE" = "--link" ]; then
-  if [ -e "$DEST" ] && [ ! -L "$DEST" ]; then say "$DEST exists and is not a symlink; remove it or run without --link"; exit 1; fi
-  ln -sfn "$SRC" "$DEST"
-  say "linked  $DEST -> $SRC"
-else
-  if [ "$SRC" != "$DEST" ]; then
-    mkdir -p "$DEST"
-    # copy the skill files; leave anything else in DEST alone
-    for f in SKILL.md README.md AGENTS.md CLAUDE.md LICENSE manifest.yaml requirements.txt .env.example VERSION CHANGELOG.md install.sh Makefile; do
-      [ -e "$SRC/$f" ] && cp "$SRC/$f" "$DEST/$f"
-    done
-    rm -rf "$DEST/scripts" "$DEST/deploy" "$DEST/tests" "$DEST/docs"
-    cp -R "$SRC/scripts" "$DEST/scripts"
-    cp -R "$SRC/deploy"  "$DEST/deploy"
-    cp -R "$SRC/tests"   "$DEST/tests"
-    cp -R "$SRC/docs"    "$DEST/docs"
-    find "$DEST" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
-    # The `solo` skill is installed SEPARATELY, as its own top-level skill, so that any Claude Code
-  # session on this machine can discover it — not just one already running the slack-autoreply
-  # skill. That is the point: a coding agent that just finished something should be able to decide
-  # whether a person needs telling, and reach the owner's voice without inventing one.
-  if [ -d "$SRC/skills/solo" ]; then
-    mkdir -p "$SKILLS_DIR/solo"
-    cp "$SRC/skills/solo/SKILL.md" "$SKILLS_DIR/solo/SKILL.md"
-    say "skill   solo -> $SKILLS_DIR/solo (any session can use it)"
-    # Codex reads skills from ~/.codex/skills as drop-in directories, same SKILL.md frontmatter.
-    # Installed from the same source file so the two cannot drift: an agent reporting through Solo
-    # should behave identically whichever runtime it is running under.
-    if [ -d "$HOME/.codex/skills" ]; then
-      mkdir -p "$HOME/.codex/skills/solo"
-      cp "$SRC/skills/solo/SKILL.md" "$HOME/.codex/skills/solo/SKILL.md"
-      say "skill   solo -> $HOME/.codex/skills/solo (codex sessions too)"
+# --- the plugin
+# Solo is a Claude Code plugin named `solo`; its skills are /solo:slack-autoreply (the writer) and
+# /solo:solo (how other agents report). The daemon runs FROM the plugin root: the skill tells the
+# writer to call `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/slackctl.py`, and the daemon pre-approves
+# only its own path, so they must be one directory. Two routes get there:
+#   marketplace  `claude plugin install solo@solo` put us in ~/.claude/plugins/cache/solo/solo/<v>;
+#                /solo:deploy runs this script from there. Nothing to copy — this IS the root.
+#   clone        copy this checkout to ~/.claude/skills/solo, which Claude Code loads as the plugin
+#                solo@skills-dir. (--link symlinks instead, for people editing the checkout.)
+PLUGIN_CACHE="${CLAUDE_PLUGIN_CACHE:-$HOME/.claude/plugins/cache}"
+case "$SRC" in
+  "$PLUGIN_CACHE"/*) DEST="$SRC"; say "plugin  running from the installed plugin at $DEST";;
+  *)
+    DEST="$SKILLS_DIR/solo"
+    # Refuse to become a second plugin named solo. A marketplace install already provides the
+    # skills; two copies would load two /solo:slack-autoreply and the daemon's allow-list could
+    # only ever match one of them.
+    if command -v claude >/dev/null 2>&1; then
+      other=$(claude plugin list --json 2>/dev/null | "$PY" -c '
+import json, sys, pathlib
+dest = pathlib.Path(sys.argv[1]).resolve()
+for p in json.load(sys.stdin) or []:
+    if p.get("id", "").startswith("solo@") and pathlib.Path(p.get("installPath", "")).resolve() != dest:
+        print(p["id"], p.get("installPath", "")); break' "$DEST" 2>/dev/null || true)
+      if [ -n "$other" ]; then
+        say "solo is already installed as a plugin: $other"
+        say "run /solo:deploy inside Claude Code to set up the daemon from there, or uninstall it first."
+        exit 1
+      fi
     fi
-  fi
-  say "copied  $SRC -> $DEST"
-  else
-    say "already installed at $DEST"
-  fi
+    # Before 1.1.0 install.sh dropped the agent skill at ~/.claude/skills/solo/SKILL.md on its own.
+    # The plugin provides it now (skills/solo/), and a stray SKILL.md at the plugin root would
+    # load as a third skill. install.sh wrote it, so install.sh may remove it.
+    if [ -f "$DEST/SKILL.md" ] && [ ! -d "$DEST/.claude-plugin" ] && [ ! -L "$DEST" ]; then
+      rm -f "$DEST/SKILL.md"; say "removed the pre-1.1.0 standalone solo skill at $DEST/SKILL.md (the plugin provides it)"
+    fi
+    mkdir -p "$SKILLS_DIR"
+    if [ "$MODE" = "--link" ]; then
+      if [ -e "$DEST" ] && [ ! -L "$DEST" ]; then say "$DEST exists and is not a symlink; remove it or run without --link"; exit 1; fi
+      ln -sfn "$SRC" "$DEST"
+      say "linked  $DEST -> $SRC"
+    elif [ "$SRC" != "$(cd "$DEST" 2>/dev/null && pwd -P)" ]; then
+      mkdir -p "$DEST"
+      # The whole tree minus git and caches, so the plugin manifest, skills, scripts, deploy
+      # and tests travel together and cannot drift from each other.
+      (cd "$SRC" && tar --exclude .git --exclude '__pycache__' --exclude '*.pyc' -cf - .) | (cd "$DEST" && tar -xf -)
+      say "copied  $SRC -> $DEST  (loads as plugin solo@skills-dir)"
+    else
+      say "already installed at $DEST"
+    fi
+    if [ -f "$SKILLS_DIR/slack-autoreply/SKILL.md" ]; then
+      say "note    $SKILLS_DIR/slack-autoreply is the pre-plugin layout and still defines /slack-autoreply."
+      say "        once the service runs from $DEST (deploy/install-service.sh), remove it:  rm -r $SKILLS_DIR/slack-autoreply"
+    fi
+    ;;
+esac
+# Codex reads skills from ~/.codex/skills as drop-in directories, same SKILL.md frontmatter. The
+# agent-reporting skill is installed there from the same file so the two cannot drift.
+if [ -d "$HOME/.codex/skills" ] && [ -f "$SRC/skills/solo/SKILL.md" ]; then
+  mkdir -p "$HOME/.codex/skills/solo"
+  cp "$SRC/skills/solo/SKILL.md" "$HOME/.codex/skills/solo/SKILL.md"
+  say "skill   solo -> $HOME/.codex/skills/solo (codex sessions too)"
 fi
 chmod +x "$DEST/scripts/slackctl.py" "$DEST/install.sh" "$DEST/deploy/install-service.sh" 2>/dev/null || true
 

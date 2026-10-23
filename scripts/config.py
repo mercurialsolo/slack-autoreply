@@ -22,7 +22,11 @@ from pathlib import Path
 
 from dotenv import dotenv_values, load_dotenv
 
-SKILL_DIR = Path(__file__).resolve().parent.parent
+SKILL_DIR = Path(__file__).resolve().parent.parent   # the plugin root: scripts/ sits directly under it
+# How the daemon invokes the skill in `claude -p`. Plugin skills are namespaced by the plugin's
+# manifest name, so this is `/solo:slack-autoreply`. A machine still running the skill as a plain
+# copy under ~/.claude/skills/slack-autoreply sets SKILL_COMMAND=/slack-autoreply.
+SKILL_COMMAND = os.getenv("SKILL_COMMAND", "/solo:slack-autoreply").strip() or "/solo:slack-autoreply"
 SCRIPTS_DIR = Path(__file__).resolve().parent
 STATE_DIR = Path(os.getenv("AUTOREPLY_HOME", "~/.slack-autoreply")).expanduser().resolve()
 

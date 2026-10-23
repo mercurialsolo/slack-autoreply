@@ -35,14 +35,25 @@ Confirm you are on the machine the owner actually uses: their project folders an
 
 ## Phase 1 — install
 
-```
-./install.sh                 # or: make install
-```
-Expected last line: `next:  python3 ~/.claude/skills/slack-autoreply/scripts/slackctl.py doctor`
+Solo is a Claude Code plugin named `solo`. If you are running as `/solo:deploy`, the plugin is
+already installed and this directory is its root; otherwise this is a checkout.
 
-What it did: copied the skill to `~/.claude/skills/slack-autoreply`, installed `slack_sdk`,
-`python-dotenv`, `httpx`, created `~/.slack-autoreply/{.env,inbox,people,channels}`.
-It never overwrites an existing `.env` or `VOICE.md`.
+```
+./install.sh                 # or: make install   (from a checkout: installs to ~/.claude/skills/solo)
+```
+Expected last line: `next:  <python> <plugin root>/scripts/slackctl.py doctor`
+
+What it did: made this directory the plugin root the daemon runs from (copying the checkout to
+`~/.claude/skills/solo` if needed, where Claude Code loads it as `solo@skills-dir`), created a venv
+at `~/.slack-autoreply/venv` with `slack_sdk`, `python-dotenv`, `httpx`, and created
+`~/.slack-autoreply/{.env,inbox,people,channels}`. It never overwrites an existing `.env` or
+`VOICE.md`. It refuses if a *different* plugin named `solo` is already installed, because two
+copies would each load a `/solo:slack-autoreply` and the daemon can only pre-approve one path.
+
+**Upgrading a pre-1.1.0 install** (skill at `~/.claude/skills/slack-autoreply`): run `install.sh`,
+then `deploy/install-service.sh` again so the service unit points at the plugin root, then remove
+the old directory. Until the service is re-installed, keep `SKILL_COMMAND=/slack-autoreply` in
+`.env` so the running daemon still finds its skill.
 
 Verify: `python3 tests/test_offline.py` → last line `379 checks passed`. This needs no tokens.
 If it fails, the environment is wrong (Python version, deps); report the failing check verbatim.
@@ -102,16 +113,17 @@ Acceptable warnings on a fresh install: *no voice samples yet*, *VOICE.md is the
 ## Phase 4 — smoke test the pipeline without sending
 
 ```
-cd ~ && claude "/slack-autoreply simulate 'can you send me the latest deck?' --from Priya"
+cd ~ && claude "/solo:slack-autoreply simulate 'can you send me the latest deck?' --from Priya"
 ```
 Expected: Claude Code prints a triage line, runs `slackctl show`, writes a reply, and `act`
-prints `[simulated] … → would DRAFT …`. Nothing reaches Slack. If `/slack-autoreply` is not
-recognised, the skill is not at `~/.claude/skills/slack-autoreply/SKILL.md` — re-run Phase 1.
+prints `[simulated] … → would DRAFT …`. Nothing reaches Slack. If `/solo:slack-autoreply` is not
+recognised, the plugin is not loaded: `claude plugin list` should show `solo@…` enabled — re-run
+Phase 1, or start a new session so a freshly installed plugin is picked up.
 
 ## Phase 5 — train the voice (needs the owner present, ~15 min)
 
 ```
-cd ~ && claude "/slack-autoreply setup"
+cd ~ && claude "/solo:slack-autoreply setup"
 ```
 Claude Code will: pull the owner's last 200 Slack messages (`slackctl build-voice`, a few
 minutes — Slack rate limits), study them, draft `~/.slack-autoreply/VOICE.md` with quotes as
@@ -128,7 +140,7 @@ Foreground first, for one real message:
 python3 ~/.claude/skills/slack-autoreply/scripts/slackctl.py listen      # or: make listen
 ```
 Expected first lines: `listening as @<handle> … MODE=learn · dispatch=claude …` and
-`will run: claude -p /slack-autoreply handle …`. Have the owner DM themselves from another
+`will run: claude -p /solo:slack-autoreply handle …`. Have the owner DM themselves from another
 account or ask a colleague to DM them. Expected log: `<name> in im: … → …`, `…handing to Claude
 in Ns`, `dispatch … (new session …)`, then `drafted (reply) for your ✅ — …`. The owner sees a
 draft in their Slack self-DM. They react ✅; the log shows `draft approved → sent to …` and the
@@ -154,7 +166,7 @@ Tell the owner, briefly:
   Replying to the person themselves also works and teaches the system the difference.
 - After ~5 good outcomes with a person, that route goes automatic for them; two bad outcomes
   in a row and it goes back to drafts. `make status` shows who has graduated.
-- Weekly: `claude "/slack-autoreply review"` — reads corrections, updates VOICE.md and dossiers.
+- Weekly: `claude "/solo:slack-autoreply review"` — reads corrections, updates VOICE.md and dossiers.
 - Anything sensitive (money, legal, people, investors) is never auto-sent; they get a ⚠️.
 - Logs: `make logs`. Stop: `deploy/install-service.sh --remove`.
 
@@ -325,7 +337,7 @@ the link in the thread. Replies inside a thread are not new requests. Triage sti
 
 5. **Cron on the node**, once a filed issue exists to try it on:
    ```
-   */30 * * * * PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin ENG_LABEL=agent:mini ~/.slack-autoreply/venv/bin/python3 ~/.claude/skills/slack-autoreply/scripts/eng_pickup.py >> ~/.slack-autoreply/eng_pickup.log 2>&1
+   */30 * * * * PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin ENG_LABEL=agent:mini ~/.slack-autoreply/venv/bin/python3 ~/.claude/skills/solo/scripts/eng_pickup.py >> ~/.slack-autoreply/eng_pickup.log 2>&1
    ```
    For Linear, add `ENG_LINEAR_TEAM=ENG` (in `.env` or at the front of the cron line) and write
    `~/.slack-autoreply/eng-mcp.json` with the Linear MCP server (see `.env.example`). Passing it
@@ -345,10 +357,11 @@ cron line; to stop filing, unset `ENG_CHANNEL` and `solo restart`.
 |---|---|
 | `doctor`: `SLACK_USER_TOKEN … that's a bot token` | they copied `xoxb-`; need the *User* OAuth Token (`xoxp-`) |
 | `doctor`: `missing user scopes` | app was created by hand, not from the manifest; re-create from `manifest.yaml`, reinstall, paste new token |
+| `doctor`: `daemon runs from X, but plugin … loads from Y` | the plugin was updated and the service still runs the old directory; run `/solo:deploy` (or `deploy/install-service.sh` from Y) |
 | `doctor`: `claude -p failed` | not logged in, or onboarding incomplete: run `claude` interactively once; for unattended boxes `claude setup-token` |
 | `listen` logs `missing_scope` | same as missing scopes above |
 | Solo DM says `⚠️ Solo cannot draft` | the node's writer is dead — almost always logged out of Claude Code. Run `claude /login` on the node (it is interactive; ssh in with `-t`). `solo status` shows the same state as a `writer:` line, and `solo doctor` re-tests it. Nothing is lost while it is down; pending drafts still send on ✅ |
-| `listen` logs `Claude returned no decision` | run `claude "/slack-autoreply run"` interactively to see the error; usually a timeout (`CLAUDE_TIMEOUT_SECONDS`) or `CONTEXT_DIRS` pointing at a missing folder |
+| `listen` logs `Claude returned no decision` | run `claude "/solo:slack-autoreply run"` interactively to see the error; usually a timeout (`CLAUDE_TIMEOUT_SECONDS`) or `CONTEXT_DIRS` pointing at a missing folder |
 | service runs but nothing happens on a DM | `ONLY_WHEN_AWAY=true` while owner is active, quiet hours, or sender in `BLOCK_USERS`; check the log line `skip (…)` |
 | `search --with` returns nothing | Slack search modifier differences; `history @handle` covers the same ground |
 | drafts never appear | self-DM id changed (rare) — restart the daemon; or `MODE=auto` and the sender had earned auto |

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "solo",
+  "version": "1.1.0",
+  "description": "Your logged-in Claude Code replies to your Slack messages from your own account, in your voice, and earns the right to do it unsupervised. Skills: /solo:deploy to install, /solo:slack-autoreply to run, train and review.",
+  "author": { "name": "Barada Sahu" },
+  "repository": "https://github.com/mercurialsolo/slack-autoreply",
+  "license": "MIT",
+  "keywords": ["slack", "autoreply", "voice", "triage", "daemon", "jev"]
+}

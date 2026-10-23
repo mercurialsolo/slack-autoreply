@@ -129,7 +129,7 @@ def check_socket_mode(r: Report):
 def check_claude(r: Report):
     import slackctl   # local: importing it at module scope would pull in slack_sdk
     if CFG["dispatch"] != "claude":
-        r.add(WARN, f"DISPATCH={CFG['dispatch']}", "messages will only be queued; drain with /slack-autoreply run (or /loop 2m /slack-autoreply run)")
+        r.add(WARN, f"DISPATCH={CFG['dispatch']}", "messages will only be queued; drain with /solo:slack-autoreply run (or /loop 2m /solo:slack-autoreply run)")
         return
     path = shutil.which(CFG["claude_bin"])
     if not path:
@@ -164,14 +164,48 @@ def check_claude(r: Report):
             r.add(FAIL, "claude -p failed", f"{why} — run `claude` once interactively and /login; for unattended use consider `claude setup-token`")
     except subprocess.TimeoutExpired:
         r.add(FAIL, "claude -p timed out", "run `claude` interactively once to finish login/onboarding")
-    # skill resolves
-    skill_home = Path.home() / ".claude" / "skills" / "slack-autoreply" / "SKILL.md"
-    if skill_home.exists() or (Path(CFG["claude_cwd"] or ".") / ".claude" / "skills" / "slack-autoreply" / "SKILL.md").exists():
-        r.add(OK, f"skill installed: {skill_home if skill_home.exists() else 'project .claude/skills'}")
-    elif config.SKILL_DIR.name == "slack-autoreply" and config.SKILL_DIR.parent.name == "skills":
-        r.add(OK, f"skill dir: {config.SKILL_DIR}")
+    # the plugin resolves. The daemon's prompt is `/solo:slack-autoreply …`, which exists only if
+    # Claude Code loads this directory as the plugin named solo: from a marketplace install
+    # (~/.claude/plugins/cache/solo/solo/<version>) or as a skills-dir plugin (~/.claude/skills/solo).
+    # The daemon must run from that same directory: the skill tells the writer to call
+    # `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/slackctl.py`, and the daemon pre-approves only its own
+    # path, so a mismatch is denied silently under dontAsk.
+    root = config.SKILL_DIR
+    if not (root / ".claude-plugin" / "plugin.json").exists():
+        r.add(FAIL, f"{root} is not a plugin root", "no .claude-plugin/plugin.json beside scripts/ — re-run install.sh from a current checkout, or `claude plugin install solo@solo`")
+    installs = installed_plugins(path)
+    mine = [i for i in (installs or []) if i.get("id", "").startswith(f"{PLUGIN}@")]
+    here = [i for i in mine if Path(i.get("installPath", "")).resolve() == root]
+    if config.SKILL_COMMAND != f"/{PLUGIN}:slack-autoreply":
+        r.add(WARN, f"SKILL_COMMAND={config.SKILL_COMMAND}", "the daemon will not invoke the plugin's skill; fine only while this machine still has the old ~/.claude/skills/slack-autoreply copy")
+    elif here and all(i.get("enabled", True) for i in here):
+        r.add(OK, f"plugin {here[0]['id']} loads from this directory")
+    elif here:
+        r.add(FAIL, f"plugin {here[0]['id']} is disabled", f"claude plugin enable {here[0]['id']}")
+    elif mine:
+        other = mine[0]
+        r.add(WARN, f"daemon runs from {root}, but plugin {other['id']} loads from {other.get('installPath')}",
+              "the writer's slackctl calls would be denied — re-run /solo:deploy (or deploy/install-service.sh) from the installed version")
+    elif installs is None:
+        r.add(WARN, "could not list plugins (`claude plugin list --json` failed)", f"check by hand that `/{PLUGIN}:slack-autoreply` is a known skill in `claude`")
     else:
-        r.add(FAIL, "skill not in ~/.claude/skills/slack-autoreply", f"the daemon calls `/slack-autoreply handle`; copy or symlink {config.SKILL_DIR} there (install.sh does this)")
+        r.add(FAIL, f"no plugin named {PLUGIN} is installed",
+              f"claude plugin marketplace add mercurialsolo/slack-autoreply && claude plugin install {PLUGIN}@{PLUGIN}   — or ./install.sh from a checkout, which installs it under ~/.claude/skills/{PLUGIN}")
+    old = Path.home() / ".claude" / "skills" / "slack-autoreply"
+    if old.exists() and old.resolve() != root:
+        r.add(WARN, f"old copy at {old}", "it still defines a /slack-autoreply skill beside the plugin's; remove it once the service runs from the plugin")
+
+PLUGIN = "solo"
+
+
+def installed_plugins(claude_bin: str) -> list[dict] | None:
+    """What `claude plugin list --json` says, or None when that could not be asked."""
+    try:
+        p = subprocess.run([claude_bin, "plugin", "list", "--json"], capture_output=True, text=True, timeout=30)
+        data = json.loads(p.stdout or "[]")
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, list) else data.get("plugins", [])
 
 
 def check_context(r: Report):
@@ -220,11 +254,11 @@ def check_voice(r: Report):
     n = len(voice.load_samples())
     notes = voice.load_notes()
     if n == 0:
-        r.add(WARN, "no voice samples yet", "run /slack-autoreply setup in Claude Code (or: slackctl build-voice)")
+        r.add(WARN, "no voice samples yet", "run /solo:slack-autoreply setup in Claude Code (or: slackctl build-voice)")
     else:
         r.add(OK, f"{n} voice samples")
     if not notes or "(lowercase? full stops" in notes:
-        r.add(WARN, "VOICE.md is the blank template", "run /slack-autoreply setup — it drafts this from your messages and asks you three questions")
+        r.add(WARN, "VOICE.md is the blank template", "run /solo:slack-autoreply setup — it drafts this from your messages and asks you three questions")
     else:
         r.add(OK, f"VOICE.md filled in ({len(notes.splitlines())} lines)")
     if CFG["mode"] not in ("learn", "draft", "auto"):

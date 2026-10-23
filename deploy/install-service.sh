@@ -6,6 +6,7 @@
 # The unit's PATH must contain `claude`; this script copies your current PATH into it.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"     # the plugin root this script ships in: the daemon runs from here
 PY="$(command -v "${PYTHON:-python3}")"
 CLAUDE_BIN="$(command -v claude || true)"
 if [ -z "$CLAUDE_BIN" ] && [ "${1:-}" != "--remove" ]; then
@@ -21,10 +22,10 @@ case "$(uname -s)" in
       --status) launchctl print "gui/$(id -u)/com.slack-autoreply" 2>/dev/null | sed -n '1,12p' || echo "not loaded"; exit 0;;
     esac
     mkdir -p "$HOME/Library/LaunchAgents"
-    sed -e "s|__HOME__|$HOME|g" -e "s|__PYTHON__|$PY|g" -e "s|__PATH__|$UNIT_PATH|g" "$HERE/com.slack-autoreply.plist" > "$PLIST"
+    sed -e "s|__HOME__|$HOME|g" -e "s|__ROOT__|$ROOT|g" -e "s|__PYTHON__|$PY|g" -e "s|__PATH__|$UNIT_PATH|g" "$HERE/com.slack-autoreply.plist" > "$PLIST"
     launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null || launchctl load "$PLIST"
-    echo "installed $PLIST"
+    echo "installed $PLIST  (daemon runs from $ROOT)"
     echo "logs:   tail -f $HOME/.slack-autoreply/listen.log"
     echo "status: $0 --status"
     ;;
@@ -35,14 +36,14 @@ case "$(uname -s)" in
       --status) systemctl --user status slack-autoreply --no-pager || true; exit 0;;
     esac
     mkdir -p "$(dirname "$UNIT")"
-    sed -e "s|__HOME__|$HOME|g" -e "s|__PYTHON__|$PY|g" -e "s|__PATH__|$UNIT_PATH|g" "$HERE/slack-autoreply.service" > "$UNIT"
+    sed -e "s|__HOME__|$HOME|g" -e "s|__ROOT__|$ROOT|g" -e "s|__PYTHON__|$PY|g" -e "s|__PATH__|$UNIT_PATH|g" "$HERE/slack-autoreply.service" > "$UNIT"
     systemctl --user daemon-reload
     systemctl --user enable --now slack-autoreply
     # keep running after logout (needs sudo once; harmless if it fails)
     loginctl enable-linger "$USER" 2>/dev/null || true
-    echo "installed $UNIT"
+    echo "installed $UNIT  (daemon runs from $ROOT)"
     echo "logs:   journalctl --user -u slack-autoreply -f"
     echo "status: systemctl --user status slack-autoreply"
     ;;
-  *) echo "unsupported OS: run manually →  nohup $PY $HOME/.claude/skills/slack-autoreply/scripts/slackctl.py listen >> $HOME/.slack-autoreply/listen.log 2>&1 &"; exit 1;;
+  *) echo "unsupported OS: run manually →  nohup $PY $ROOT/scripts/slackctl.py listen >> $HOME/.slack-autoreply/listen.log 2>&1 &"; exit 1;;
 esac

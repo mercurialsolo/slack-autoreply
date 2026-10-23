@@ -2,7 +2,7 @@
 """Take one engineering issue Solo filed and hand it to Claude Code, which answers with a draft PR.
 
 Runs on the node from cron, one issue per run, oldest first:
-  */10 * * * * ~/.slack-autoreply/venv/bin/python3 ~/.claude/skills/slack-autoreply/scripts/eng_pickup.py >> ~/.slack-autoreply/eng_pickup.log 2>&1
+  */10 * * * * ~/.slack-autoreply/venv/bin/python3 ~/.claude/skills/solo/scripts/eng_pickup.py >> ~/.slack-autoreply/eng_pickup.log 2>&1
 
 The queue is the ENG_LABEL label on ENG_REPO. While an agent has an issue it carries
 `agent:working`; afterwards `agent:done` (a draft PR exists) or `agent:needs-human` (it came back

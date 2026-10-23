@@ -29,6 +29,7 @@ set -euo pipefail
 # quotes); a variable already in the environment wins over the file.
 #   SOLO_NODE          ssh alias or host of the machine running the daemon        (required)
 #   SOLO_REMOTE_HOME   the home directory there                                   (default: asked of the node)
+#   SOLO_REMOTE_APP    the plugin root the daemon runs from on the node           (default: ~/.claude/skills/solo there)
 #   SOLO_REMOTE_REPO   this repo's checkout on the node, for deploy / sync-check  (required by those)
 #   SOLO_TRAIN_CWD     where `train` starts Claude Code on the node               (default: SOLO_REMOTE_HOME)
 #   SOLO_WIKI          local folder holding voice.md + people/, for pull / push    (required by those)
@@ -51,8 +52,11 @@ TRAIN_CWD="${SOLO_TRAIN_CWD:-$REMOTE_HOME}"
 # Solo owns its interpreter (see install.sh), so prefer its venv and fall back to the node's
 # python3. Resolved on the node inside the call we already make, not with an extra probe round
 # trip: a non-interactive ssh does not get the service's PATH, so it cannot simply be inherited.
-PICK_PY='V="$HOME/.slack-autoreply/venv/bin/python3"; [ -x "$V" ] || V=python3;'
-CTL="$PICK_PY \"\$V\" $REMOTE_HOME/.claude/skills/slack-autoreply/scripts/slackctl.py"
+# The app on the node: the plugin root the daemon runs from. Default is the clone route's
+# ~/.claude/skills/solo; a node still on the pre-plugin layout falls back to the old directory.
+# Set SOLO_REMOTE_APP for a marketplace install (~/.claude/plugins/cache/solo/solo/<version>).
+PICK_PY='V="$HOME/.slack-autoreply/venv/bin/python3"; [ -x "$V" ] || V=python3; A="${SOLO_REMOTE_APP:-$HOME/.claude/skills/solo}"; [ -d "$A" ] || A="$HOME/.claude/skills/slack-autoreply";'
+CTL="$PICK_PY \"\$V\" \"\$A\"/scripts/slackctl.py"
 STATE="$REMOTE_HOME/.slack-autoreply"
 LOCAL_STATE="$HOME/.slack-autoreply"
 # Solo's knowledge base (voice + dossiers) lives in the wiki, not the state dir. On the node
@@ -156,7 +160,7 @@ case "${1:-status}" in
     mode="${2:-review}"
     case "$mode" in review|setup|status|run) ;; *) die "solo train [review|setup|run|status]";; esac
     echo "running /slack-autoreply $mode on $NODE (this is interactive — answer in place)"
-    ssh -t "$NODE" "cd $TRAIN_CWD && claude \"/slack-autoreply $mode\""
+    ssh -t "$NODE" "cd $TRAIN_CWD && claude \"/solo:slack-autoreply $mode\""
     ;;
 
   ssh)

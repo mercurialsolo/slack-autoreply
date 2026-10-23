@@ -2,9 +2,9 @@
 
 Your logged-in **Claude Code** replies to your Slack messages **from your own account**, in your voice, with your context — and earns the right to do it unsupervised.
 
-No bot user, no proxy handle, no API key for the replies. A small Python daemon listens to Slack and hands each message to `claude -p "/slack-autoreply handle …"` on your login, with your MCP servers, your folders, your CLAUDE.md. **Jev** (TypeSafe AI's System One model) decides in ~10 ms what each message deserves; Claude Code writes it; the daemon either posts as you or parks it in your self-DM for a ✅. Every correction you make is recorded, and a trust ledger graduates each (route, sender) pair from draft to auto once it has a track record.
+No bot user, no proxy handle, no API key for the replies. A small Python daemon listens to Slack and hands each message to `claude -p "/solo:slack-autoreply handle …"` on your login, with your MCP servers, your folders, your CLAUDE.md. **Jev** (TypeSafe AI's System One model) decides in ~10 ms what each message deserves; Claude Code writes it; the daemon either posts as you or parks it in your self-DM for a ✅. Every correction you make is recorded, and a trust ledger graduates each (route, sender) pair from draft to auto once it has a track record.
 
-**Deploying with a coding agent?** Hand it this folder and say "follow AGENTS.md". It is a phase-by-phase runbook with a verification command for every step.
+**Deploying with a coding agent?** Install the plugin and run `/solo:deploy`, or hand it this folder and say "follow AGENTS.md". It is a phase-by-phase runbook with a verification command for every step.
 
 ![architecture](docs/architecture.svg)
 
@@ -26,9 +26,12 @@ channel (AGENTS.md Phase 9), a team secret store.
 ## What's in the box
 
 ```
-SKILL.md                 the agent's procedure: setup · handle · run · review · simulate · status
+.claude-plugin/          plugin.json + marketplace.json: this repo is the plugin `solo` and its own marketplace
+skills/slack-autoreply/  /solo:slack-autoreply — the writer's procedure: setup · handle · run · review · simulate · status
+skills/deploy/           /solo:deploy — install and configure by following AGENTS.md, phase by phase
+skills/solo/             /solo:solo — how any other coding agent reports through Solo (also installed for Codex)
 AGENTS.md                deployment runbook for a coding agent (phases, verifications, failure table)
-install.sh               copies the skill to ~/.claude/skills, installs deps, creates ~/.slack-autoreply
+install.sh               installs the plugin (in place from a marketplace install; to ~/.claude/skills/solo from a clone), deps, ~/.slack-autoreply
 Makefile                 install · doctor · test · setup · listen · service · status · logs
 manifest.yaml            Slack app definition (user scopes only, Socket Mode, user events)
 .env.example             every setting, commented
@@ -55,11 +58,19 @@ Each step ends with how you know it worked.
 **1. Preconditions.** Python 3.10+, Claude Code on `PATH`, logged in once (`claude` → `/login`). Run on the machine where your projects and `claude mcp list` servers live.
 `claude --version` prints a version.
 
-**2. Install.**
+**2. Install.** Solo is a Claude Code plugin. From the marketplace, inside Claude Code:
+```
+/plugin install solo --marketplace mercurialsolo/slack-autoreply
+/solo:deploy
+```
+`/solo:deploy` runs the installer and then walks you through the rest of these steps from
+`AGENTS.md`, verifying each. Or from a clone, which installs the same plugin under
+`~/.claude/skills/solo`:
 ```
 ./install.sh && python3 tests/test_offline.py
 ```
-Last line: `379 checks passed`.
+Last line: `379 checks passed`. Either way the daemon runs from the plugin's own directory, so
+after `claude plugin update solo` run `/solo:deploy` again to re-point the service.
 
 **3. Slack app.** api.slack.com/apps → *Create New App* → *From a manifest* → paste `manifest.yaml`. Then:
 *Basic Information → App-Level Tokens → Generate* with `connections:write` → `xapp-…`.
@@ -74,7 +85,7 @@ All `[ok]`/`[warn]`, ending `all good — start with: slackctl listen`.
 
 **5. Train the voice** (you need to be there, ~15 min).
 ```
-claude "/slack-autoreply setup"
+claude "/solo:slack-autoreply setup"
 ```
 It pulls your last 200 messages with what each replied to, studies them, writes `VOICE.md` quoting your own lines, asks you three things examples can't show (who to be careful with, what never to commit to on autopilot, what's fine on autopilot), seeds dossiers for your top counterparts, and dry-runs three messages so you hear it before it goes live.
 `make doctor` now shows `N voice samples` and `VOICE.md filled in`.
@@ -85,7 +96,7 @@ make listen        # watch one real DM go draft → ✅ → sent as you, then Ct
 make service       # launchd (macOS) / systemd --user (Linux); make logs to follow
 ```
 
-**7. Use it.** Drafts land in your Slack self-DM: ✅ sends as-is, ❌ drops, or just reply to the person yourself and it learns the difference. Weekly, `claude "/slack-autoreply review"`.
+**7. Use it.** Drafts land in your Slack self-DM: ✅ sends as-is, ❌ drops, or just reply to the person yourself and it learns the difference. Weekly, `claude "/solo:slack-autoreply review"`.
 
 ## How a message flows
 
@@ -93,7 +104,7 @@ make service       # launchd (macOS) / systemd --user (Linux); make logs to foll
 2. **Guards**: bots, allow/block lists, mentions-only in channels, quiet hours, presence, per-conversation rate cap. Your own messages go to the learning path instead.
 3. **Jev triage** with the thread, the sender's dossier and your VOICE.md in its state: route, sensitivity 1–5, urgency 1–5, needs-your-files, asks-for-material. Policy on top: sensitivity ≥ 4 forces `escalate`; low confidence demotes `reply`→`hold`, `ignore`→`ack`. `ignore` stops here. No TypeSafe key → Claude Haiku (needs `ANTHROPIC_API_KEY`) → otherwise Claude Code decides the route itself.
 4. **Inbox item** written; **wait 20–90 s** (minimum if urgent); stand down if you replied or they kept typing.
-5. **Spawn Claude Code**: `claude -p "/slack-autoreply handle <item>" --permission-mode dontAsk --allowedTools … --max-turns 25`, one session per conversation (`--session-id`, then `--resume`), `ANTHROPIC_API_KEY` hidden so it bills your login.
+5. **Spawn Claude Code**: `claude -p "/solo:slack-autoreply handle <item>" --permission-mode dontAsk --allowedTools … --max-turns 25`, one session per conversation (`--session-id`, then `--resume`), `ANTHROPIC_API_KEY` hidden so it bills your login.
 6. **Claude** runs `slackctl show` (thread, triage, policy preview, dossiers, track record, 40 real messages), looks back if the message refers to something not in view (`history`, `search`, `about`), reads your folders / MCP servers if the answer needs something real, writes the text, notes anything durable it learned, and calls `slackctl act` — which only records the decision.
 7. **Policy** (the daemon, not Claude): `MODE` × trust ledger × share gate (did Claude actually read your files, and is this sender trusted for that?) → post as you, or draft to your self-DM. `escalate` never auto-sends; `ack` is a 👀 reaction; `hold` commits to a real deadline and is tracked with a reminder.
 8. **Learn**: ✅ / ❌ / you replied instead / you edited / you deleted / you answered something it ignored → `outcomes.jsonl` + before/after pairs → trust ledger (feeds step 7) and `review` (feeds VOICE.md and dossiers, which feed step 6 and step 3).
@@ -121,10 +132,10 @@ The **share gate** watches which tools Claude actually called, not what it claim
 
 | In Claude Code | |
 |---|---|
-| `/slack-autoreply status` | queue, drafts waiting, open promises, scorecard, misconfiguration |
-| `/slack-autoreply run` | drain the inbox (for `DISPATCH=none`, or after a failure); `/loop 2m /slack-autoreply run` keeps it in front of you |
-| `/slack-autoreply review` | 14 days of outcomes + correction pairs → VOICE.md edits, dossier consolidation, who's earned auto |
-| `/slack-autoreply simulate "…" --from Name` | dry run; nothing is sent |
+| `/solo:slack-autoreply status` | queue, drafts waiting, open promises, scorecard, misconfiguration |
+| `/solo:slack-autoreply run` | drain the inbox (for `DISPATCH=none`, or after a failure); `/loop 2m /solo:slack-autoreply run` keeps it in front of you |
+| `/solo:slack-autoreply review` | 14 days of outcomes + correction pairs → VOICE.md edits, dossier consolidation, who's earned auto |
+| `/solo:slack-autoreply simulate "…" --from Name` | dry run; nothing is sent |
 
 | CLI (`python3 ~/.claude/skills/slack-autoreply/scripts/slackctl.py …`) | |
 |---|---|

@@ -1,0 +1,14 @@
+{
+  "name": "solo",
+  "owner": {
+    "name": "Barada Sahu"
+  },
+  "description": "Solo: Claude Code answering your Slack as you, from your own account, in your voice.",
+  "plugins": [
+    {
+      "name": "solo",
+      "source": "./",
+      "description": "Solo: Claude Code answers your Slack from your own account, in your voice, gated by your approval until it has earned auto. Install, then run /solo:deploy."
+    }
+  ]
+}

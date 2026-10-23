@@ -3,7 +3,7 @@ name: slack-autoreply
 description: Reply to the user's Slack messages from their own account, in their voice, with their context. Modes — setup (pull voice from Slack, write VOICE.md), handle <item> (compose one reply; what the daemon calls), run (drain the inbox), review (learn from corrections, update VOICE.md), simulate <text> (dry run), status.
 argument-hint: setup | handle <item> | run | review | simulate "<text>" [--from Name] | status
 disable-model-invocation: true
-allowed-tools: Bash(python3 ${CLAUDE_SKILL_DIR}/scripts/slackctl.py:*), Read, Grep, Glob, WebFetch, WebSearch, Edit(~/.slack-autoreply/**)
+allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/slackctl.py:*), Read, Grep, Glob, WebFetch, WebSearch, Edit(~/.slack-autoreply/**)
 ---
 
 # slack-autoreply
@@ -13,7 +13,7 @@ You are writing Slack messages **as the user**, posted **from their account**. N
 `slackctl` (below) is the only way to touch Slack. It never writes a word; you do. It applies policy to what you decide: whether a reply goes straight out or waits for the user's ✅ is **its** call, based on mode and earned trust — not yours.
 
 ```
-SLACKCTL="python3 ${CLAUDE_SKILL_DIR}/scripts/slackctl.py"
+SLACKCTL="python3 ${CLAUDE_PLUGIN_ROOT}/scripts/slackctl.py"
 ```
 
 **Run it as a plain command, never prefixed.** `$SLACKCTL …` is allowlisted by that exact prefix,
@@ -78,7 +78,7 @@ Mode: **$0**. Argument: **$1**. If no mode was given, treat it as `status`.
 
 If `show` says triage is unavailable, decide the route yourself with the same definitions, and for a hold run `$SLACKCTL deadline --urgency N` (1 whenever … 5 right now) to get the phrase.
 
-## `run` — drain the inbox (interactive, or `/loop 2m /slack-autoreply run`)
+## `run` — drain the inbox (interactive, or `/loop 2m /solo:slack-autoreply run`)
 
 `$SLACKCTL inbox`. For each queued item, do the `handle` procedure above. Then `$SLACKCTL drafts` and `$SLACKCTL followups` and tell the user in two lines what's waiting on them. If the inbox is empty, say so in one line.
 
@@ -89,7 +89,7 @@ If `show` says triage is unavailable, decide the route yourself with the same de
 3. Draft VOICE.md from what you observed — concrete, in their words, with quotes from their own messages as evidence. Keep the template's sections. Then ask the user, in one message, the three things examples can't show: people to be careful with, things never to commit to on autopilot, things fine to answer on autopilot. Fold the answers in with `Edit` on `~/.slack-autoreply/VOICE.md`. Show them the result.
 4. Seed memory for the people they talk to most: from the examples, pick the 5 most frequent counterparts and the busiest channels; for each run `$SLACKCTL about <user>` (or `history #channel --limit 80`), then write 3–6 lines to the dossier with `$SLACKCTL note <user> "…"`: who they are, what the user works on with them, how the user talks to them, what recurring terms mean. Facts from the messages only.
 5. Dry-run three messages they'd actually get: `$SLACKCTL simulate "…" --from Name` then `handle` each (simulated items never send). Show the user the triage line and your reply for each and adjust VOICE.md once more if something rings false.
-6. Tell them how to start: the daemon (`listen`) in `MODE=learn`, where every reply/hold waits for their ✅ until a (route, sender) pair has earned auto; and that `/slack-autoreply review` is how it learns from what they change.
+6. Tell them how to start: the daemon (`listen`) in `MODE=learn`, where every reply/hold waits for their ✅ until a (route, sender) pair has earned auto; and that `/solo:slack-autoreply review` is how it learns from what they change.
 
 ## `ask` — another agent wants to know what is in Slack
 

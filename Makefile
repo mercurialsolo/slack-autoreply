@@ -1,10 +1,10 @@
 PY ?= python3
-SKILL := $(HOME)/.claude/skills/slack-autoreply
+SKILL := $(HOME)/.claude/skills/solo
 CTL := $(PY) $(SKILL)/scripts/slackctl.py
 
 .PHONY: install doctor test setup listen service service-status service-remove status review-data logs
 
-install:        ## copy skill to ~/.claude/skills, create ~/.slack-autoreply, install deps
+install:        ## install the plugin to ~/.claude/skills/solo, create ~/.slack-autoreply, install deps
 	./install.sh
 
 doctor:         ## preflight: tokens, scopes, claude login, skill, context dirs, Jev
@@ -14,7 +14,7 @@ test:           ## offline test suite (fake Slack, fake claude) — no tokens ne
 	$(PY) tests/test_offline.py
 
 setup:          ## interactive voice training in Claude Code
-	cd $(HOME) && claude "/slack-autoreply setup"
+	cd $(HOME) && claude "/solo:slack-autoreply setup"
 
 listen:         ## run the daemon in the foreground
 	$(CTL) listen
