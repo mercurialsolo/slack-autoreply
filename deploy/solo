@@ -171,6 +171,28 @@ case "${1:-status}" in
     sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
     ;;
 
+  say)
+    # `say --file` names a file the DAEMON must read at ✅ time, and the daemon is on the node.
+    # A path that exists here is copied into the node's outbox and the argument rewritten; a path
+    # that does not exist here is passed through untouched, for agents already on the node.
+    args=(); copy_next=0
+    for a in "$@"; do
+      if [ "$copy_next" = 1 ]; then
+        copy_next=0
+        if [ -f "$a" ]; then
+          on_node "mkdir -p $STATE/outbox"
+          scp -q "$a" "$NODE:$STATE/outbox/" || { echo "could not copy $a to $NODE" >&2; exit 1; }
+          a="$STATE/outbox/$(basename "$a")"
+          echo "→ copied to $NODE:$a" >&2
+        fi
+      elif [ "$a" = "--file" ]; then
+        copy_next=1
+      fi
+      args+=("$a")
+    done
+    on_node "$CTL $(printf '%q ' "${args[@]}")"
+    ;;
+
   *)
     # Everything else is a slackctl subcommand, run against the node's state.
     on_node "$CTL $(printf '%q ' "$@")"

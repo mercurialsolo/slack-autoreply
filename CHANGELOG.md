@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.0 — 2026-10-23
+
+**Files go out with a draft**
+- `slackctl say … --file <path>` (repeatable) attaches a video, document or image to what an agent
+  asks Solo to say. The draft in the console names the file and its size; ✅ uploads it with the
+  message in one `files.upload` call, so a failed upload sends nothing rather than words without
+  the file. The writer sees an `attached:` line in `show` and writes the words to go with it; it
+  cannot attach, drop or read files itself. A draft that carries a file never auto-sends.
+- `solo say --file` copies a local file into the node's `~/.slack-autoreply/outbox/` first, since
+  the daemon on the node is what uploads it. Paths under dot-directories are refused, and the
+  file must still exist when the owner approves — a missing file or a failed upload leaves the
+  draft pending with the reason in the console.
+- Needs the `files:write` user scope: added to `manifest.yaml`; `doctor` warns (not fails) when an
+  existing app lacks it. Add the scope under OAuth & Permissions and reinstall the app.
+
 ## 1.1.0 — 2026-10-23
 
 Packaged for other people's workspaces. Everything below shipped between 1.0.0 and this tag.

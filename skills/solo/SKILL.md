@@ -34,6 +34,23 @@ That id is the message that caused your work, and it sends your answer back to t
 that asked it. Without it Solo has to infer a room from your words, and a question asked in a DM
 gets answered somewhere else. You still do not choose the room — the id does.
 
+## Sending a file
+
+A recording, a PDF, a screenshot: pass it with `--file` and it goes out **with** the message when
+the owner reacts ✅. Say what the file shows in the intent, so Solo can write the words around it.
+
+```
+solo say "the walkthrough of the new onboarding flow, 4 min" --file ~/Movies/onboarding.mp4 --from builder
+```
+
+- The file is uploaded at ✅ time, not now. **Leave it where it is** until the owner has approved
+  — a moved or deleted file turns the draft into a "not sent" in the owner's console.
+- It has to be on the machine the daemon runs on. `solo say` from another machine copies it there
+  for you; `slackctl say` does not.
+- `--file` is repeatable. Paths under dot-directories (`~/.ssh`, `~/.aws`, `.env`) are refused.
+- Solo never attaches a file on its own and cannot inspect the one you give it: you are vouching
+  for what is in it. Nothing confidential, nothing with a credential in frame.
+
 ## Asking what is in Slack
 
 The other half: you can ask, in plain language, and get prose back.

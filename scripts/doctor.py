@@ -105,7 +105,9 @@ def check_slack(r: Report):
             r.add(FAIL, f"missing user scopes: {', '.join(sorted(missing))}", "re-create the app from manifest.yaml (or add them under OAuth & Permissions) and reinstall")
         elif scopes:
             r.add(OK, "all required user scopes granted")
-        else:
+        if scopes and "files:write" not in scopes:
+            r.add(WARN, "files:write user scope not granted", "`say --file` cannot upload until you add it under OAuth & Permissions and reinstall the app (manifest.yaml has it)")
+        if not scopes:
             r.add(WARN, "could not list scopes", "if `listen` logs missing_scope, reinstall the app from manifest.yaml")
         return c, who
     except Exception as e:

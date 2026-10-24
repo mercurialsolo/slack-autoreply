@@ -214,7 +214,13 @@ it, so a workspace never ends up with one name and five registers:
 ```
 slackctl say @sri "the overnight warmup finished, 4 accounts active, 2 still pending" --from scout
 solo say '#acme-homes' "flag that Thursday's E2E run is clean" --from validator --why "gate for go-live"
+solo say "the walkthrough of the new onboarding flow, 4 min" --file ~/Movies/onboarding.mp4 --from builder
 ```
+
+`--file` attaches a video, document or image: the owner sees its name and size on the draft, and ✅
+uploads it with the message in one call (the user token needs the `files:write` scope, which
+`manifest.yaml` grants; `doctor` warns when it is missing). `solo say` copies a local file to the
+node first. The file has to stay put until the owner has approved.
 
 The agent supplies the **intent**, never finished prose — Solo reads the recipient's dossier and the
 voice guide and writes it, then `compose` (SKILL.md) puts it through the same rules as any reply.

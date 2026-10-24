@@ -140,6 +140,52 @@ def looks_like_channel_id(s: str) -> bool:
     return bool(re.fullmatch(r"[CDG][A-Z0-9]{6,}", s))
 
 
+MAX_ATTACHMENT = 1 << 30   # Slack's per-file ceiling; the SDK also holds the whole file in memory
+
+
+def human_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}".replace(".0 ", " ")
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+def attach_files(paths: list[str]) -> list[dict]:
+    """Turn `say --file` arguments into what the item carries: absolute path, name, size.
+
+    Absolute, because the daemon that sends on ✅ runs with its cwd in the state dir, not where
+    the agent stood. Checked now, because the agent is the one who can fix a bad path — at ✅
+    time there is only the owner and a draft that cannot go.
+
+    Dot-prefixed paths are refused outright: `~/.ssh`, `~/.aws`, `.env`, `~/.claude`. An agent
+    has no business handing Solo anything from there, and ✅ should not be the last line of
+    defence against it. The one exception is Solo's own outbox, where `solo say` from another
+    machine drops a copy.
+    """
+    out: list[dict] = []
+    outbox = (config.STATE_DIR / "outbox").resolve()
+    for raw in paths:
+        path = Path(raw).expanduser().resolve()
+        if not path.is_file():
+            sys.exit(f"--file {raw}: no such file (it must be on this machine, where the daemon sends from)")
+        hidden = [part for part in path.parts if part.startswith(".")]
+        if hidden and not path.is_relative_to(outbox):
+            sys.exit(f"--file {raw}: refusing a path under a dot-directory ({hidden[0]}) — copy it somewhere plain first")
+        size = path.stat().st_size
+        if size == 0:
+            sys.exit(f"--file {raw}: the file is empty")
+        if size > MAX_ATTACHMENT:
+            sys.exit(f"--file {raw}: {human_size(size)} is over Slack's 1 GB limit")
+        out.append({"path": str(path), "name": path.name, "size": size})
+    return out
+
+
+def describe_files(files: list[dict]) -> str:
+    """The console line for an attachment: the owner has to see what ✅ will send."""
+    return "📎 " + ", ".join(f"{f['name']} ({human_size(f['size'])})" for f in files)
+
+
 def item_path(item_id: str) -> Path:
     return config.INBOX_DIR / f"{item_id}.json"
 
@@ -834,6 +880,27 @@ class Slack:
             first = first or ts
         return first
 
+    def post_files(self, channel: str, text: str, files: list[dict], thread_ts: str | None = None) -> tuple[str, list[str]]:
+        """Send a message that carries files — one call, so a failed upload sends nothing.
+
+        The text rides along as the upload's comment. `⏎` becomes a line break here rather than a
+        second message: two calls would let a scope or size error post the words and lose the
+        video, which is the one outcome worse than sending neither.
+        Returns (ts of the share, or "" if Slack did not report one, file ids).
+        """
+        text = restore_mentions(text, self.mention_id).replace(BEAT, "\n").strip()
+        res = self.client.files_upload_v2(
+            file_uploads=[{"file": f["path"], "filename": f["name"], "title": f["name"]} for f in files],
+            channel=channel, initial_comment=text or None, thread_ts=thread_ts)
+        got = res.get("files") or []
+        ts = ""
+        for f in got:
+            for kind in ("public", "private"):
+                for ch, shares in ((f.get("shares") or {}).get(kind) or {}).items():
+                    if ch == channel and shares and not ts:
+                        ts = shares[0].get("ts") or ""
+        return ts, [f.get("id", "") for f in got]
+
     def react(self, channel: str, ts: str, emoji: str) -> None:
         self.client.reactions_add(channel=channel, timestamp=ts, name=emoji)
 
@@ -976,8 +1043,11 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
     out = [f"=== inbox item {item['id']}{'  (SIMULATED — nothing will be sent)' if item.get('simulated') else ''} ===",
            f"from: {item['sender_name']} (@{item.get('sender_handle', '?')}) · {describe_where(item)}"
            f"{' · in a thread' if item.get('thread_ts') else ''} · {item.get('created', '')}",
-           f"message: {item['text']}",
-           "", "--- recent conversation ---", item.get("context") or "(none)", ""]
+           f"message: {item['text']}"]
+    if item.get("files"):
+        out.append(f"attached: {describe_files(item['files'])} — goes out with your text on the owner's ✅. "
+                   "Write the words that go with it; you cannot add, drop or inspect the file.")
+    out += ["", "--- recent conversation ---", item.get("context") or "(none)", ""]
     # Not under seal: during a rehearsal an agent report is future information the writer would
     # not have had when the real reply was written.
     reports = [] if item.get("sealed") else channel_reports(item)
@@ -1126,7 +1196,8 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
                    if decision.get("task") else "")
                 + f"\n{quote(item['text'][:400])}" + (f"\n{item['permalink']}" if item.get("permalink") else ""))
         if text:
-            draft_ts = slack.notify(f"{note}\n*Draft* — react ✅ to send as-is, ❌ to drop\n{quote(text)}")
+            att = f"\n{describe_files(item['files'])}" if item.get("files") else ""
+            draft_ts = slack.notify(f"{note}\n*Draft* — react ✅ to send as-is, ❌ to drop{att}\n{quote(text)}")
             item["outcome"] = {"status": "escalated_draft", "draft_ts": draft_ts}
             state.update(lambda d: d["pending"].__setitem__(draft_ts, item["id"]))
         else:
@@ -1148,6 +1219,10 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
         # The ledger graduates routes a PERSON earned by replying well to them. An agent asking
         # Solo to speak has no such history and cannot accrue one, so it never auto-sends.
         mode, why, gate = "draft", f"requested by {item['origin']} — always yours to approve", False
+    if item.get("files"):
+        # Belt and braces: only `say` can attach a file today, and `say` is always agent-origin.
+        # If that ever changes, a file still never leaves without a human looking at its name.
+        mode, why, gate = "draft", f"carries a file — always yours to approve", False
     item["policy"] = {"effective": "draft" if gate else mode, "reason": ("share gate: " + why) if gate else why, "used_context": used_context}
     fu = None
     if action == "hold":
@@ -1174,6 +1249,8 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
     # "this draft needs a time from you" wrote into a field the owner never saw.
     if decision.get("note"):
         note += f"\n{decision['note']}"
+    if item.get("files"):
+        note += f"\n{describe_files(item['files'])}"
     draft_ts = slack.notify(f"{note}\n{quote(text)}")
     item["outcome"] = {"status": "drafted", "draft_ts": draft_ts, "at": now_iso()}
     save_item(item)
@@ -1191,17 +1268,44 @@ def approve_draft(slack: Slack, item: dict, ledger: Ledger, followups: Followups
         state.update(lambda s: s["pending"].pop(draft_ts, None))
         slack.console_update(draft_ts, f"🧪 Simulated — nothing sent\n{quote(d.get('text', ''))}")
         return f"[simulated] approval ignored for {item['id']} — nothing sent"
-    ts = slack.post(item["channel"], d["text"], item.get("reply_thread_ts"))
+    files = item.get("files") or []
+    file_ids: list[str] = []
+    if files:
+        # The draft stays pending on any failure, so the owner can fix the cause and ✅ again.
+        gone = [f for f in files if not Path(f["path"]).is_file()]
+        if gone:
+            slack.console_update(draft_ts, f"⚠️ *Not sent* — {', '.join(f['name'] for f in gone)} is no longer at "
+                                 f"{', '.join(f['path'] for f in gone)}\n{quote(d['text'])}\n_put it back and react ✅ again, or ❌ to drop_")
+            return f"not sent to {item['sender_name']}: attachment missing"
+        try:
+            ts, file_ids = slack.post_files(item["channel"], d["text"], files, item.get("reply_thread_ts"))
+        except Exception as e:  # noqa: BLE001 - the owner needs the reason, whatever it is
+            # SlackApiError puts the useful part ("error": "missing_scope") on its second line.
+            full = str(e)
+            why = (getattr(getattr(e, "response", None), "data", None) or {}).get("error") if hasattr(e, "response") else None
+            why = why or " ".join(full.split())[:200]
+            hint = ("add the `files:write` user scope under OAuth & Permissions, reinstall the app, and re-run doctor"
+                    if "missing_scope" in full else "fix the cause and react ✅ again, or ❌ to drop")
+            log.warning("upload for %s failed: %s", item["id"], why)
+            slack.console_update(draft_ts, f"⚠️ *Not sent* — the upload failed: {why}\n_{hint}_\n{quote(d['text'])}")
+            return f"not sent to {item['sender_name']}: upload failed ({why})"
+    else:
+        ts = slack.post(item["channel"], d["text"], item.get("reply_thread_ts"))
     if item.get("followup"):
         fu = dict(item["followup"])
         fu["due"] = datetime.fromisoformat(fu["due"])
         followups.add(**fu)
     item["outcome"] = {**item.get("outcome", {}), "status": "sent_from_draft", "ts": ts, "approved": now_iso()}
+    if file_ids:
+        item["outcome"]["files"] = file_ids
     save_item(item)
-    state.update(lambda d_: (d_["pending"].pop(draft_ts, None), d_["sent"].__setitem__(ts, {"item": item["id"], "channel": item["channel"], "at": now_iso(), "text": d["text"]})))
+    sent_row = {"item": item["id"], "channel": item["channel"], "at": now_iso(), "text": d["text"]}
+    # A share without a reported ts cannot be watched for the owner's edits; it is still sent.
+    state.update(lambda d_: (d_["pending"].pop(draft_ts, None), d_["sent"].__setitem__(ts, sent_row) if ts else None))
     ledger.record(item=item, outcome="approved")
     try:
-        slack.console_update(draft_ts, f"✅ Sent to {item['sender_name']}\n{quote(d['text'])}")
+        att = f"\n{describe_files(files)}" if files else ""
+        slack.console_update(draft_ts, f"✅ Sent to {item['sender_name']}{att}\n{quote(d['text'])}")
     except Exception:
         pass
     audit(item=item["id"], counterpart=item["sender_name"], status="sent_from_draft", reply=d["text"])
@@ -2780,6 +2884,8 @@ def cmd_say(a):
     re_item = getattr(a, "re_item", None)
     if re_item and a.target:
         sys.exit("pass --re or --to, not both — --re already knows where the answer belongs")
+    # Checked before Slack is touched: a bad path is the agent's to fix, and it is standing here.
+    files = attach_files(getattr(a, "files", None) or [])
     s = Slack()
     tgt, src = None, None
     if re_item:
@@ -2843,6 +2949,8 @@ def cmd_say(a):
             "permalink": None,
             "context": f"(nothing — this is outbound; {a.from_} asked for it"
                        + (f" because: {a.why}" if a.why else "") + ")"}
+    if files:
+        item["files"] = files
     if tgt:
         item.update(tgt)
         item["re"] = re_item
@@ -2851,7 +2959,7 @@ def cmd_say(a):
                            f"{(src.get('text') or '')[:300]}"
                            + (f"; {a.why}" if a.why else "") + ")")
     save_item(item)
-    print(f"queued {item['id']} → {name} (asked by {a.from_})")
+    print(f"queued {item['id']} → {name} (asked by {a.from_})" + (f" with {describe_files(files)}" if files else ""))
     if CFG["dispatch"] != "claude":
         print(f"compose it with: claude -p '/solo:slack-autoreply compose {item_path(item['id'])}'")
         return
@@ -3501,6 +3609,10 @@ def main():
     p.add_argument("--from", dest="from_", required=True, help="which agent is asking, e.g. scout")
     p.add_argument("--why", help="context for the owner, shown on the draft")
     p.add_argument("--thread-ts", dest="thread_ts", help="reply inside this thread")
+    p.add_argument("--file", dest="files", action="append", metavar="PATH",
+                   help="attach this file (a video, a PDF, a screenshot); repeatable. It is uploaded with the "
+                        "message when the owner reacts ✅, so it must still be at this path then. Paths under "
+                        "dot-directories are refused")
     p.add_argument("--re", dest="re_item", metavar="ITEM-ID",
                    help="you are answering a request the owner dispatched to you; the brief carries "
                         "the id. Sends the report back to the conversation that asked, instead of "

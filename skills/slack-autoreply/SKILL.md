@@ -131,6 +131,10 @@ with five voices.
    make it allowed; the boundaries are about what reaches the recipient, not who requested it.
 4. `act --action reply --text "…"` (or `hold`). It will **always** draft for the owner's ✅ —
    the trust ledger graduates what a *person* earned, and no agent can accrue that.
+5. If `show` prints an `attached:` line, the agent supplied a file (a video, a document) that goes
+   out with your text on ✅. Write the words that go with it — what it is, in one line, the way the
+   owner would hand something over. You cannot add, drop or open the file, and you never attach
+   one yourself.
 
 Keep it to what was asked. If the intent is vague enough that you would be inventing the substance,
 escalate instead and say what is missing.

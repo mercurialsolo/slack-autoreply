@@ -80,6 +80,13 @@ class FakeClient:
     def conversations_replies(self, channel, ts, **k): return {"messages": getattr(self, "replies", {}).get(ts, []), "response_metadata": {}}
     def chat_postMessage(self, channel, text, thread_ts=None):
         self.counter += 1; ts = f"{2000000000 + self.counter}.000000"; self.posted.append((channel, text, thread_ts, ts)); return {"ts": ts}
+    def files_upload_v2(self, **k):
+        if getattr(self, "upload_error", None):
+            raise RuntimeError(self.upload_error)
+        self.counter += 1; ts = f"{2000000000 + self.counter}.000000"
+        self.uploads = getattr(self, "uploads", []); self.uploads.append(dict(k, ts=ts))
+        return {"files": [{"id": f"F{self.counter}", "name": f["filename"],
+                           "shares": {"public": {k["channel"]: [{"ts": ts}]}}} for f in k["file_uploads"]]}
     def reactions_add(self, channel, timestamp, name): self.reactions.append((channel, timestamp, name)); return {}
     def chat_update(self, channel, ts, text): self.updates.append((channel, ts, text)); return {}
     def search_messages(self, query, **k):
@@ -1097,7 +1104,7 @@ check("the owner is told the agent only reads", "read-only" in _shown)
 # question asked in a DM gets answered in a room. `--re` carries the request's id both ways.
 def _say_args(intent, **kw):
     return SimpleNamespace(intent=intent, target=kw.get("to"), from_=kw.get("frm", "scout"),
-                           why=kw.get("why"), thread_ts=None, re_item=kw.get("re"))
+                           why=kw.get("why"), thread_ts=None, re_item=kw.get("re"), files=kw.get("files"))
 
 
 def _refusal(**kw):
@@ -1323,6 +1330,67 @@ _unreachable = sorted(o for o in _act_opts if o not in _ACT_NOT_THE_WRITERS and 
 check("the act options are discoverable at all", len(_act_opts) >= 8, f"parsed: {sorted(_act_opts)}")
 check("every act option the writer may use is named in the skill it follows",
       not _unreachable, f"reachable only from --help: {_unreachable}")
+
+# A file goes out WITH the words, on the owner's ✅, and never without a human seeing its name.
+# "solo say can only send text" was the reason an agent proposed a Drive link for a video.
+_clip = TMP / "outbox-test" / "clip.mp4"; _clip.parent.mkdir(exist_ok=True); _clip.write_bytes(b"\x00" * 2048)
+check("a file that is not there is refused at say time, not at ✅",
+      "no such file" in _refusal(to="@priya", files=[str(TMP / "nope.mp4")]))
+_dot = TMP / ".secrets" / "k.pem"; _dot.parent.mkdir(exist_ok=True); _dot.write_text("x")
+check("a path under a dot-directory is refused", "dot-directory" in _refusal(to="@priya", files=[str(_dot)]))
+_empty = TMP / "outbox-test" / "empty.bin"; _empty.write_bytes(b"")
+check("an empty file is refused", "empty" in _refusal(to="@priya", files=[str(_empty)]))
+# `cmd_say` opens its own Slack; route it through the daemon's fake so the console is observable.
+_RealSlack = S.Slack; S.Slack = lambda: d
+_n_posted = len(fc.posted)
+S.cmd_say(_say_args("the 4 minute walkthrough of the onboarding flow", to="@priya", frm="builder",
+                    files=[str(TMP / "outbox-test" / ".." / "outbox-test" / "clip.mp4")]))
+_fi = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.json"), key=lambda q: q.stat().st_mtime)][-1]
+check("the item carries the file as an absolute, resolved path",
+      _fi.get("files") and _fi["files"][0]["path"] == str(_clip.resolve()) and _fi["files"][0]["size"] == 2048)
+check("the writer is shown the attachment and told it goes out with the text",
+      "attached: 📎 clip.mp4 (2 KB)" in S.render_item(_fi, d.ledger, set()))
+_con = d.bot if d.bot else fc
+_fd = [q for q in _con.posted if q[3] == _fi["outcome"]["draft_ts"]]
+check("the draft in the console names the file and its size, so ✅ is informed",
+      _fd and "📎 clip.mp4 (2 KB)" in _fd[-1][1] and _fi["outcome"]["status"] == "drafted")
+check("nothing reached the recipient yet", not [q for q in fc.posted[_n_posted:] if q[0] == D])
+_fts = _fi["outcome"]["draft_ts"]
+_n_posted = len(fc.posted); fc.uploads = []
+_said = S.approve_draft(d, _fi, d.ledger, d.followups, d.state, _fts)
+check("✅ uploads the file to the recipient with the text as its comment, in one call",
+      len(fc.uploads) == 1 and fc.uploads[0]["channel"] == D
+      and fc.uploads[0]["initial_comment"] == _fi["decision"]["text"]
+      and fc.uploads[0]["file_uploads"][0]["file"] == str(_clip.resolve()))
+check("and posts no separate text message", not [q for q in fc.posted[_n_posted:] if q[0] == D], _said)
+_fi = S.load_item(_fi["id"])
+check("the outcome records the share and the file id",
+      _fi["outcome"]["status"] == "sent_from_draft" and _fi["outcome"]["files"] == ["F%d" % fc.counter]
+      and _fi["outcome"]["ts"] == fc.uploads[0]["ts"] and _fts not in d.state.read()["pending"])
+check("the console says what went, file included", "📎 clip.mp4" in _con.updates[-1][2] and _con.updates[-1][2].startswith("✅"))
+
+# The two ways ✅ can fail with a file, and in both the draft must survive for a second try.
+S.cmd_say(_say_args("same clip again", to="@priya", frm="builder", files=[str(_clip)]))
+_fi2 = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.json"), key=lambda q: q.stat().st_mtime)][-1]
+_fts2 = _fi2["outcome"]["draft_ts"]
+fc.upload_error = "The request to the Slack API failed. (url: files.getUploadURLExternal)\nThe server responded with: {'ok': False, 'error': 'missing_scope', 'needed': 'files:write'}"
+fc.uploads = []
+_said = S.approve_draft(d, _fi2, d.ledger, d.followups, d.state, _fts2)
+check("a refused upload sends nothing and keeps the draft pending",
+      "not sent" in _said and _fts2 in d.state.read()["pending"] and S.load_item(_fi2["id"])["outcome"]["status"] == "drafted")
+check("and the console says which scope to add", "files:write" in _con.updates[-1][2] and _con.updates[-1][2].startswith("⚠️"))
+fc.upload_error = None
+_clip.rename(_clip.with_name("moved.mp4"))
+_said = S.approve_draft(d, _fi2, d.ledger, d.followups, d.state, _fts2)
+check("a file that moved since say is reported, not silently sent without",
+      "attachment missing" in _said and not fc.uploads and _fts2 in d.state.read()["pending"]
+      and "no longer at" in _con.updates[-1][2])
+_clip.with_name("moved.mp4").rename(_clip)
+_said = S.approve_draft(d, _fi2, d.ledger, d.followups, d.state, _fts2)
+check("put back, a second ✅ sends it", len(fc.uploads) == 1 and _fts2 not in d.state.read()["pending"])
+check("a draft that carries a file is always the owner's to approve, whatever MODE says",
+      S.load_item(_fi2["id"])["policy"]["effective"] == "draft")
+S.Slack = _RealSlack
 
 # Same guard on the other side of the interface. `say` is read by a coding agent following
 # skills/solo/SKILL.md, and an option that exists only in `--help` is an option no agent will ever
