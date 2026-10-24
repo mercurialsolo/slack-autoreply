@@ -95,7 +95,13 @@ def check_slack(r: Report):
         r.add(OK, f"Slack auth: @{who['user']} in {who.get('team')} ({who['user_id']})")
         scopes = set((who.get("response_metadata") or {}).get("scopes") or [])
         if not scopes:
-            # auth.test doesn't always echo scopes; probe with a cheap call per family
+            # auth.test does not echo scopes in its body, but the response HEADER lists them.
+            # Measured on a working install: the body had none, the header had all 15, and the
+            # probe below had been reporting every scope but im:write as missing for weeks.
+            hdr = (getattr(who, "headers", None) or {}).get("x-oauth-scopes") or ""
+            scopes = {x.strip() for x in hdr.split(",") if x.strip()}
+        if not scopes:
+            # no header either; probe with a cheap call per family
             try:
                 c.conversations_open(users=who["user_id"]); scopes |= {"im:write"}
             except Exception:
