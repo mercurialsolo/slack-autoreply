@@ -14,6 +14,8 @@
   draft pending with the reason in the console.
 - Needs the `files:write` user scope: added to `manifest.yaml`; `doctor` warns (not fails) when an
   existing app lacks it. Add the scope under OAuth & Permissions and reinstall the app.
+- `doctor` reads the granted scopes from `auth.test`'s `x-oauth-scopes` header. It used to read a
+  body field Slack leaves empty and then report 13 of 14 scopes missing on a working install.
 
 ## 1.1.0 — 2026-10-23
 

@@ -44,7 +44,8 @@ solo say "the walkthrough of the new onboarding flow, 4 min" --file ~/Movies/onb
 ```
 
 - The file is uploaded at ✅ time, not now. **Leave it where it is** until the owner has approved
-  — a moved or deleted file turns the draft into a "not sent" in the owner's console.
+  — a moved or deleted file turns the draft into a "not sent" in the owner's console, and they
+  have to take their ✅ off and add it again once it is back.
 - It has to be on the machine the daemon runs on. `solo say` from another machine copies it there
   for you; `slackctl say` does not.
 - `--file` is repeatable. Paths under dot-directories (`~/.ssh`, `~/.aws`, `.env`) are refused.

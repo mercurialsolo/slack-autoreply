@@ -1275,7 +1275,7 @@ def approve_draft(slack: Slack, item: dict, ledger: Ledger, followups: Followups
         gone = [f for f in files if not Path(f["path"]).is_file()]
         if gone:
             slack.console_update(draft_ts, f"⚠️ *Not sent* — {', '.join(f['name'] for f in gone)} is no longer at "
-                                 f"{', '.join(f['path'] for f in gone)}\n{quote(d['text'])}\n_put it back and react ✅ again, or ❌ to drop_")
+                                 f"{', '.join(f['path'] for f in gone)}\n{quote(d['text'])}\n_put it back, then take your ✅ off and add it again — or ❌ to drop_")
             return f"not sent to {item['sender_name']}: attachment missing"
         try:
             ts, file_ids = slack.post_files(item["channel"], d["text"], files, item.get("reply_thread_ts"))
@@ -1285,7 +1285,8 @@ def approve_draft(slack: Slack, item: dict, ledger: Ledger, followups: Followups
             why = (getattr(getattr(e, "response", None), "data", None) or {}).get("error") if hasattr(e, "response") else None
             why = why or " ".join(full.split())[:200]
             hint = ("add the `files:write` user scope under OAuth & Permissions, reinstall the app, and re-run doctor"
-                    if "missing_scope" in full else "fix the cause and react ✅ again, or ❌ to drop")
+                    + " — then take your ✅ off and add it again"
+                    if "missing_scope" in full else "fix the cause, then take your ✅ off and add it again — or ❌ to drop")
             log.warning("upload for %s failed: %s", item["id"], why)
             slack.console_update(draft_ts, f"⚠️ *Not sent* — the upload failed: {why}\n_{hint}_\n{quote(d['text'])}")
             return f"not sent to {item['sender_name']}: upload failed ({why})"

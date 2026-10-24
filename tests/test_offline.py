@@ -1338,6 +1338,11 @@ check("a file that is not there is refused at say time, not at ✅",
       "no such file" in _refusal(to="@priya", files=[str(TMP / "nope.mp4")]))
 _dot = TMP / ".secrets" / "k.pem"; _dot.parent.mkdir(exist_ok=True); _dot.write_text("x")
 check("a path under a dot-directory is refused", "dot-directory" in _refusal(to="@priya", files=[str(_dot)]))
+_ob = S.config.STATE_DIR / "outbox" / "from-laptop.mp4"; _ob.parent.mkdir(parents=True, exist_ok=True); _ob.write_bytes(b"\x01" * 10)
+check("Solo's own outbox is the one dot-path that is allowed — it is where `solo say` copies to",
+      S.attach_files([str(_ob)])[0]["path"] == str(_ob.resolve()))
+check("but the state dir's own files are still off limits",
+      "dot-directory" in _refusal(to="@priya", files=[str(S.config.STATE_DIR / "state.json")]) if (S.config.STATE_DIR / "state.json").exists() else True)
 _empty = TMP / "outbox-test" / "empty.bin"; _empty.write_bytes(b"")
 check("an empty file is refused", "empty" in _refusal(to="@priya", files=[str(_empty)]))
 # `cmd_say` opens its own Slack; route it through the daemon's fake so the console is observable.
