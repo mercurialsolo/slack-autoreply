@@ -823,6 +823,21 @@ class Slack:
             msgs = self.client.conversations_history(channel=channel, oldest=since_ts, limit=50)["messages"]
         return [m for m in msgs if float(m.get("ts", 0)) > float(since_ts) and m.get("subtype") in OK_SUBTYPES]
 
+    def previous_speaker(self, channel: str, thread_ts: str | None, ts: str) -> str | None:
+        """Who sent the message just before `ts` in this conversation (thread-aware), or None."""
+        try:
+            if thread_ts:
+                msgs = [m for m in self.client.conversations_replies(channel=channel, ts=thread_ts, limit=200)["messages"]
+                        if float(m.get("ts", 0)) < float(ts)][::-1]
+            else:
+                msgs = self.client.conversations_history(channel=channel, latest=ts, inclusive=False, limit=5)["messages"]
+        except Exception:
+            return None
+        for m in msgs:
+            if m.get("user") and m.get("subtype") in OK_SUBTYPES:
+                return m["user"]
+        return None
+
     def previous_other_message(self, channel: str, ts: str) -> dict | None:
         try:
             msgs = self.client.conversations_history(channel=channel, latest=ts, inclusive=False, limit=3)["messages"]
@@ -1047,6 +1062,10 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
     if item.get("files"):
         out.append(f"attached: {describe_files(item['files'])} — goes out with your text on the owner's ✅. "
                    "Write the words that go with it; you cannot add, drop or inspect the file.")
+    if item.get("answers_you"):
+        out.append("note: the message before this one is the owner's — they are ANSWERING the owner, who is in this "
+                   "conversation and will carry it. An emoji on an answer to your own message is noise: react to "
+                   "nothing, reply to nothing, unless they asked something new.")
     out += ["", "--- recent conversation ---", item.get("context") or "(none)", ""]
     # Not under seal: during a rehearsal an agent report is future information the writer would
     # not have had when the real reply was written.
@@ -1055,7 +1074,9 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
     out += writer_reach()
     if t:
         out += ["--- triage (" + t.get("source", "?") + ") ---",
-                f"route: {t['route']}{' (forced: ' + t['forced'] + ')' if t.get('forced') else ''} · confidence {t['confidence']:.2f} · "
+                f"route: {t['route']}{' (forced: ' + t['forced'] + ')' if t.get('forced') else ''}"
+                f"{' (unsure: ' + t['unsure'] + ' — it reached you only so a real ask could not slip past; silence is still the default, not an emoji)' if t.get('unsure') else ''}"
+                f" · confidence {t['confidence']:.2f} · "
                 f"topic: {t.get('topic', 'other')} · "
                 f"sensitivity {t['sensitivity']:.1f}/5 · urgency {t['urgency']:.1f}/5 · "
                 f"needs your files/accounts {t['needs_context']:.2f} · asks for material {t['asks_for_content']:.2f} · "
@@ -2419,6 +2440,9 @@ class Daemon(Slack):
             "text": clean, "permalink": self.permalink(channel, ev["ts"]),
             "context": self.transcript(channel, thread_ts, 8),
             "mentioned": mentioned,
+            # They are answering something the owner just said. 13 of the 20 reactions Solo ever
+            # left were on exactly this — an emoji on "Yes Barada" under the owner's own "Hey Sri".
+            "answers_you": self.previous_speaker(channel, thread_ts, ev["ts"]) == self.me,
         }
         state = {"owner": self.me_name, "owner_notes": voice.load_notes(), "owner_presence": "active" if self.presence_active() else "away",
                  "local_time": datetime.now().strftime("%A %H:%M"), "channel_type": ctype, "channel_name": item["channel_name"],
@@ -2439,7 +2463,7 @@ class Daemon(Slack):
             item["triage"] = t.__dict__ | {"raw": None}
             save_item(item)
             log.info("mentioned by name — ignore → ack")
-        if item["triage"] and t.route == "ignore":
+        if item["triage"] and t.route == "ignore" and not t.unsure:
             execute_decision(self, item, {"action": "ignore", "text": ""}, self.ledger, self.followups, self.share_trusted, state=self.state)
             return
 

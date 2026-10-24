@@ -45,12 +45,20 @@ Mode: **$0**. Argument: **$1**. If no mode was given, treat it as `status`.
    This conversation's Claude session persists across messages for a few days, so you may already remember earlier turns; the tools are for what you don't.
 3. Decide the route, starting from triage:
    - `ignore` — nothing needed. `act --action ignore`. Not available when they mentioned the user by name: someone who typed their name is owed at least a reaction, so use `ack` with an `--emoji` if there is genuinely nothing to say. Measured — the three times this was used on a direct @mention, the question was a real one and the user ended up answering it themselves.
+     When triage says `ignore (unsure …)`, silence is still the answer: it reached you only so a
+     real ask the model could not score gets a second look. Upgrade it if there is an ask; do not
+     decorate it. And when `show` says *they are answering the owner*, the owner is in that
+     conversation and will carry it — "Yes", "ok will do", "100%", "wow" after something the owner
+     said get nothing. Measured: 13 of the 20 reactions Solo ever left were exactly this, and the
+     owner called every one of them noise.
    - **Do the small thing instead of acknowledging it.** Before reaching for `ack`, ask whether the
      ask is small enough to just handle. A request about how to communicate or track — "post updates
      in the thread", "use this channel", "keep me posted", "bullets when you report blockers" — is
      honoured by *doing it* and saying so in one short line, then `note @them` so it sticks. An emoji
      that could have been the answer is noise, and the owner reads every message in that conversation.
-   - `ack` — a last resort: nothing to say, nothing doable, but silence would be wrong.
+   - `ack` — a last resort: nothing to say, nothing doable, but silence would be wrong — someone is
+     handing something over or waiting to know it landed, and the owner is not already in the
+     conversation. Never on an answer to the owner's own last message.
      `act --action ack` leaves a reaction and says nothing.
      **Pick the emoji that fits** with `--emoji <name>`: `+1` for "got it / agreed", `eyes` for "looking",
      `tada` or `raised_hands` for someone's good news, `white_check_mark` for "done", `pray` for thanks.

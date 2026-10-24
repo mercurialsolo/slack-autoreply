@@ -135,7 +135,9 @@ t = pol.apply(triage.Triage("reply", 0.81, triage._score_1_to_n(triage._lookup(r
 check("jev score normalised", abs(t.sensitivity - 1.4) < 1e-6 and t.route == "reply")
 check("policy: sensitivity forces escalate", pol.apply(triage.Triage("reply", 0.9, 4.2, 1, 0, 0, "t")).route == "escalate")
 check("policy: low confidence reply→hold", pol.apply(triage.Triage("reply", 0.3, 2, 2, 0, 0, "t")).route == "hold")
-check("policy: low confidence ignore→ack", pol.apply(triage.Triage("ignore", 0.3, 2, 2, 0, 0, "t")).route == "ack")
+_unsure = pol.apply(triage.Triage("ignore", 0.3, 2, 2, 0, 0, "t"))
+check("policy: a low-confidence ignore stays an ignore, marked unsure, not rewritten to an emoji",
+      _unsure.route == "ignore" and not _unsure.forced and "low confidence" in (_unsure.unsure or "") and "unsure" in _unsure.summary())
 check("policy: unknown route→hold", pol.apply(triage.Triage("bogus", 0.9, 2, 2, 0, 0, "t")).route == "hold")
 check("triage asks Jev for topic + answerability",
       {"topic", "can_answer_now"} <= set(triage.questions("me")))
@@ -422,6 +424,37 @@ iid3b = msg(d, U, D, "1700000004.500", "did the warmup accounts finish?")
 S.execute_decision(d, S.load_item(iid3b), {"action": "ignore", "text": ""}, d.ledger, d.followups, set(), state=d.state)
 msg(d, "UME", D, "1700000005.500", "checking now")
 check("but answering an ignored question is", d.ledger.rows[-1]["outcome"] == "missed")
+
+# An unsure ignore reaches the writer as an ignore; an answer to the owner's own message is flagged.
+def _with_triage(tri, fn):
+    real = d.triager.run
+    d.triager.run = lambda state: tri
+    try:
+        return fn()
+    finally:
+        d.triager.run = real
+
+_uns = triage.Triage(route="ignore", confidence=0.28, sensitivity=1.2, urgency=2.7, needs_context=0.1,
+                     asks_for_content=0.1, source="jev:test", topic="social", can_answer=0.6, unsure="low confidence 0.28")
+_h0 = len(d.client.history.setdefault(D2, []))
+d.client.history[D2].append({"user": "UME", "ts": "1700000008.800", "text": "Hey Ana"})
+_ans = _with_triage(_uns, lambda: (d.on_inbound({"user": U2, "channel": D2, "channel_type": "im", "text": "Yes Barada", "ts": "1700000008.900"}),
+                                   S.load_item(f"{D2}-1700000008_900"))[1])
+check("an unsure ignore is not silenced by the daemon — the writer gets a look",
+      _ans["status"] != "done" and (_ans.get("outcome") or {}).get("status") != "ignored")
+check("the item knows they are answering the owner's own previous message", _ans.get("answers_you") is True)
+_ans_txt = S.render_item(_ans, d.ledger, set())
+check("the writer is told silence is the default on an unsure ignore", "unsure: low confidence 0.28" in _ans_txt and "silence is still the default" in _ans_txt)
+check("and that this is an answer to the owner, who will carry the conversation", "ANSWERING the owner" in _ans_txt)
+d.client.history[D2].append({"user": U2, "ts": "1700000008.900", "text": "Yes Barada"})
+_cold = _with_triage(_uns, lambda: (d.on_inbound({"user": U2, "channel": D2, "channel_type": "im", "text": "any news?", "ts": "1700000008.950"}),
+                                    S.load_item(f"{D2}-1700000008_950"))[1])
+check("a message that follows the sender's own is not flagged as an answer to the owner", _cold.get("answers_you") is False)
+# leave no trace for the fixtures that follow: later tests count what is newer than their own ts
+del d.client.history[D2][_h0:]
+for _it in (_ans, _cold):
+    _it["status"] = "done"; S.save_item(_it)
+
 
 def _triage_ignore(mentioned):
     """A confident `ignore` straight from triage — the half that skips the writer entirely."""

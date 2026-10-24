@@ -154,11 +154,12 @@ class Triage:
     forced: str | None = None  # why policy overrode the model's route
     model_route: str = ""      # what the model said before policy touched it
     chars: int = 0             # length of the message itself, where the execute score goes astray
+    unsure: str | None = None  # an `ignore` the model was not confident in: the writer sees it, silence stays the default
     raw: dict = field(default_factory=dict)
 
     def summary(self) -> str:
         f = (f" (forced: {self.forced}; model said {self.model_route})" if self.forced
-             else "")
+             else f" (unsure: {self.unsure})" if self.unsure else "")
         return (f"{self.route}{f} · {self.topic} · conf {self.confidence:.2f} · sens {self.sensitivity:.1f} · "
                 f"urg {self.urgency:.1f} · ctx {self.needs_context:.2f} · answerable {self.can_answer:.2f} · "
                 f"share {self.asks_for_content:.2f} · exec {self.asks_to_execute:.2f} · "
@@ -220,7 +221,14 @@ class Policy:
             if t.route == "reply":
                 t.route, t.forced = "hold", f"low confidence {t.confidence:.2f}"
             elif t.route == "ignore":
-                t.route, t.forced = "ack", f"low confidence {t.confidence:.2f}"
+                # Not demoted to `ack` any more. Measured over 20 reactions Solo left: 13 were a
+                # low-confidence ignore the policy had rewritten to ack and the writer then
+                # rubber-stamped (13 of 13 — it never once chose ignore when handed "ack"), and
+                # 13 were answers to the owner's own previous message ("Yes Barada" after
+                # "Hey Sri"). The owner's verdict: reacting to every message is pointless.
+                # An unsure ignore now reaches the writer AS an ignore, so a real ask the model
+                # could not score still gets a second look, but silence is the stated default.
+                t.unsure = f"low confidence {t.confidence:.2f}"
         elif t.route == "reply" and t.can_answer < self.min_answerable and t.needs_context >= 0.5:
             # Confident it deserves an answer, but the answer needs something we have to go and
             # get. Only then is a hold right: when nothing needs looking up (a small ask about how
