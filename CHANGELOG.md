@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.1 — 2026-10-25
+
+**A message to the owner is delivered, not drafted**
+- An agent's `say` addressed to the owner (`--to @owner`) used to wait in the console for the
+  owner to ✅ a message to themselves. Their own DM has nobody else in it, so every gate was
+  protecting an empty room. It is now posted to the console as a message from the agent
+  (`📨 agent → you`), with a file when one is attached, and nothing to react to. The owner asked
+  for exactly this on 2026-10-24. A failed delivery (a scope, a moved file) still falls back to a
+  draft that says why. Everything addressed to anyone else drafts as before.
+
 ## 1.2.0 — 2026-10-23
 
 **Files go out with a draft**

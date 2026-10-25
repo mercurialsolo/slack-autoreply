@@ -959,6 +959,43 @@ def _agent_origin_never_auto_sends():
 
 check("an agent-requested message always waits for the owner", _agent_origin_never_auto_sends())
 
+# …unless the message is TO the owner. Their own DM has nobody else in it, so every gate above is
+# protecting an empty room; on 2026-10-24 they said "To DM me - you don't have to ask again." It is
+# delivered to the console as a message from the agent, not drafted as the owner talking to themselves.
+def _say_to_owner(text, **extra):
+    it = {"id": f"say-own{d.client.counter}", "channel": "DSELF", "channel_type": "im", "sender": "UME",
+          "sender_name": "Barada", "text": "[agentvm-mini wants to tell Barada]: P1 merged", "created": S.now_iso(),
+          "status": "queued", "reply_thread_ts": None, "ts": "1001.000", "outbound": True,
+          "origin": "agent:agentvm-mini", "context": "(outbound)", "triage": None, "intent": "P1 merged", **extra}
+    S.save_item(it)
+    pend, before, ups = dict(d.state.read()["pending"]), len(fc.posted), len(getattr(fc, "uploads", []))
+    out = S.execute_decision(d, it, {"action": "reply", "text": text}, d.ledger, d.followups, set(), state=d.state)
+    return S.load_item(it["id"]), out, fc.posted[before:], getattr(fc, "uploads", [])[ups:], pend
+
+_own, _own_out, _own_posts, _own_ups, _own_pend = _say_to_owner(f"P1 merged{S.BEAT}need a Google OAuth client from you")
+check("a message to the owner is delivered, not drafted", _own["policy"]["effective"] == "auto" and _own["outcome"]["status"] == "sent", _own_out)
+check("it lands in the console, headed by the agent that asked",
+      len(_own_posts) == 1 and _own_posts[0][0] == d.console and _own_posts[0][1].startswith("📨 *agentvm-mini → you*"), _own_posts)
+check("with nothing to react to", "✅" not in _own_posts[0][1])
+check("as one message: the two-beat marker is a line break here", S.BEAT not in _own_posts[0][1] and "merged\nneed" in _own_posts[0][1])
+check("nothing was left pending for a ✅", d.state.read()["pending"] == _own_pend)
+
+_own_file = Path(S.config.STATE_DIR) / "outbox" / "clip.mp4"; _own_file.parent.mkdir(parents=True, exist_ok=True); _own_file.write_bytes(b"mp4")
+_ownf, _ownf_out, _ownf_posts, _ownf_ups, _ = _say_to_owner("the onboarding clip", files=[{"path": str(_own_file), "name": "clip.mp4", "size": 3}])
+check("a file for the owner goes straight to them too — the human it needed is the one it reaches",
+      _ownf["outcome"]["status"] == "sent" and _ownf["outcome"].get("files") and len(_ownf_ups) == 1 and _ownf_ups[0]["channel"] == d.console, _ownf_out)
+check("…uploaded with the words, not posted beside them", _ownf_posts == [] and _ownf_ups[0]["initial_comment"].startswith("📨 *agentvm-mini → you*"))
+
+fc.upload_error = "missing_scope"
+_ownx, _ownx_out, _ownx_posts, _, _ownx_pend = _say_to_owner("the onboarding clip", files=[{"path": str(_own_file), "name": "clip.mp4", "size": 3}])
+fc.upload_error = None
+check("a delivery that fails falls back to a draft the owner can fix and ✅",
+      _ownx["outcome"]["status"] == "drafted" and _ownx["policy"]["effective"] == "draft"
+      and "could not deliver" in _ownx["policy"]["reason"] and "missing_scope" in _ownx["policy"]["reason"]
+      and len(d.state.read()["pending"]) == len(_ownx_pend) + 1, _ownx_out)
+check("the draft says why it is a draft", any("could not deliver it to you" in t for _c, t, _th, _ts in _ownx_posts))
+_own_file.unlink()
+
 # Routing must fail toward asking. Learned keywords alone put a Facebook-accounts report in
 # #engineering-team at 0.60 — above a 0.5 bar — so the bar is 0.70 and the owner's `For:` line
 # is what actually makes it reliable (the same three reports went to 1.00 once it was filled).

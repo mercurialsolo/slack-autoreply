@@ -1153,6 +1153,29 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
     return "\n".join(out)
 
 
+def error_text(e: Exception) -> str:
+    """The useful part of a Slack error. SlackApiError puts `"error": "missing_scope"` on its second line."""
+    why = (getattr(getattr(e, "response", None), "data", None) or {}).get("error") if hasattr(e, "response") else None
+    return why or " ".join(str(e).split())[:200]
+
+
+def deliver_to_owner(slack: Slack, item: dict, text: str) -> tuple[str, list[str]]:
+    """Hand an agent's message to the owner — posted in the console as delivered, not as a draft.
+
+    The console rather than the self-DM, for the reason the console exists: a message the owner
+    posts to themselves never badges, the bot's does, and NOTIFY_CMD pings. It reads as a message
+    from the agent, via Solo — not as the owner talking to themselves. `⏎` becomes a line break: a
+    report to the owner is one message, and the two-beat shape is for people they write to.
+    """
+    header = f"📨 *{item.get('origin', 'agent').removeprefix('agent:')} → you*"
+    if item.get("files"):
+        ts, file_ids = slack.post_files(slack.console, f"{header}\n{text}", item["files"], None)
+        slack._ping(f"{header} {text}")  # noqa: SLF001 - same module; post_files does not ping, notify does
+        return ts, file_ids
+    body = restore_mentions(text, slack.mention_id).replace(BEAT, "\n")
+    return slack.notify(f"{header}\n{body}"), []
+
+
 def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, followups: Followups,
                      share_trusted: set[str], observed_tools: list[str] | None = None, state: State | None = None) -> str:
     """Carry out Claude's decision under policy. Returns a one-line summary."""
@@ -1238,20 +1261,46 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
     gate = used_context and not (sender in share_trusted or ledger.share_ok(sender))
     if item.get("origin", "").startswith("agent:"):
         # The ledger graduates routes a PERSON earned by replying well to them. An agent asking
-        # Solo to speak has no such history and cannot accrue one, so it never auto-sends.
+        # Solo to speak has no such history and cannot accrue one, so it never auto-sends — to
+        # anyone but the owner (next block).
         mode, why, gate = "draft", f"requested by {item['origin']} — always yours to approve", False
     if item.get("files"):
         # Belt and braces: only `say` can attach a file today, and `say` is always agent-origin.
         # If that ever changes, a file still never leaves without a human looking at its name.
         mode, why, gate = "draft", f"carries a file — always yours to approve", False
+    to_owner = slack is not None and channel in (slack.self_dm, slack.bot_dm)
+    if to_owner:
+        # Every gate above protects somebody else's inbox. The owner's own DM has nobody else in
+        # it, so a draft there asked the owner to approve a message to themselves — and they said
+        # so, on 2026-10-24: "To DM me - you don't have to ask again." A file to them is the same:
+        # the human who was meant to look at it is the one it lands on.
+        mode, why, gate = "auto", "to you — nobody else reads it", False
     item["policy"] = {"effective": "draft" if gate else mode, "reason": ("share gate: " + why) if gate else why, "used_context": used_context}
     fu = None
-    if action == "hold":
+    if action == "hold" and not to_owner:
         t = item.get("triage") or {}
         phrase, due = hold_deadline(float(decision.get("urgency") or t.get("urgency") or 3))
         fu = dict(channel=channel, thread_ts=thread_ts, counterpart=sender, counterpart_name=who, summary=item["text"],
                   phrase=phrase, due=due, permalink=item.get("permalink"))
         item["followup"] = {**fu, "due": due.isoformat(timespec="minutes")}
+
+    if mode == "auto" and to_owner:
+        try:
+            ts, file_ids = deliver_to_owner(slack, item, text)
+        except Exception as e:  # noqa: BLE001 - the words must still reach the owner, as a draft if not as a message
+            why = f"could not deliver it to you ({error_text(e)}) — so it waits here for your ✅"
+            log.warning("delivery to the owner for %s failed: %s", item["id"], e)
+            mode = "draft"
+            item["policy"] = {"effective": "draft", "reason": why, "used_context": used_context}
+        else:
+            item["outcome"] = {"status": "sent", "ts": ts, "channel": slack.console, "at": now_iso()}
+            if file_ids:
+                item["outcome"]["files"] = file_ids
+            save_item(item)
+            # Not registered under state["sent"]: that map watches messages posted AS the owner
+            # for their edits and deletions, and this one is posted to them.
+            audit(item=item["id"], counterpart=who, status=f"sent_{action}", reply=text, sources=decision.get("sources"), mode=why)
+            return f"delivered to you ({action}): {text[:100]}"
 
     if mode == "auto" and not gate:
         ts = slack.post(channel, text, thread_ts)
@@ -1301,10 +1350,8 @@ def approve_draft(slack: Slack, item: dict, ledger: Ledger, followups: Followups
         try:
             ts, file_ids = slack.post_files(item["channel"], d["text"], files, item.get("reply_thread_ts"))
         except Exception as e:  # noqa: BLE001 - the owner needs the reason, whatever it is
-            # SlackApiError puts the useful part ("error": "missing_scope") on its second line.
             full = str(e)
-            why = (getattr(getattr(e, "response", None), "data", None) or {}).get("error") if hasattr(e, "response") else None
-            why = why or " ".join(full.split())[:200]
+            why = error_text(e)
             hint = ("add the `files:write` user scope under OAuth & Permissions, reinstall the app, and re-run doctor"
                     + " — then take your ✅ off and add it again"
                     if "missing_scope" in full else "fix the cause, then take your ✅ off and add it again — or ❌ to drop")
@@ -2901,9 +2948,10 @@ def cmd_say(a):
     finished prose, because an agent writing its own message is how a workspace ends up with five
     different voices wearing one name.
 
-    Agent-originated messages always draft for the owner's ✅, whatever the trust ledger says. The
-    ledger graduates routes that a *person* asked for; nothing here was asked for by a person, so
-    there is no track record that could earn an automatic send.
+    Agent-originated messages draft for the owner's ✅, whatever the trust ledger says. The ledger
+    graduates routes that a *person* asked for; nothing here was asked for by a person, so there is
+    no track record that could earn an automatic send. The one exception is a message TO the
+    owner: it reaches nobody else, so it is delivered to their console instead of drafted there.
     """
     config.ensure_dirs()
     re_item = getattr(a, "re_item", None)
@@ -2935,7 +2983,8 @@ def cmd_say(a):
     elif a.target:
         kind, tid, name = recall.resolve_target(s, a.target)
         channel = s.client.conversations_open(users=tid)["channel"]["id"] if kind == "people" else tid
-        routed = f"you named {name}"
+        routed = ("to the owner — delivered to their console, nothing to approve" if kind == "people" and tid == s.me
+                  else f"you named {name}")
     else:
         # Agents report what they did; where it belongs is Solo's problem, not theirs. They have
         # no view of the channel map and should not grow one — that is how a reporting agent ends

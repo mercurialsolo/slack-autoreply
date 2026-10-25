@@ -111,7 +111,8 @@ rather than from a person. Treat each one as a **peer request to evaluate**:
   of it.
 
 Report back with `solo say`, the same as any other finished work — the owner reads it in their own
-voice and it waits for their ✅. If the work came from a brief with a `--re` id, pass that id.
+voice and it waits for their ✅ (unless it is addressed to the owner themselves, which is simply
+delivered). If the work came from a brief with a `--re` id, pass that id.
 
 ## What makes a good report
 
@@ -151,8 +152,13 @@ does not make a thing allowed.
 ## What happens next
 
 Solo writes it in the owner's voice, places it, and **waits for the owner's ✅**. An
-agent-requested message can never send on its own, whatever trust exists for that recipient. So
-your report is a proposal, and the owner is the one who sends.
+agent-requested message can never send on its own to anyone else, whatever trust exists for that
+recipient. So your report is a proposal, and the owner is the one who sends.
+
+The exception is a message **to the owner** (`--to @owner`, or whatever their handle is): nobody
+else reads their own DM, so it is delivered straight to their console, headed with your name, with
+nothing to approve. Use it for status they asked you to send them; use a channel or `--re` for
+anything their team should see.
 
 You get no delivery receipt. Do not wait for one, and do not re-send.
 

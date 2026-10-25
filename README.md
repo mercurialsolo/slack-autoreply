@@ -227,9 +227,11 @@ voice guide and writes it, then `compose` (SKILL.md) puts it through the same ru
 
 Two properties that make this safe to hand to an autonomous agent:
 
-- **It can never auto-send.** The trust ledger graduates routes a *person* earned by being replied
-  to well; an agent has no such history and cannot accrue one, so an agent-requested message always
-  waits for your ✅ — even for a sender who has otherwise earned auto.
+- **It can never auto-send to anyone but you.** The trust ledger graduates routes a *person* earned
+  by being replied to well; an agent has no such history and cannot accrue one, so an agent-requested
+  message waits for your ✅ — even for a sender who has otherwise earned auto. A message addressed to
+  *you* (`--to @you`) is the one exception: it reaches nobody else, so it is delivered to your console
+  as a message from the agent, with nothing to approve.
 - **The boundaries do not move.** Credentials, dates, money, people, anything outside this
   workspace's work still escalate. An agent asking does not make a thing allowed; the limits are
   about what reaches the recipient, not who requested it.
