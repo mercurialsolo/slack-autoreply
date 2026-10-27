@@ -40,6 +40,10 @@ elif body.startswith("close-then:"):
     print(json.dumps({{"state": "answered", "answer": body[11:]}} if ask["shown"] >= 2 else {{"state": "closed"}}))
 elif body == "sleep":
     time.sleep(30)
+elif body.startswith("file:"):
+    print(json.dumps({{"state": "answered", "answer": body[5:] + (" seen:" + ",".join(ask["images"]) if ask.get("images") else "")}}) if ask["reply"] != "file" else json.dumps({{"state": "answered", "answer": body[5:]}}))
+elif body == "images?":
+    print(json.dumps({{"state": "answered", "answer": ",".join(ask.get("images") or [])}}))
 else:
     print(json.dumps({{"state": "closed"}}))
 """)
@@ -129,6 +133,26 @@ check("an unanswered p0 expires too", code == 4 and r["state"] == "expired", f"{
 check("and ATTN_ESCALATE_CMD fired once it was half way to the deadline",
       ESCALATED.exists() and "Blocked: need the code" in ESCALATED.read_text() and ESCALATED.read_text().count("\n") == 1,
       ESCALATED.read_text() if ESCALATED.exists() else "no escalation")
+
+# ------------------------------------------------------------ multi-modal: an image in, a file out
+_png = TMP / "captcha.png"; _png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 100)
+code, r, _ = run("ask", "Solve this", "--body", "images?", "--priority", "p0", "--reply", "text", "--image", str(_png), "--deadline", "30s", "--wait")
+_seen = [Path(x) for x in (r.get("answer") or "").split(",") if x]
+check("an image sent with the ask reaches the renderer as a file beside the ask",
+      code == 0 and len(_seen) == 1 and _seen[0].name.startswith(r["id"]) and _seen[0].suffix == ".png" and _seen[0].read_bytes()[:4] == b"\x89PNG", str(r))
+check("…and it is private", (_seen[0].stat().st_mode & 0o777) == 0o600)
+code, _, err = run("ask", "x", "--image", str(TMP / "fake-renderer.py"), "--wait")
+check("a non-image is refused before anything is sent", code != 0 and "not an image" in err, err)
+
+_owner_file = TMP / "statement.csv"; _owner_file.write_text("a,b\n1,2\n")
+_got = TMP / "fetched.csv"
+code, r, _ = run("ask", "Upload the statement", "--body", f"file:{_owner_file}", "--priority", "p1", "--reply", "file", "--out", str(_got), "--wait")
+check("a file reply is copied beside the ask and fetched to --out", code == 0 and r["state"] == "answered" and _got.read_text() == "a,b\n1,2\n", str(r))
+check("the answer names the file, not the owner's path", r["answer"] and str(_owner_file) not in r["answer"], str(r))
+code, r2, _ = run("fetch", r["id"], "--out", str(TMP / "again.csv"))
+check("fetch gets it again later", code == 0 and (TMP / "again.csv").read_text() == "a,b\n1,2\n")
+code, _, err = run("fetch", "ask-000000000000", "--out", str(TMP / "none.csv"))
+check("fetch on an ask with no file says so", code != 0 and "no file" in err, err)
 
 # ------------------------------------------------------------ cancel kills what is on screen
 code, r, _ = run("ask", "Still needed?", "--body", "sleep", "--priority", "p0", "--deadline", "60s")

@@ -26,6 +26,9 @@ attn ask "TOTP for solo@staffai.so" --body "the login on the mini is waiting" \
 # → {"id": "ask-…", "state": "answered", "answer": "123456"}     exit 0
 
 attn ask "Ship v0.48 to the box?" --priority p1 --deadline 20m --reply choice --choices ship,hold --wait
+attn ask "Solve this" --image captcha.png --priority p0 --deadline 2m --reply text --wait      # the image is shown with the ask
+attn ask "Upload the statement" --reply file --out ./statement.csv --wait                      # the owner picks a file; it lands at --out
+attn fetch ask-… --out ./statement.csv                                                        # or later
 attn notify "overnight warmup finished, 4 of 4 active" --from scout
 attn cancel ask-…            # the sender no longer needs it: it comes off the screen
 attn status                  # what is waiting on the owner
@@ -40,6 +43,11 @@ On a Solo node use the same thing through Solo's config, so an agent needs none 
 `python3 ~/.claude/skills/solo/scripts/slackctl.py attn "<title>" --priority p0 …`, or from the
 laptop `solo attn "<title>" …`. Solo itself raises a `p1` for an escalation whose triage urgency is
 at least `ATTN_URGENCY` (default 4.0) and takes it down again when the owner ✅/❌s the draft in Slack.
+
+Replies are `none`, `text`, `choice` (`--choices a,b,c`) or `file`. Up to six images (png, jpg,
+gif, webp, heic, pdf; 6 MB together) go with an ask and are shown in the dialog — in Preview beside
+it on the AppleScript fallback. A file the owner answers with is copied beside the ask on the
+daemon side and fetched by the sender; the owner's own path never leaves the machine.
 
 Answers can be secrets. Asks are 0600 files under `~/.attention/asks/`, the log carries titles
 only, and `--wait` prints the answer to stdout and nowhere else.

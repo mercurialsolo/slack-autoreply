@@ -6,7 +6,8 @@ everything behind it, cannot wait to be read — it has to interrupt, stay on sc
 dealt with, and show how long it has. That is the whole job of this file. The sender says what
 and how urgent; this decides how it looks.
 
-    attn ask    "<title>" [--body …] --priority p0|p1|p2 [--deadline 90s|5m] [--reply text|choice --choices A,B] [--from solo] [--wait]
+    attn ask    "<title>" [--body …] --priority p0|p1|p2 [--deadline 90s|5m] [--reply text|choice|file --choices A,B] [--image f.png] [--from solo] [--wait]
+    attn fetch  <id> --out <path>                            the file the owner answered with
     attn notify "<title>" [--body …] [--priority p2]        fire and forget
     attn status [<id>]                                       what is open, or one ask's state
     attn cancel <id>                                         the sender no longer needs it
@@ -40,6 +41,7 @@ Config (0600), ~/.attention/env, plain KEY=value; the environment wins over the 
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -63,6 +65,8 @@ ENV_FILE = HOME / "env"
 PRIORITIES = ("p0", "p1", "p2")
 DEFAULT_DEADLINE = {"p0": 300, "p1": 1800, "p2": 0}
 TERMINAL = ("answered", "declined", "expired", "cancelled", "shown")
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".pdf"}
+MAX_IMAGE_BYTES = 6 * 1024 * 1024
 EXIT = {"answered": 0, "shown": 0, "declined": 3, "expired": 4, "cancelled": 5, "unreachable": 6}
 SOUND = "/System/Library/Sounds/Basso.aiff"
 
@@ -141,8 +145,8 @@ def open_asks() -> list[dict]:
 def new_ask(title: str, body: str, priority: str, frm: str, deadline_s: int, reply: str, choices: list[str]) -> dict:
     if priority not in PRIORITIES:
         raise ValueError(f"priority must be one of {PRIORITIES}")
-    if reply not in ("none", "text", "choice"):
-        raise ValueError("reply must be none, text or choice")
+    if reply not in ("none", "text", "choice", "file"):
+        raise ValueError("reply must be none, text, choice or file")
     if reply == "choice" and len(choices) < 2:
         raise ValueError("a choice needs at least two --choices")
     created = datetime.now().replace(microsecond=0)
@@ -150,7 +154,36 @@ def new_ask(title: str, body: str, priority: str, frm: str, deadline_s: int, rep
             "priority": priority, "from": (frm or "unknown")[:40], "reply": reply, "choices": choices,
             "created": created.isoformat(),
             "deadline": (created + timedelta(seconds=deadline_s)).isoformat() if deadline_s else None,
-            "state": "open", "answer": None, "answered_at": None, "shown": 0}
+            "state": "open", "answer": None, "answered_at": None, "shown": 0, "images": [], "answer_file": None}
+
+
+def attach_images(ask: dict, images: list[dict]) -> None:
+    """Images the owner should see with the ask (a CAPTCHA, a screenshot): written beside it, 0600."""
+    total = 0
+    for n, img in enumerate(images[:6]):
+        ext = Path(img.get("name") or "image.png").suffix.lower() or ".png"
+        if ext not in IMAGE_EXT:
+            raise ValueError(f"image {img.get('name')!r}: not an image type ({', '.join(sorted(IMAGE_EXT))})")
+        data = base64.b64decode(img.get("b64") or "")
+        total += len(data)
+        if total > MAX_IMAGE_BYTES:
+            raise ValueError(f"images exceed {MAX_IMAGE_BYTES // (1024 * 1024)} MB")
+        ASKS.mkdir(parents=True, exist_ok=True)
+        path = ASKS / f"{ask['id']}-img{n}{ext}"
+        path.write_bytes(data)
+        path.chmod(0o600)
+        ask["images"].append(str(path))
+
+
+def keep_answer_file(ask: dict, chosen: str) -> str | None:
+    """The owner answered with a file: copy it beside the ask so the sender can fetch it later."""
+    src = Path(chosen).expanduser()
+    if not src.is_file():
+        return None
+    dest = ASKS / f"{ask['id']}-answer{src.suffix.lower()[:16]}"
+    shutil.copyfile(src, dest)
+    dest.chmod(0o600)
+    return str(dest)
 
 
 def remaining(ask: dict) -> int | None:
@@ -224,6 +257,15 @@ class Daemon:
                 return
             state, answer = result
             if state in ("answered", "declined"):
+                if state == "answered" and ask["reply"] == "file":
+                    kept = keep_answer_file(ask, answer or "")
+                    if not kept:
+                        log(f"{ask['id']} answered with a file that does not exist: shown again")
+                        continue
+                    current = load_ask(ask_id) or ask
+                    current["answer_file"] = kept
+                    save_ask(current)
+                    answer = Path(kept).name
                 finish(ask, state, answer)
                 return
             if ask["priority"] == "p2":
@@ -304,6 +346,19 @@ def make_handler(daemon: Daemon, token: str):
             if m:
                 ask = load_ask(m.group(1))
                 return self._send(200, ask) if ask else self._send(404, {"error": "no such ask"})
+            m = re.fullmatch(r"/ask/(ask-[0-9a-f]{12})/file", self.path)
+            if m:
+                ask = load_ask(m.group(1))
+                if not ask or not ask.get("answer_file") or not Path(ask["answer_file"]).is_file():
+                    return self._send(404, {"error": "no file on this ask"})
+                data = Path(ask["answer_file"]).read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("X-Attn-Filename", Path(ask["answer_file"]).name)
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if self.path == "/asks":
                 return self._send(200, {"open": open_asks()})
             self._send(404, {"error": "no such route"})
@@ -325,6 +380,10 @@ def make_handler(daemon: Daemon, token: str):
                     return self._send(400, {"error": str(e)})
                 if not ask["title"]:
                     return self._send(400, {"error": "a title is required"})
+                try:
+                    attach_images(ask, list(data.get("images") or []))
+                except (ValueError, TypeError, OSError) as e:
+                    return self._send(400, {"error": f"images: {e}"})
                 daemon.start(ask)
                 return self._send(201, ask)
             m = re.fullmatch(r"/ask/(ask-[0-9a-f]{12})/cancel", self.path)
@@ -426,6 +485,10 @@ def _render_swiftdialog(ask: dict) -> dict:
         cmd += ["--textfield", "Answer,required"]
     elif ask["reply"] == "choice":
         cmd += ["--selecttitle", "Choice,required", "--selectvalues", ",".join(ask["choices"])]
+    elif ask["reply"] == "file":
+        cmd += ["--textfield", "File,fileselect,required"]
+    for img in ask.get("images") or []:
+        cmd += ["--image", img]
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode == 2:
         return {"state": "declined"}
@@ -437,6 +500,8 @@ def _render_swiftdialog(ask: dict) -> dict:
         out = {}
     if ask["reply"] == "text":
         return {"state": "answered", "answer": str(out.get("Answer", "")).strip()}
+    if ask["reply"] == "file":
+        return {"state": "answered", "answer": str(out.get("File", "")).strip()}
     if ask["reply"] == "choice":
         sel = out.get("Choice") or out.get("SelectedOption") or {}
         return {"state": "answered", "answer": sel.get("selectedValue") if isinstance(sel, dict) else str(sel)}
@@ -448,12 +513,17 @@ def _applescript_str(s: str) -> str:
 
 
 def _render_applescript(ask: dict) -> dict:
+    """display dialog cannot show a picture, so the images open in Preview first, beside it."""
     left = remaining(ask)
+    if ask.get("images"):
+        subprocess.run(["open", "-a", "Preview", *ask["images"]], capture_output=True, check=False)
     title = _applescript_str(f"[{ask['priority'].upper()}] {ask['title']}")
     body = _applescript_str((ask["body"] or "") + f"\n\nfrom {ask['from']}" + _deadline_line(ask))
     give_up = f" giving up after {left}" if left else ""
     icon = "stop" if ask["priority"] == "p0" else "caution"
-    if ask["reply"] == "choice" and len(ask["choices"]) <= 3:
+    if ask["reply"] == "file":
+        script = f"POSIX path of (choose file with prompt {body})"
+    elif ask["reply"] == "choice" and len(ask["choices"]) <= 3:
         buttons = ", ".join(_applescript_str(c) for c in ask["choices"])
         script = f"display dialog {body} with title {title} buttons {{{buttons}}} with icon {icon}{give_up}"
     elif ask["reply"] == "choice":
@@ -470,6 +540,8 @@ def _render_applescript(ask: dict) -> dict:
     if p.returncode != 0:
         # -128 is the cancel button: that is the owner saying not now, not a failure.
         return {"state": "declined"} if "-128" in (p.stderr or "") else {"state": "closed"}
+    if ask["reply"] == "file":
+        return {"state": "answered", "answer": out}
     if ask["reply"] == "choice" and len(ask["choices"]) > 3:
         return {"state": "declined"} if out == "false" else {"state": "answered", "answer": out}
     if "gave up:true" in out:
@@ -540,8 +612,16 @@ def cmd_ask(a) -> None:
     deadline_s = parse_duration(a.deadline, DEFAULT_DEADLINE[priority]) if priority in DEFAULT_DEADLINE else 0
     reply = "none" if a.cmd == "notify" else (a.reply or ("choice" if a.choices else "none"))
     choices = [c.strip() for c in (a.choices or "").split(",") if c.strip()]
+    images = []
+    for path in a.image or []:
+        f = Path(path).expanduser()
+        if not f.is_file():
+            sys.exit(f"--image {path}: no such file")
+        if f.suffix.lower() not in IMAGE_EXT:
+            sys.exit(f"--image {path}: not an image ({', '.join(sorted(IMAGE_EXT))})")
+        images.append({"name": f.name, "b64": base64.b64encode(f.read_bytes()).decode()})
     payload = {"title": a.title, "body": a.body or "", "priority": priority, "from": a.from_ or "",
-               "deadline_s": deadline_s, "reply": reply, "choices": choices}
+               "deadline_s": deadline_s, "reply": reply, "choices": choices, "images": images}
     summary = f"[{priority}] {a.title}" + (f" — {a.body[:120]}" if a.body else "")
     try:
         ask = _request("POST", "/ask", payload)
@@ -558,8 +638,32 @@ def cmd_ask(a) -> None:
         except Unreachable as e:
             print(f"attn: lost the daemon while waiting ({e})", file=sys.stderr)
             sys.exit(EXIT["unreachable"])
-    print(json.dumps({"id": ask["id"], "state": ask["state"], "answer": ask.get("answer")}))
+    if ask["state"] == "answered" and ask["reply"] == "file" and a.out:
+        _fetch(ask["id"], a.out)
+    print(json.dumps({"id": ask["id"], "state": ask["state"], "answer": ask.get("answer"),
+                      **({"file": a.out} if ask["state"] == "answered" and ask["reply"] == "file" and a.out else {})}))
     sys.exit(EXIT.get(ask["state"], 1))
+
+
+def _fetch(ask_id: str, out: str) -> None:
+    url, token = cfg("ATTN_URL").rstrip("/"), cfg("ATTN_TOKEN")
+    req = urllib.request.Request(f"{url}/ask/{ask_id}/file", headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data = r.read()
+    except urllib.error.HTTPError as e:
+        sys.exit(f"attn: no file to fetch for {ask_id} ({e.code})")
+    except (urllib.error.URLError, OSError) as e:
+        sys.exit(f"attn: {url}: {getattr(e, 'reason', e)}")
+    dest = Path(out).expanduser()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    dest.chmod(0o600)
+
+
+def cmd_fetch(a) -> None:
+    _fetch(a.id, a.out)
+    print(json.dumps({"id": a.id, "file": a.out}))
 
 
 def cmd_cancel(a) -> None:
@@ -624,11 +728,14 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--priority", choices=PRIORITIES)
         p.add_argument("--deadline", help="90s, 5m, 1h (default: p0 5m, p1 30m)")
         p.add_argument("--from", dest="from_", default=os.environ.get("ATTN_FROM", ""))
-        p.add_argument("--reply", choices=("none", "text", "choice"))
+        p.add_argument("--reply", choices=("none", "text", "choice", "file"))
         p.add_argument("--choices", help="comma-separated, with --reply choice")
+        p.add_argument("--image", action="append", help="show this image with the ask (png/jpg/gif/webp/heic/pdf, repeatable)")
+        p.add_argument("--out", help="with --reply file and --wait: save the owner's file here")
         p.add_argument("--wait", action="store_true", help="block until answered, declined, expired or cancelled")
         p.set_defaults(fn=cmd_ask)
     p = sub.add_parser("cancel"); p.add_argument("id"); p.set_defaults(fn=cmd_cancel)
+    p = sub.add_parser("fetch"); p.add_argument("id"); p.add_argument("--out", required=True); p.set_defaults(fn=cmd_fetch)
     p = sub.add_parser("status"); p.add_argument("id", nargs="?"); p.set_defaults(fn=cmd_status)
     p = sub.add_parser("serve"); p.add_argument("--bind"); p.add_argument("--port"); p.set_defaults(fn=cmd_serve)
     p = sub.add_parser("render"); p.add_argument("--ask", required=True); p.set_defaults(fn=cmd_render)
