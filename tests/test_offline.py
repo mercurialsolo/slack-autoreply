@@ -1309,6 +1309,8 @@ check("a withheld report is never recorded as reported back",
       not any(r.get("outcome") == "reported" for r in _refused_rows))
 check("the owner is handed the text itself, not just told one exists",
       any("549576801980" in t for t in _console))
+check("and the console says these are the agent's words, not a draft in the owner's voice",
+      any("own words, not a draft" in t for t in _console))
 check("and is told plainly that nobody else received it",
       any("nothing went to anyone" in t for t in _console))
 
@@ -1560,6 +1562,7 @@ check("the item records the failure, not a queue entry nobody will drain",
 _lim_posts = [q[1] for q in _con.posted[_n_con:]]
 check("the owner gets the agent's own words in the console", any("ebd0a301" in t and "could not write" in t for t in _lim_posts), str(_lim_posts)[:300])
 check("and is told nobody else received anything", any("nothing went to anyone" in t for t in _lim_posts))
+check("…and that the quoted text is the agent's words, not a draft", any("own words, not a draft" in t for t in _lim_posts))
 check("nothing reached the recipient", not [q for q in fc.posted[_n_fc:] if q[0] == D])
 os.environ["AUTOREPLY_DISPATCH"] = "1"
 try:

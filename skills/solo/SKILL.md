@@ -176,6 +176,14 @@ Either way, do not look for another route into Slack. There isn't one that keeps
 and a message from anything but Solo is a message they did not send.
 
 
+## Where an answer goes
+
+An answer goes where the question was asked. When you are reporting on work that came from a
+message, use `--re <id>` from the brief, never `--to #channel`: `--re` puts the reply in that
+message's thread, in front of the person who asked; `--to #channel` starts a new top-level
+conversation that nobody asked for and breaks the thread for everyone reading it. `--to` is for
+something new that nobody asked.
+
 ## When it cannot wait to be read
 
 Slack and the console wait for the owner to look. A one-time code a login is holding for, or a

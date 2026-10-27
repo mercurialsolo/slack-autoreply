@@ -264,8 +264,8 @@ def withhold_report(slack: "Slack", intent: str, frm: str, why: str, re_item: st
     where drafts already wait for a ✅.
     """
     slack.console_post(f"🤐 *A report from `{frm}` was not placed* — {why}\n"
-                       f"_nothing went to anyone. It is here for you to place, rewrite or drop._\n"
-                       f"{quote(intent[:1200])}")
+                       f"_nothing went to anyone. Below are {frm}'s own words, not a draft in your voice: "
+                       f"place it, rewrite it or drop it._\n{quote(intent[:1200])}")
     if re_item:
         record_delegation(item=re_item, role=frm, outcome="report_refused",
                           report=intent[:200], error=why[:200])
@@ -3162,8 +3162,8 @@ def cmd_say(a):
         # reads what agents send; the agent's own wording is better than nothing at all.
         dest = "you" if kind == "people" and tid == s.me else name
         s.console_post(f"⚠️ *Solo could not write a message from `{a.from_}`* — {why_not[:200]}\n"
-                       f"_nothing went to anyone. It was meant for {dest}; here it is as {a.from_} put it, "
-                       f"to place, rewrite or drop._\n{quote(a.intent[:1200])}")
+                       f"_nothing went to anyone. It was meant for {dest}. Below are {a.from_}'s own words, "
+                       f"not a draft in your voice: place it, rewrite it or drop it._\n{quote(a.intent[:1200])}")
         sys.exit(f"Solo could not compose it: {why_not}\n"
                  f"   the message is in the owner's Solo DM in your own words instead — nothing was sent to anyone")
     ledger, _ = load_services()
