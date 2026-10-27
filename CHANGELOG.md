@@ -16,8 +16,13 @@
 - HTTP over the tailnet with a bearer token; asks are 0600 files, the log never carries an answer.
   swiftDialog when installed, AppleScript dialogs otherwise. `attention/install-desktop.sh`
   installs the LaunchAgent on the owner's machine; `attention/README.md` has the rest.
-- Solo raises a `p1` for an escalation whose triage urgency reaches `ATTN_URGENCY` (4.5 — 5 of the last 47 escalations; 4.0 would have been 16) and
-  cancels it when the owner ✅/❌s the draft or it expires. `slackctl attn "<title>" …` (and
+- Only time-sensitive things draw attention, and Jev says what is: triage gains `needs_attention`
+  (the owner's eyes in the next few minutes — a code, a live call, someone blocked until they
+  decide). Solo raises a `p1` for an escalation at or above `ATTN_NEEDS` (0.7) and cancels it
+  when the owner ✅/❌s the draft or it expires; `ATTN_URGENCY` (4.5) stands in only when Jev did
+  not triage the message. The agent door is gated the same way and refuses with the score.
+- The window is small and pinned in a corner, on top; the first p0 blurred the whole screen and
+  the owner could not work around it. `slackctl attn "<title>" …` (and
   `solo attn …` from the laptop) lets any agent on the node interrupt the owner through Solo's
   config, with `ATTN_URL`/`ATTN_TOKEN` in `~/.slack-autoreply/.env` and nowhere else. The writer
   may not call it: `attn` is on the dispatch-forbidden list.

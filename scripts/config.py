@@ -109,6 +109,9 @@ CFG = dict(
     # interrupts. An escalation whose urgency reaches ATTN_URGENCY is also put on the owner's
     # screen, on top, until they ✅/❌ it in Slack or it passes. Empty ATTN_URL = never.
     attn_url=env("ATTN_URL", ""),
+    # Jev's read of "needs the owner's eyes now" gates the screen; the urgency number only stands
+    # in when Jev did not triage the message. Owner, 2026-10-27: only time-sensitive ones draw attention.
+    attn_needs=env_float("ATTN_NEEDS", 0.7),
     attn_urgency=env_float("ATTN_URGENCY", 4.5),
     attn_deadline=env("ATTN_DEADLINE", "30m"),
     ack_style=env("ACK_STYLE", "reaction").strip().lower(),

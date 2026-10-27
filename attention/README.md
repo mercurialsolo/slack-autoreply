@@ -8,7 +8,7 @@ The **sender decides the priority and the words**. This decides what that looks 
 
 | priority | what it means | what the owner sees |
 |---|---|---|
-| `p0` | something is blocked right now | a modal on top of everything, screen blurred, countdown to the deadline, a sound every 30s, shown again if closed; a "Can't right now" button, always |
+| `p0` | something is blocked right now | a small window pinned on top in a corner (never over the whole screen: you keep working), countdown to the deadline, a sound every 30s, shown again if closed; a "Can't right now" button, always |
 | `p1` | a decision is needed soon | on top with a countdown, one sound, shown again every `ATTN_NAG_MINUTES` until answered or the deadline passes |
 | `p2` | worth knowing | one Notification Center banner, nothing persistent |
 
@@ -41,8 +41,13 @@ person; design for it — a 90s ask that cannot reach a screen should fail now, 
 
 On a Solo node use the same thing through Solo's config, so an agent needs none of its own:
 `python3 ~/.claude/skills/solo/scripts/slackctl.py attn "<title>" --priority p0 …`, or from the
-laptop `solo attn "<title>" …`. Solo itself raises a `p1` for an escalation whose triage urgency is
-at least `ATTN_URGENCY` (default 4.5) and takes it down again when the owner ✅/❌s the draft in Slack.
+laptop `solo attn "<title>" …`. Only time-sensitive things draw attention, and Jev decides what is time-sensitive: triage asks
+`needs_attention` ("does this need the owner's eyes in the next few minutes — a code, a live call,
+someone blocked until they decide"), and Solo raises a `p1` for an escalation at or above
+`ATTN_NEEDS` (0.7), taking it down again when the owner ✅/❌s the draft. The agent door is gated
+the same way: `slackctl attn` scores the title and body with Jev and refuses a p0/p1 that reads
+as able to wait, with the score; a `p2` banner is never gated. `ATTN_URGENCY` (4.5) stands in
+only for a message Jev did not triage.
 
 Replies are `none`, `text`, `choice` (`--choices a,b,c`) or `file`. Up to six images (png, jpg,
 gif, webp, heic, pdf; 6 MB together) go with an ask and are shown in the dialog — in Preview beside

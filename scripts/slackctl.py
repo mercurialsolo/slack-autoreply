@@ -1009,6 +1009,31 @@ def attention_ask(title: str, body: str, priority: str, deadline: str, frm: str 
     return None
 
 
+def attention_worthy(t: dict) -> bool:
+    """Jev's call, not the urgency number: does this need the owner's eyes now?
+
+    Urgency says how soon an answer is due; a message can be urgent and still wait to be read.
+    `needs_attention` is the question that asks about the owner's eyes — a code, a live call,
+    someone blocked until they decide. Only when Jev did not triage the message does urgency
+    stand in.
+    """
+    if t.get("needs_attention") is not None and str(t.get("source") or "").startswith("jev"):
+        return float(t["needs_attention"]) >= CFG["attn_needs"]
+    return float(t.get("urgency") or 0) >= CFG["attn_urgency"]
+
+
+def attention_of(text: str) -> float | None:
+    """Jev's read of whether something an agent wants on the owner's screen needs their eyes now.
+    None if it cannot score — and unscored never reaches the screen."""
+    try:
+        t = Triager(os.getenv("ME_NAME") or "the owner", Policy(), None, "").run(
+            {"latest_message": text, "recent_conversation": "(an agent wants this on the owner's screen)"})
+        return t.needs_attention if t.source.startswith("jev") else None
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not score attention (%s)", e)
+        return None
+
+
 def attention_cancel(ask_id: str | None) -> None:
     """The owner acted in Slack (or the draft expired): take it off their screen."""
     if not ask_id or not CFG["attn_url"]:
@@ -1283,8 +1308,8 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
         else:
             slack.notify(note)
             item["outcome"] = {"status": "escalated"}
-        if t and float(t.get("urgency") or 0) >= CFG["attn_urgency"]:
-            # Urgent enough that a badge is not enough. Triage scored the urgency; the sender of
+        if t and attention_worthy(t):
+            # Jev says this needs the owner's eyes now, not just an answer today. The sender of
             # the message did not get a say, and neither did the writer.
             ask_id = attention_ask(f"Needs you — {who} in {describe_where(item)}",
                                    (decision.get("note") or item["text"][:300]) + "\n\n✅ / ❌ the draft in your Solo DM",
@@ -3498,6 +3523,21 @@ def cmd_attn(a):
         sys.exit("ATTN_URL is not set in ~/.slack-autoreply/.env — the owner's desktop is not configured (see attention/README.md)")
     # `attn cancel <id>`, `attn status`, `attn doctor` pass straight through; anything else is a title.
     verb = a.title if a.title in ("cancel", "status", "doctor") else None
+    if not verb:
+        # Only time-sensitive things draw attention (owner, 2026-10-27). The agent names the
+        # priority; Jev decides whether it is really about the owner's eyes right now. A p2
+        # banner interrupts nobody and is not gated. Unscored stays off the screen.
+        rest = list(a.rest)
+        priority = rest[rest.index("--priority") + 1] if "--priority" in rest and rest.index("--priority") + 1 < len(rest) else "p1"
+        if priority != "p2":
+            body = rest[rest.index("--body") + 1] if "--body" in rest and rest.index("--body") + 1 < len(rest) else ""
+            score = attention_of(f"{a.title}\n{body}".strip())
+            if score is None:
+                sys.exit("Jev could not score this, so it stays off the owner's screen — use `say`, or --priority p2 for a banner")
+            if score < CFG["attn_needs"]:
+                sys.exit(f"Jev reads this as something that can wait ({score:.2f} < {CFG['attn_needs']}) — it will not go on the "
+                         f"owner's screen. Report it with `say`, or --priority p2 for a banner that interrupts nobody.")
+            print(f"→ Jev: needs the owner now ({score:.2f})", file=sys.stderr)
     os.execv(sys.executable, [sys.executable, str(ATTN), *([verb] if verb else ["ask", a.title]), *a.rest])
 
 

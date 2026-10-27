@@ -15,8 +15,9 @@ and how urgent; this decides how it looks.
     attn doctor                                              is this machine set up to send / receive
 
 Priorities are rendering policy, owned here, not by the sender:
-    p0  blocks something now: a modal on top of everything, the screen blurred, a countdown to the
-        deadline, a sound until answered, re-shown if closed. Always has a "Can't right now" so the
+    p0  blocks something now: a small window pinned on top in a corner (never over the whole
+        screen — the owner keeps working), a countdown to the deadline, a sound until answered,
+        re-shown if closed. Always has a "Can't right now" so the
         owner is never trapped — that answer is recorded as `declined`, which is still an answer.
     p1  needs a decision soon: on top, with a countdown, one sound, shown again every few minutes
         until answered or the deadline passes.
@@ -479,8 +480,9 @@ def _render_swiftdialog(ask: dict) -> dict:
            "--button2text", "Can't right now", "--icon", "warning" if ask["priority"] == "p0" else "caution"]
     if left:
         cmd += ["--timer", str(left)]  # the bar is the countdown
-    if ask["priority"] == "p0":
-        cmd += ["--blurscreen", "--big"]
+    # On top of everything, out of the way of everything: a small window in the corner the owner
+    # can keep working around. The first p0 blurred the whole screen and the owner said so.
+    cmd += ["--small", "--position", "topright"]
     if ask["reply"] == "text":
         cmd += ["--textfield", "Answer,required"]
     elif ask["reply"] == "choice":

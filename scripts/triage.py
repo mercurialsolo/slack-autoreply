@@ -125,6 +125,17 @@ def questions(me: str) -> dict:
                 f"this way, add it to the list), which costs nothing and is simply honoured."
             ),
         },
+        "needs_attention": {
+            "type": "noul",
+            "instructions": (
+                f"Does this need {me}'s eyes in the next few minutes — not just an answer today, but "
+                f"{me} personally, now, because something is waiting on them in real time? Yes for: a "
+                f"one-time code or login verification being requested or offered right now, a live call or "
+                f"meeting that is happening or starting, a person or system blocked until {me} decides, a "
+                f"deadline inside the hour. No for anything that can wait to be read: questions, status, "
+                f"reports, requests with a day or more of room, FYIs, and anything already handled in the thread."
+            ),
+        },
         "in_scope": {
             "type": "noul",
             "instructions": (
@@ -151,6 +162,7 @@ class Triage:
     can_answer: float = 0.5    # 0..1: is everything needed to answer well already at hand
     asks_to_execute: float = 0.0  # 0..1: wants an action on a system, not an answer
     in_scope: float = 1.0      # 0..1: is about this workspace's own work
+    needs_attention: float = 0.0  # 0..1: needs the owner's eyes now, not just an answer today
     forced: str | None = None  # why policy overrode the model's route
     model_route: str = ""      # what the model said before policy touched it
     chars: int = 0             # length of the message itself, where the execute score goes astray
@@ -163,7 +175,7 @@ class Triage:
         return (f"{self.route}{f} · {self.topic} · conf {self.confidence:.2f} · sens {self.sensitivity:.1f} · "
                 f"urg {self.urgency:.1f} · ctx {self.needs_context:.2f} · answerable {self.can_answer:.2f} · "
                 f"share {self.asks_for_content:.2f} · exec {self.asks_to_execute:.2f} · "
-                f"scope {self.in_scope:.2f} · {self.source}")
+                f"scope {self.in_scope:.2f} · attn {self.needs_attention:.2f} · {self.source}")
 
 
 @dataclass
@@ -311,6 +323,7 @@ def jev(state: dict, me: str, api_key: str, timeout: float = 8.0, attempts: int 
     answerable = _lookup(resp, "can_answer_now") or {}
     execute = _lookup(resp, "asks_to_execute") or {}
     scope = _lookup(resp, "in_scope") or {}
+    attention = _lookup(resp, "needs_attention") or {}
 
     choice = str(route.get("choice", "hold"))
     conf = route.get("confidence")
@@ -329,6 +342,8 @@ def jev(state: dict, me: str, api_key: str, timeout: float = 8.0, attempts: int 
         # so a malformed Jev response escalates to the owner rather than sailing through.
         asks_to_execute=float(execute.get("noul", 1.0)),
         in_scope=float(scope.get("noul", 0.0)),
+        # Fails quiet, on purpose: an unreadable answer must not put a dialog on the owner's screen.
+        needs_attention=float(attention.get("noul", 0.0)),
         source=f"jev:{resp.get('model', JEV_MODEL)}",
         raw=resp,
     )
@@ -350,6 +365,7 @@ def claude(state: dict, me: str, client, model: str) -> Triage:
         "can_answer_now": "0..1 probability",
         "asks_to_execute": "0..1 probability",
         "in_scope": "0..1 probability",
+        "needs_attention": "0..1 probability",
     }
     prompt = (
         "You are a triage classifier for incoming Slack messages. Answer the questions about the STATE "
@@ -370,6 +386,7 @@ def claude(state: dict, me: str, client, model: str) -> Triage:
         asks_for_content=float(data.get("asks_for_content", 0.0)),
         topic=str(data.get("topic", "other")),
         can_answer=float(data.get("can_answer_now", 0.5)),
+        needs_attention=float(data.get("needs_attention", 0.0)),
         asks_to_execute=float(data.get("asks_to_execute", 1.0)),
         in_scope=float(data.get("in_scope", 0.0)),
         source=f"claude:{model}",

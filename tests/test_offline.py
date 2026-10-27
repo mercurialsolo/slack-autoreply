@@ -133,6 +133,9 @@ resp = {"model": "jev-1", "answers": {"route": {"choice": "reply", "confidence":
 pol = triage.Policy(0.6, 4)
 t = pol.apply(triage.Triage("reply", 0.81, triage._score_1_to_n(triage._lookup(resp, "sensitivity"), 5), triage._score_1_to_n(triage._lookup(resp, "urgency"), 5), 0.72, 0.9, "t"))
 check("jev score normalised", abs(t.sensitivity - 1.4) < 1e-6 and t.route == "reply")
+check("jev is asked whether the owner's eyes are needed now, and the read is carried and shown",
+      "needs_attention" in triage.questions("me") and "one-time code" in triage.questions("me")["needs_attention"]["instructions"]
+      and "attn 0.85" in triage.Triage("reply", 0.9, 1, 1, 0, 0, "jev:t", needs_attention=0.85).summary())
 check("policy: sensitivity forces escalate", pol.apply(triage.Triage("reply", 0.9, 4.2, 1, 0, 0, "t")).route == "escalate")
 check("policy: low confidence reply→hold", pol.apply(triage.Triage("reply", 0.3, 2, 2, 0, 0, "t")).route == "hold")
 _unsure = pol.apply(triage.Triage("ignore", 0.3, 2, 2, 0, 0, "t"))
@@ -1488,29 +1491,51 @@ else: print("ask-abcdef123456 cancelled")
 """)
 _real_attn, _real_url = S.ATTN, S.CFG["attn_url"]
 S.ATTN, S.CFG["attn_url"] = _fake_attn, "http://127.0.0.1:1"
-def _esc_item(iid, text, urgency):
+def _esc_item(iid, text, urgency, triage_extra=None):
     it = {"id": iid, "channel": D, "channel_type": "im", "sender": U, "sender_name": "Priya", "text": text, "ts": iid.split("-")[-1].replace("_", "."),
           "created": S.now_iso(), "status": "queued", "reply_thread_ts": None, "context": "(none)",
-          "triage": {"route": "escalate", "sensitivity": 2.0, "urgency": urgency}}
+          "triage": {"route": "escalate", "sensitivity": 2.0, "urgency": urgency, "source": "jev:test", **(triage_extra or {})}}
     S.save_item(it)
     return iid
-_urg = _esc_item("ATTN-1.000", "need the OTP for the new seat right now", 4.6)
+_urg = _esc_item("ATTN-1.000", "need the OTP for the new seat right now", 4.6, {"needs_attention": 0.92})
 _urg_item = S.load_item(_urg)
 S.execute_decision(d, _urg_item, {"action": "escalate", "text": "Checking", "note": "asks for an OTP — yours"}, d.ledger, d.followups, set(), state=d.state)
 _urg_item = S.load_item(_urg)
-check("an escalation at urgency ≥ ATTN_URGENCY is put on the owner's screen",
+check("an escalation Jev reads as needing the owner now is put on their screen",
       _urg_item["outcome"].get("attn") == "ask-abcdef123456" and "ask Needs you" in _attn_log.read_text() and "--priority p1" in _attn_log.read_text(),
       _attn_log.read_text() if _attn_log.exists() else "no attn call")
 check("…with the writer's note as the body", "asks for an OTP" in _attn_log.read_text())
 S.approve_draft(d, _urg_item, d.ledger, d.followups, d.state, _urg_item["outcome"]["draft_ts"])
 check("✅ in Slack takes it off the screen", "cancel ask-abcdef123456" in _attn_log.read_text(), _attn_log.read_text())
-_calm = _esc_item("ATTN-2.000", "no rush - when you get a sec", 1.5)
+_calm = _esc_item("ATTN-2.000", "pls look at the numbers today, blocked on the report", 4.8, {"needs_attention": 0.2})
 _calm_item = S.load_item(_calm)
 _n_attn = _attn_log.read_text().count("\n")
 S.execute_decision(d, _calm_item, {"action": "escalate", "text": "Checking", "note": "x"}, d.ledger, d.followups, set(), state=d.state)
-check("a calm escalation stays in Slack", _attn_log.read_text().count("\n") == _n_attn and not S.load_item(_calm).get("outcome", {}).get("attn"))
+check("urgent by the number but not by Jev's read stays in Slack", _attn_log.read_text().count("\n") == _n_attn and not S.load_item(_calm).get("outcome", {}).get("attn"))
+_old = _esc_item("ATTN-4.000", "triaged before the question existed", 4.6, {"source": "claude:haiku"})
+S.execute_decision(d, S.load_item(_old), {"action": "escalate", "text": "Checking", "note": "x"}, d.ledger, d.followups, set(), state=d.state)
+check("without Jev's read, the urgency number stands in", S.load_item(_old)["outcome"].get("attn") == "ask-abcdef123456")
+# The door agents use: Jev gates it the same way. A p2 banner interrupts nobody and is not gated.
+_real_of, _real_execv, _execd = S.attention_of, S.os.execv, []
+S.os.execv = lambda exe, argv: (_execd.append(argv), (_ for _ in ()).throw(SystemExit(0)))[1]
+def _door(score, *rest):
+    S.attention_of = lambda text: score
+    try:
+        S.cmd_attn(SimpleNamespace(title="Need the OTP", rest=list(rest)))
+    except SystemExit as e:
+        return str(e)
+    return ""
+_wait = _door(0.2, "--priority", "p0", "--body", "a report, really")
+check("an agent's p0 that Jev reads as able to wait is refused with the score", "can wait (0.20" in _wait and not _execd, _wait)
+_none = _door(None, "--priority", "p1")
+check("unscored stays off the screen", "could not score" in _none and not _execd, _none)
+_go = _door(0.9, "--priority", "p0", "--reply", "text")
+check("one Jev reads as needing the owner now goes through", _go == "0" and _execd and _execd[-1][2:4] == ["ask", "Need the OTP"], f"{_go} {_execd}")
+_banner = _door(0.0, "--priority", "p2")
+check("a p2 banner is not gated", _banner == "0" and len(_execd) == 2)
+S.attention_of, S.os.execv = _real_of, _real_execv
 S.ATTN, S.CFG["attn_url"] = _real_attn, _real_url
-_calm2 = _esc_item("ATTN-3.000", "urgent: code?", 5.0)
+_calm2 = _esc_item("ATTN-3.000", "urgent: code?", 5.0, {"needs_attention": 0.95})
 _c2 = S.load_item(_calm2)
 S.execute_decision(d, _c2, {"action": "escalate", "text": "Checking", "note": "x"}, d.ledger, d.followups, set(), state=d.state)
 check("no desktop configured → nothing attempted, nothing broken", not S.load_item(_calm2)["outcome"].get("attn") and S.load_item(_calm2)["outcome"]["status"] == "escalated_draft")
