@@ -472,23 +472,37 @@ def _deadline_line(ask: dict) -> str:
     return f"\n\nNeeded within {mins}m {secs:02d}s" if mins else f"\n\nNeeded within {secs}s"
 
 
+# The card. Notification-shaped: top right, on top, never modal, nothing behind it blurred. The
+# colour banner is the priority; the title sits in it; the body, the input and the countdown bar
+# below; who asked in small grey text. Tokens here until Claude Design is reachable.
+STYLE = {
+    "p0": {"banner": "#D97757", "label": "NOW"},     # clay: something is blocked on the owner
+    "p1": {"banner": "#D9A441", "label": "SOON"},    # amber: a decision is due
+}
+
+
 def _render_swiftdialog(ask: dict) -> dict:
     left = remaining(ask)
-    cmd = [dialog_bin(), "--title", f"[{ask['priority'].upper()}] {ask['title']}",
-           "--message", (ask["body"] or " ") + f"\n\nfrom {ask['from']}",
-           "--ontop", "--moveable", "--json", "--button1text", "Send" if ask["reply"] != "none" else "Done",
-           "--button2text", "Can't right now", "--icon", "warning" if ask["priority"] == "p0" else "caution"]
+    st = STYLE.get(ask["priority"], STYLE["p1"])
+    needs_input = ask["reply"] != "none"
+    cmd = [dialog_bin(),
+           "--ontop", "--moveable", "--position", "topright", "--json",
+           "--width", "440", "--height", str(250 if needs_input else 200),
+           "--bannerimage", f"colour={st['banner']}", "--bannerheight", "14",
+           "--title", f"{st['label']} · {ask['title']}", "--titlefont", "size=16",
+           "--message", ask["body"] or " ", "--messagefont", "size=13", "--messagealignment", "left",
+           "--hideicon",
+           "--infotext", f"from {ask['from']}",
+           "--button1text", "Send" if needs_input else "Done",
+           "--button2text", "Not now"]
     if left:
         cmd += ["--timer", str(left)]  # the bar is the countdown
-    # On top of everything, out of the way of everything: a small window in the corner the owner
-    # can keep working around. The first p0 blurred the whole screen and the owner said so.
-    cmd += ["--small", "--position", "topright"]
     if ask["reply"] == "text":
-        cmd += ["--textfield", "Answer,required"]
+        cmd += ["--textfield", "Answer,prompt=type or paste here"]
     elif ask["reply"] == "choice":
-        cmd += ["--selecttitle", "Choice,required", "--selectvalues", ",".join(ask["choices"])]
+        cmd += ["--selecttitle", "Choice", "--selectvalues", ",".join(ask["choices"])]
     elif ask["reply"] == "file":
-        cmd += ["--textfield", "File,fileselect,required"]
+        cmd += ["--textfield", "File,fileselect"]
     for img in ask.get("images") or []:
         cmd += ["--image", img]
     p = subprocess.run(cmd, capture_output=True, text=True)
@@ -501,7 +515,9 @@ def _render_swiftdialog(ask: dict) -> dict:
     except json.JSONDecodeError:
         out = {}
     if ask["reply"] == "text":
-        return {"state": "answered", "answer": str(out.get("Answer", "")).strip()}
+        answer = str(out.get("Answer", "")).strip()
+        # Send with nothing typed is a slip, not an answer: the card comes back.
+        return {"state": "answered", "answer": answer} if answer else {"state": "closed"}
     if ask["reply"] == "file":
         return {"state": "answered", "answer": str(out.get("File", "")).strip()}
     if ask["reply"] == "choice":
