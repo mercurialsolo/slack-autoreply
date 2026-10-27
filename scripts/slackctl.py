@@ -19,6 +19,7 @@ All state lives in ~/.slack-autoreply (AUTOREPLY_HOME).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import html
 import json
@@ -1635,20 +1636,54 @@ def writer_healthy(result: dict | None, err: str = "") -> tuple[bool, str]:
     return True, ""
 
 
+@contextlib.contextmanager
+def conversation_lock(item: dict):
+    """One writer run per conversation at a time, across processes.
+
+    The daemon serialises its own runs per channel in memory, but every `say` is a new process,
+    and all of them share the owner's DM session with the daemon and with each other. On 27 Oct
+    two `say`s resumed that one session five seconds apart: the second loaded the transcript while
+    the first was mid-tool-call, and both carried on from a transcript that now read "[Tool call
+    interrupted]". A file lock per conversation is what every process can see.
+    """
+    locks = config.p("locks")
+    locks.mkdir(parents=True, exist_ok=True)
+    with open(locks / (re.sub(r"[^A-Za-z0-9._-]", "-", session_key(item)) + ".lock"), "a+", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def run_claude(item: dict, state: "State | None" = None, prompt: str | None = None, fresh: bool = False) -> tuple[list[str], dict | None, str]:
     """Run Claude Code on an item in that conversation's session. Returns (tools used, result object, stderr tail).
 
     `fresh` ignores the conversation's session and starts a new one: the retry path, where
     resuming would replay a transcript in which the writer already declined to act."""
     state = state or State()
+    with conversation_lock(item):
+        return _run_claude_in_session(item, state, prompt, fresh)
+
+
+def _run_claude_in_session(item: dict, state: "State", prompt: str | None, fresh: bool) -> tuple[list[str], dict | None, str]:
     session = (str(uuid.uuid4()), False) if fresh else pick_session(item, state)
     tools, result, err = _run_claude_once(item, session, prompt)
     if result is None and session[1]:
         log.warning("resume of session %s failed (%s) — starting a fresh one", session[0][:8], err[:120])
         session = (str(uuid.uuid4()), False)
-        tools, result, err = _run_claude_once(item, session)
-    if result is not None:
-        key, sid = session_key(item), session[0]
+        tools, result, err = _run_claude_once(item, session, prompt)
+    key = session_key(item)
+    answered = item_path(item["id"]).exists() and bool(load_item(item["id"]).get("decision"))
+    if not answered:
+        # The prompt is in that transcript with nothing after it — a usage limit answers in one
+        # line and uses no tools. Resumed, the writer reads the unanswered prompt as still open:
+        # on 27 Oct it caught up on four of them in one go, wrote decisions nobody was waiting
+        # for, and told the owner it had delivered all four. Nothing is kept of such a run.
+        if state.update(lambda d: d["sessions"].pop(key, None) is not None):
+            log.warning("session %s for %s dropped: the writer never answered in it", session[0][:8], key)
+    if result is not None and answered:
+        sid = session[0]
         total = result.get("total_cost_usd")
 
         def rec(d):
@@ -3039,15 +3074,27 @@ def cmd_say(a):
         return
     tools, result, err = run_claude(item, State(), prompt=f"{config.SKILL_COMMAND} compose {item_path(item['id'])}")
     item = load_item(item["id"])
-    why_not = err or (result or {}).get("subtype") or "no decision"
     if not item.get("decision"):
+        why_not = run_said(result, err) if (result or err) else "no decision"
         # `reported back` has to mean the owner has something to approve. Recorded here, where
         # there is no draft, it would lie in exactly the case it exists to catch — and a compose
         # failure is not hypothetical: a weekly rate limit does precisely this.
+        item["status"], item["outcome"] = "failed", {"status": "failed", "why": why_not, "at": now_iso()}
+        item["run"] = {"tools": tools, "subtype": (result or {}).get("subtype"), "said": why_not}
+        save_item(item)
         if re_item:
             record_delegation(item=re_item, role=a.from_, outcome="report_failed",
                               say=item["id"], error=str(why_not)[:200])
-        sys.exit(f"Solo could not compose it: {why_not}")
+        # The words still reach the owner. Four release notes went missing on 27 Oct because the
+        # writer's account was out of quota for half an hour and every one of them ended here,
+        # in an exit code only the calling agent saw. The console is where the owner already
+        # reads what agents send; the agent's own wording is better than nothing at all.
+        dest = "you" if kind == "people" and tid == s.me else name
+        s.console_post(f"⚠️ *Solo could not write a message from `{a.from_}`* — {why_not[:200]}\n"
+                       f"_nothing went to anyone. It was meant for {dest}; here it is as {a.from_} put it, "
+                       f"to place, rewrite or drop._\n{quote(a.intent[:1200])}")
+        sys.exit(f"Solo could not compose it: {why_not}\n"
+                 f"   the message is in the owner's Solo DM in your own words instead — nothing was sent to anyone")
     ledger, _ = load_services()
     fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
     outcome = execute_decision(s, item, item["decision"], ledger, fus, set(), state=State())
@@ -3353,6 +3400,13 @@ def normalize_breaks(text: str) -> str:
 
 def cmd_act(a):
     item = load_item(a.item)
+    if os.getenv("AUTOREPLY_DISPATCH") == "1" and item.get("status") in ("done", "failed"):
+        # A prompt left over in a resumed transcript, not work to do. The process that was
+        # waiting on this item has already finished — sent it, or given up and said so — and a
+        # decision written now goes nowhere while the writer believes it was delivered.
+        why = (item.get("outcome") or {}).get("why") or (item.get("outcome") or {}).get("status") or item["status"]
+        sys.exit(f"{item['id']} is already {item['status']} ({str(why)[:120]}) — nobody is waiting for this decision.\n"
+                 "   It was left over in an earlier session, not handed to you now: say so, send nothing, and stop.")
     text = normalize_breaks(a.text or "").strip()
     if a.text_file:
         text = Path(a.text_file).read_text(encoding="utf-8").strip()

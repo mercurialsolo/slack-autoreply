@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.2.2 — 2026-10-27
+
+**A `say` the writer cannot compose still reaches the owner**
+- Four release notes from the coordinator went missing on 27 Oct: the account `say` runs under
+  hit its weekly usage limit at 10:58, every compose came back "You've hit your weekly limit" in
+  one second, and each ended in an exit code only the calling agent saw. Now the item is marked
+  `failed` with the writer's own reason, and the agent's wording is posted to the console
+  (`⚠️ Solo could not write a message from …`) so the owner reads it anyway and can place it,
+  rewrite it or drop it. Nothing goes to anyone else. `--re` reports still record `report_failed`.
+- A run in which the writer never answered — no `act` — no longer leaves a session to resume.
+  The refused prompt sat in the shared owner-DM transcript; the next successful run resumed it,
+  "caught up" on four stale prompts in one go, wrote decisions no process was waiting for, and
+  told the owner all four had been delivered. The session record is dropped, so the next run in
+  that conversation starts clean.
+- `act` under dispatch refuses an item that is already `done` or `failed`: a prompt left over in
+  an old transcript is not work to do, and the writer is told to say so and stop.
+- One writer run per conversation at a time, across processes: a file lock under
+  `~/.slack-autoreply/locks/`. Two `say`s resumed one session five seconds apart and the second
+  loaded the transcript while the first was mid-tool-call. The daemon's in-memory per-channel
+  lock could not see a `say` process.
+- The fresh-session retry after a failed resume now carries the compose prompt; it used to fall
+  back to `handle`.
+
 ## 1.2.1 — 2026-10-25
 
 **A message to the owner is delivered, not drafted**

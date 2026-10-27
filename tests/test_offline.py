@@ -891,6 +891,12 @@ _lim_item = {"id": "LIM-1.000", "channel": D, "channel_type": "im", "sender": U,
 S.save_item(_lim_item); d.handle_with_claude(dict(_lim_item))
 _h = d.state.read().get("health") or {}
 check("a refused run marks the writer down with the model's own words", _h.get("ok") is False and "weekly limit" in _h.get("why", ""), str(_h))
+# The refused prompt sits in that transcript unanswered. Resumed, the writer treats it as still
+# open: on 27 Oct it caught up on four stale compose prompts in one run, recorded decisions no
+# process was waiting for, and reported all four delivered. A session the writer never answered
+# in is dropped, so the next run in that conversation starts from nothing.
+check("a refused run leaves no session to resume", D not in (d.state.read().get("sessions") or {}),
+      str((d.state.read().get("sessions") or {}).get(D)))
 check("…and the item says why it failed, not 'success'", "weekly limit" in (S.load_item("LIM-1.000").get("outcome") or {}).get("why", ""),
       str(S.load_item("LIM-1.000").get("outcome")))
 _said_down = [m for m in S.NOTIFIED if "cannot draft" in m] if hasattr(S, "NOTIFIED") else None
@@ -898,6 +904,9 @@ _lim.unlink(); os.environ.pop("FAKE_LIMIT", None)
 _ok_item = {**_lim_item, "id": "LIM-2.000", "ts": "3.000"}; S.save_item(_ok_item); d.handle_with_claude(dict(_ok_item))
 _h2 = d.state.read().get("health") or {}
 check("the next run that reaches the model clears it", _h2.get("ok") is True and not _h2.get("why"), str(_h2))
+check("…in a fresh session, not the one with the unanswered prompt",
+      S.load_item("LIM-2.000")["session"]["resumed"] is False and D in d.state.read()["sessions"])
+check("a conversation has a lock file every process can see", S.config.p("locks").is_dir() and any(S.config.p("locks").glob("*.lock")))
 
 # ------------------------------------------------------------------- pause
 # Pause lives in state.json, not .env, so a running daemon honours it without a restart.
@@ -1466,6 +1475,39 @@ check("put back, a second ✅ sends it", len(fc.uploads) == 1 and _fts2 not in d
 check("a draft that carries a file is always the owner's to approve, whatever MODE says",
       S.load_item(_fi2["id"])["policy"]["effective"] == "draft")
 S.Slack = _RealSlack
+
+# ------------------------------------------------ a say the writer could not compose
+# Four release notes went missing on 27 Oct: the account `say` runs under was out of quota, every
+# compose came back "You've hit your weekly limit", and each one ended in an exit code only the
+# coordinator saw. The owner found out by noticing the silence. The words still reach the console,
+# the item says it failed, and a decision written for it later — by a resumed session catching up
+# on the stale prompt — is refused rather than recorded.
+S.Slack = lambda: d
+_lim = TMP / "limit"; _lim.write_text("x"); os.environ["FAKE_LIMIT"] = str(_lim)
+_n_con, _n_fc = len(_con.posted), len(fc.posted)
+try:
+    _lim_err = _refusal(intent="v0.47.0 (ebd0a301) is live on the box; call_e2e smoke passed", to="@priya", frm="coordinator")
+finally:
+    _lim.unlink(); os.environ.pop("FAKE_LIMIT", None); S.Slack = _RealSlack
+_lim_say = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.json"), key=lambda q: q.stat().st_mtime)][-1]
+check("the agent is told the writer's own reason", "weekly limit" in _lim_err and "nothing was sent" in _lim_err, _lim_err)
+check("the item records the failure, not a queue entry nobody will drain",
+      _lim_say["status"] == "failed" and "weekly limit" in _lim_say["outcome"]["why"], str(_lim_say.get("outcome")))
+_lim_posts = [q[1] for q in _con.posted[_n_con:]]
+check("the owner gets the agent's own words in the console", any("ebd0a301" in t and "could not write" in t for t in _lim_posts), str(_lim_posts)[:300])
+check("and is told nobody else received anything", any("nothing went to anyone" in t for t in _lim_posts))
+check("nothing reached the recipient", not [q for q in fc.posted[_n_fc:] if q[0] == D])
+os.environ["AUTOREPLY_DISPATCH"] = "1"
+try:
+    S.cmd_act(SimpleNamespace(item=_lim_say["id"], action="reply", text="live on the box", text_file=None, sources=None,
+                              note=None, urgency=None, emoji=None, thread=False, task=None, role=None))
+    _stale_act = ""
+except SystemExit as e:
+    _stale_act = str(e)
+finally:
+    os.environ.pop("AUTOREPLY_DISPATCH", None)
+check("a decision for an item that already failed is refused, not recorded",
+      "nobody is waiting" in _stale_act and not S.load_item(_lim_say["id"]).get("decision"), _stale_act)
 
 # Same guard on the other side of the interface. `say` is read by a coding agent following
 # skills/solo/SKILL.md, and an option that exists only in `--help` is an option no agent will ever
