@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.3.0 — 2026-10-27
+
+**The owner's desktop: `attention/attn.py`**
+- A new primitive for asks that cannot wait to be read: a one-time code a login is waiting on,
+  a decision that blocks everything behind it. The sender chooses the priority and the words;
+  the daemon on the owner's machine decides what that looks like. `p0` is a modal on top of
+  everything with the screen blurred, a countdown to the deadline, a sound until answered, and
+  it comes back if closed — with a "Can't right now" button always, recorded as `declined`.
+  `p1` is on top with a countdown and is shown again every few minutes. `p2` is one banner.
+- `attn ask … --wait` returns the owner's answer (text or a choice) as JSON; exit codes say
+  answered / declined / expired / cancelled / unreachable. Unreachable falls through
+  `ATTN_FALLBACK_CMD` so a closed laptop still tells someone. `attn cancel` takes an ask off the
+  screen when the sender no longer needs it. Open asks survive a daemon restart.
+- HTTP over the tailnet with a bearer token; asks are 0600 files, the log never carries an answer.
+  swiftDialog when installed, AppleScript dialogs otherwise. `attention/install-desktop.sh`
+  installs the LaunchAgent on the owner's machine; `attention/README.md` has the rest.
+- Solo raises a `p1` for an escalation whose triage urgency reaches `ATTN_URGENCY` (4.0) and
+  cancels it when the owner ✅/❌s the draft or it expires. `slackctl attn "<title>" …` (and
+  `solo attn …` from the laptop) lets any agent on the node interrupt the owner through Solo's
+  config, with `ATTN_URL`/`ATTN_TOKEN` in `~/.slack-autoreply/.env` and nowhere else. The writer
+  may not call it: `attn` is on the dispatch-forbidden list.
+
 ## 1.2.2 — 2026-10-27
 
 **A `say` the writer cannot compose still reaches the owner**

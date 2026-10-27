@@ -1476,6 +1476,45 @@ check("a draft that carries a file is always the owner's to approve, whatever MO
       S.load_item(_fi2["id"])["policy"]["effective"] == "draft")
 S.Slack = _RealSlack
 
+# ------------------------------------------------ an urgent escalation reaches the desktop
+# Slack badges nothing for the owner's own drafts and email waits to be read. A time-sensitive ask
+# goes on screen through attention/attn.py, and comes off it the moment the owner ✅/❌s in Slack.
+_attn_log = TMP / "attn-calls.txt"
+_fake_attn = TMP / "fake-attn.py"
+_fake_attn.write_text(f"""import sys, json
+open({str(_attn_log)!r}, "a").write(" ".join(sys.argv[1:]) + "\\n")
+if sys.argv[1] == "ask": print(json.dumps({{"id": "ask-abcdef123456", "state": "open"}}))
+else: print("ask-abcdef123456 cancelled")
+""")
+_real_attn, _real_url = S.ATTN, S.CFG["attn_url"]
+S.ATTN, S.CFG["attn_url"] = _fake_attn, "http://127.0.0.1:1"
+def _esc_item(iid, text, urgency):
+    it = {"id": iid, "channel": D, "channel_type": "im", "sender": U, "sender_name": "Priya", "text": text, "ts": iid.split("-")[-1].replace("_", "."),
+          "created": S.now_iso(), "status": "queued", "reply_thread_ts": None, "context": "(none)",
+          "triage": {"route": "escalate", "sensitivity": 2.0, "urgency": urgency}}
+    S.save_item(it)
+    return iid
+_urg = _esc_item("ATTN-1.000", "need the OTP for the new seat right now", 4.6)
+_urg_item = S.load_item(_urg)
+S.execute_decision(d, _urg_item, {"action": "escalate", "text": "Checking", "note": "asks for an OTP — yours"}, d.ledger, d.followups, set(), state=d.state)
+_urg_item = S.load_item(_urg)
+check("an escalation at urgency ≥ ATTN_URGENCY is put on the owner's screen",
+      _urg_item["outcome"].get("attn") == "ask-abcdef123456" and "ask Needs you" in _attn_log.read_text() and "--priority p1" in _attn_log.read_text(),
+      _attn_log.read_text() if _attn_log.exists() else "no attn call")
+check("…with the writer's note as the body", "asks for an OTP" in _attn_log.read_text())
+S.approve_draft(d, _urg_item, d.ledger, d.followups, d.state, _urg_item["outcome"]["draft_ts"])
+check("✅ in Slack takes it off the screen", "cancel ask-abcdef123456" in _attn_log.read_text(), _attn_log.read_text())
+_calm = _esc_item("ATTN-2.000", "no rush - when you get a sec", 1.5)
+_calm_item = S.load_item(_calm)
+_n_attn = _attn_log.read_text().count("\n")
+S.execute_decision(d, _calm_item, {"action": "escalate", "text": "Checking", "note": "x"}, d.ledger, d.followups, set(), state=d.state)
+check("a calm escalation stays in Slack", _attn_log.read_text().count("\n") == _n_attn and not S.load_item(_calm).get("outcome", {}).get("attn"))
+S.ATTN, S.CFG["attn_url"] = _real_attn, _real_url
+_calm2 = _esc_item("ATTN-3.000", "urgent: code?", 5.0)
+_c2 = S.load_item(_calm2)
+S.execute_decision(d, _c2, {"action": "escalate", "text": "Checking", "note": "x"}, d.ledger, d.followups, set(), state=d.state)
+check("no desktop configured → nothing attempted, nothing broken", not S.load_item(_calm2)["outcome"].get("attn") and S.load_item(_calm2)["outcome"]["status"] == "escalated_draft")
+
 # ------------------------------------------------ a say the writer could not compose
 # Four release notes went missing on 27 Oct: the account `say` runs under was out of quota, every
 # compose came back "You've hit your weekly limit", and each one ended in an exit code only the

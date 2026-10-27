@@ -174,3 +174,21 @@ Solo's node over ssh — so it needs to run a command and open a network connect
 
 Either way, do not look for another route into Slack. There isn't one that keeps the owner's voice,
 and a message from anything but Solo is a message they did not send.
+
+
+## When it cannot wait to be read
+
+Slack and the console wait for the owner to look. A one-time code a login is holding for, or a
+decision that blocks everything queued behind it, cannot wait — and only the owner's own screen
+interrupts them. That is `attn`, run through Solo's settings:
+
+```
+solo attn "TOTP for solo@staffai.so" --body "the mini's login is waiting" --priority p0 --deadline 90s --reply text --from login-bot --wait
+solo attn "Ship v0.48 to the box?" --priority p1 --deadline 20m --reply choice --choices ship,hold --wait
+```
+
+`--wait` prints `{"state": "answered", "answer": "…"}` and exits 0; declined is 3, expired 4,
+cancelled 5, and 6 means the desktop was unreachable and the summary went by email instead. Use
+`p0` only when something is blocked *now* and `p1` when a decision is due within the hour; a
+report is `solo say`, never an interruption. Cancel what you no longer need: `solo attn cancel <id>`;
+`solo attn status` lists what is waiting on the owner. Details: `attention/README.md`.

@@ -984,6 +984,41 @@ class Slack:
             log.warning("NOTIFY_CMD failed (%s) — the draft is still in your self-DM", e)
 
 
+# ------------------------------------------------------------------ the desktop
+
+ATTN = Path(__file__).resolve().parent.parent / "attention" / "attn.py"
+
+
+def attention_ask(title: str, body: str, priority: str, deadline: str, frm: str = "solo") -> str | None:
+    """Put something on the owner's screen, if a desktop is configured. Returns the ask id.
+
+    Slack is where the draft waits; this is what makes the owner look. It never blocks the
+    caller and never fails the thing it is announcing — the console post already happened.
+    """
+    if not CFG["attn_url"]:
+        return None
+    cmd = [sys.executable, str(ATTN), "ask", title, "--body", body, "--priority", priority,
+           "--deadline", deadline, "--from", frm]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=20, check=False)
+        if p.returncode == 0 and p.stdout.strip():
+            return json.loads(p.stdout.strip().splitlines()[-1]).get("id")
+        log.warning("attn ask failed (rc %s): %s", p.returncode, (p.stderr or p.stdout).strip()[-200:])
+    except Exception as e:  # noqa: BLE001 - the draft is already in the console
+        log.warning("attn ask failed: %s", e)
+    return None
+
+
+def attention_cancel(ask_id: str | None) -> None:
+    """The owner acted in Slack (or the draft expired): take it off their screen."""
+    if not ask_id or not CFG["attn_url"]:
+        return
+    try:
+        subprocess.run([sys.executable, str(ATTN), "cancel", ask_id], capture_output=True, text=True, timeout=20, check=False)
+    except Exception as e:  # noqa: BLE001
+        log.warning("attn cancel %s failed: %s", ask_id, e)
+
+
 # ------------------------------------------------------------------ core
 
 
@@ -1248,6 +1283,14 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
         else:
             slack.notify(note)
             item["outcome"] = {"status": "escalated"}
+        if t and float(t.get("urgency") or 0) >= CFG["attn_urgency"]:
+            # Urgent enough that a badge is not enough. Triage scored the urgency; the sender of
+            # the message did not get a say, and neither did the writer.
+            ask_id = attention_ask(f"Needs you — {who} in {describe_where(item)}",
+                                   (decision.get("note") or item["text"][:300]) + "\n\n✅ / ❌ the draft in your Solo DM",
+                                   "p1", CFG["attn_deadline"])
+            if ask_id:
+                item["outcome"]["attn"] = ask_id
         item["policy"] = {"effective": "draft", "reason": "escalate"}
         save_item(item)
         audit(item=item["id"], counterpart=who, status="escalated", reply=text, trigger=item["text"][:120])
@@ -1365,6 +1408,7 @@ def approve_draft(slack: Slack, item: dict, ledger: Ledger, followups: Followups
         fu = dict(item["followup"])
         fu["due"] = datetime.fromisoformat(fu["due"])
         followups.add(**fu)
+    attention_cancel(item.get("outcome", {}).get("attn"))
     item["outcome"] = {**item.get("outcome", {}), "status": "sent_from_draft", "ts": ts, "approved": now_iso()}
     if file_ids:
         item["outcome"]["files"] = file_ids
@@ -1383,6 +1427,7 @@ def approve_draft(slack: Slack, item: dict, ledger: Ledger, followups: Followups
 
 
 def drop_draft(slack: Slack, item: dict, ledger: Ledger, state: State, draft_ts: str) -> str:
+    attention_cancel(item.get("outcome", {}).get("attn"))
     item["outcome"] = {**item.get("outcome", {}), "status": "dropped", "dropped": now_iso()}
     save_item(item)
     state.update(lambda d_: d_["pending"].pop(draft_ts, None))
@@ -2657,6 +2702,7 @@ class Daemon(Slack):
                 self.state.update(lambda d: d["pending"].pop(draft_ts, None)); continue
             at = (item.get("outcome") or {}).get("at")
             if at and now - datetime.fromisoformat(at) >= timedelta(hours=CFG["draft_expire_hours"]):
+                attention_cancel(item["outcome"].get("attn"))
                 item["outcome"]["status"] = "expired"
                 save_item(item)
                 self.state.update(lambda d: d["pending"].pop(draft_ts, None))
@@ -3441,6 +3487,20 @@ def cmd_act(a):
     print(execute_decision(s, item, decision, ledger, fus, s.resolve_users(CFG["share_trusted"]), state=State()))
 
 
+def cmd_attn(a):
+    """`slackctl attn "<title>" …` — put something on the owner's desktop, with Solo's settings.
+
+    A thin door to attention/attn.py so an agent on this machine needs no config of its own:
+    ATTN_URL and ATTN_TOKEN live in Solo's .env and nowhere else. Everything after the title is
+    attn's own grammar (--priority, --deadline, --reply, --choices, --wait, --from).
+    """
+    if not CFG["attn_url"]:
+        sys.exit("ATTN_URL is not set in ~/.slack-autoreply/.env — the owner's desktop is not configured (see attention/README.md)")
+    # `attn cancel <id>`, `attn status`, `attn doctor` pass straight through; anything else is a title.
+    verb = a.title if a.title in ("cancel", "status", "doctor") else None
+    os.execv(sys.executable, [sys.executable, str(ATTN), *([verb] if verb else ["ask", a.title]), *a.rest])
+
+
 def cmd_done(a):
     item = load_item(a.item)
     item["status"] = "done"
@@ -3690,7 +3750,7 @@ def cmd_review_data(a):
 # `act`, which records a decision without executing it.
 # The writer proposes an investigation with `act --task`; it may not dispatch one, nor read the
 # record of what the owner has handed over.
-DISPATCH_FORBIDDEN = frozenset({"approve", "drop", "dispatch", "pause", "resume", "listen", "done",
+DISPATCH_FORBIDDEN = frozenset({"approve", "drop", "dispatch", "pause", "resume", "listen", "done", "attn",
                                 "build-voice", "delegations", "eng-report", "eng-replay", "eng-sync"})
 
 # A rehearsal scored against real history is only honest if the writer cannot read the future.
@@ -3755,6 +3815,8 @@ def main():
     p = sub.add_parser("ask", help="ask about Slack in plain language; read-only, answers on stdout")
     p.add_argument("question"); p.set_defaults(fn=cmd_ask)
     p = sub.add_parser("done"); p.add_argument("item"); p.add_argument("--status", default="skipped"); p.set_defaults(fn=cmd_done)
+    p = sub.add_parser("attn", help="interrupt the owner on their desktop (attn ask, with Solo's config)")
+    p.add_argument("title"); p.add_argument("rest", nargs=argparse.REMAINDER); p.set_defaults(fn=cmd_attn)
     sub.add_parser("followups").set_defaults(fn=cmd_followups)
     sub.add_parser("drafts").set_defaults(fn=cmd_drafts)
     p = sub.add_parser("approve"); p.add_argument("item"); p.set_defaults(fn=cmd_approve)
