@@ -109,7 +109,7 @@ CFG = dict(
     # interrupts. An escalation whose urgency reaches ATTN_URGENCY is also put on the owner's
     # screen, on top, until they ✅/❌ it in Slack or it passes. Empty ATTN_URL = never.
     attn_url=env("ATTN_URL", ""),
-    attn_urgency=env_float("ATTN_URGENCY", 4.0),
+    attn_urgency=env_float("ATTN_URGENCY", 4.5),
     attn_deadline=env("ATTN_DEADLINE", "30m"),
     ack_style=env("ACK_STYLE", "reaction").strip().lower(),
     ack_emoji=env("ACK_EMOJI", "eyes").strip().strip(":"),

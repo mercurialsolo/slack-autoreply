@@ -16,7 +16,7 @@
 - HTTP over the tailnet with a bearer token; asks are 0600 files, the log never carries an answer.
   swiftDialog when installed, AppleScript dialogs otherwise. `attention/install-desktop.sh`
   installs the LaunchAgent on the owner's machine; `attention/README.md` has the rest.
-- Solo raises a `p1` for an escalation whose triage urgency reaches `ATTN_URGENCY` (4.0) and
+- Solo raises a `p1` for an escalation whose triage urgency reaches `ATTN_URGENCY` (4.5 — 5 of the last 47 escalations; 4.0 would have been 16) and
   cancels it when the owner ✅/❌s the draft or it expires. `slackctl attn "<title>" …` (and
   `solo attn …` from the laptop) lets any agent on the node interrupt the owner through Solo's
   config, with `ATTN_URL`/`ATTN_TOKEN` in `~/.slack-autoreply/.env` and nowhere else. The writer

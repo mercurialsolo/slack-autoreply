@@ -42,7 +42,7 @@ person; design for it — a 90s ask that cannot reach a screen should fail now, 
 On a Solo node use the same thing through Solo's config, so an agent needs none of its own:
 `python3 ~/.claude/skills/solo/scripts/slackctl.py attn "<title>" --priority p0 …`, or from the
 laptop `solo attn "<title>" …`. Solo itself raises a `p1` for an escalation whose triage urgency is
-at least `ATTN_URGENCY` (default 4.0) and takes it down again when the owner ✅/❌s the draft in Slack.
+at least `ATTN_URGENCY` (default 4.5) and takes it down again when the owner ✅/❌s the draft in Slack.
 
 Replies are `none`, `text`, `choice` (`--choices a,b,c`) or `file`. Up to six images (png, jpg,
 gif, webp, heic, pdf; 6 MB together) go with an ask and are shown in the dialog — in Preview beside
