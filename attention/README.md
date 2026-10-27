@@ -60,9 +60,22 @@ only, and `--wait` prints the answer to stdout and nowhere else.
 ## Serving (the owner's machine, macOS)
 
 ```
-attention/install-desktop.sh        # token, LaunchAgent io.solo.attention, prints the sender settings
-brew install --cask swiftdialog     # optional: the real dialogs. Without it: AppleScript dialogs, no countdown bar
+attention/install-desktop.sh        # token, LaunchAgent io.solo.attention (the daemon), prints the sender settings
+attention/app/build.sh              # Solo.app: the banner, the bell in the menu bar, the popover (needs Xcode / CLT)
 ```
+
+**Solo.app** (attention/app) is what the owner sees. A banner at the top right that looks like a
+macOS notification but is our own floating panel: it shows over everything, fullscreen apps
+included, needs no notification permission, and holds the whole ask — context and images, a
+paste-friendly field, choice buttons or a file drop zone, a live countdown, Not now and Send.
+A bell in the menu bar carries the most urgent countdown and opens a popover with every open ask.
+Answers are written straight into the ask file the daemon is polling. Sound: Basso for `p0`
+(again on each nag), Glass once for `p1`, Tink for `p2`, which also slides away after 10s.
+
+Real macOS notifications (reply field, action buttons) are attempted too, but macOS only grants
+them to a Developer-ID-signed app; an ad-hoc build is refused, so the panel is the surface.
+Without Solo.app running, the daemon falls back to a swiftDialog card (`brew install --cask
+swiftdialog`) and then to AppleScript dialogs.
 
 The daemon binds this machine's tailscale IPv4 (or `ATTN_BIND`) on `ATTN_PORT` (9911) and requires
 the bearer token on everything but `/health`. macOS asks once whether python3 may accept incoming

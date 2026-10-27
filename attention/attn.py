@@ -430,6 +430,16 @@ def cmd_serve(a) -> None:
 # ------------------------------------------------------------------ renderers (the daemon's side)
 
 
+def app_running() -> bool:
+    """Attention.app (attention/app) writes its pid on start; it renders when it is alive."""
+    try:
+        pid = int((HOME / "app.pid").read_text().strip())
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def dialog_bin() -> str:
     return shutil.which("dialog") or ("/usr/local/bin/dialog" if os.path.exists("/usr/local/bin/dialog") else "")
 
@@ -442,6 +452,20 @@ def cmd_render(a) -> None:
     Notification Center banner.
     """
     ask = json.loads(Path(a.ask).read_text(encoding="utf-8"))
+    if app_running():
+        # The app saw `shown` go up and posted the banner; it writes the answer into the file
+        # itself. Wait here for that, one nag interval, and come back "closed" so the daemon's
+        # loop shows it again (the app re-posts, with sound) until something terminal happens.
+        wait = {"p0": 30, "p1": 60 * float(cfg("ATTN_NAG_MINUTES", "5")), "p2": 3}[ask["priority"]]
+        end = time.time() + wait
+        while time.time() < end:
+            time.sleep(1)
+            cur = load_ask(ask["id"]) or ask
+            if cur["state"] != "open":
+                print(json.dumps({"state": "closed"}))
+                return
+        print(json.dumps({"state": "closed"}))
+        return
     if ask["priority"] == "p2":
         _notify_banner(ask)
         print(json.dumps({"state": "closed"}))
@@ -714,7 +738,9 @@ def cmd_doctor(a) -> None:
     if ENV_FILE.exists():
         mode = ENV_FILE.stat().st_mode & 0o777
         rows.append(("env file mode", f"{oct(mode)}" + ("" if mode == 0o600 else " — should be 0600: chmod 600 " + str(ENV_FILE))))
-    rows.append(("renderer", "swiftDialog " + dialog_bin() if dialog_bin() else "AppleScript display dialog (no countdown bar) — brew install --cask swiftdialog for the real thing"))
+    rows.append(("renderer", "Attention.app (menu bar, notifications, popover)" if app_running()
+                 else "swiftDialog " + dialog_bin() if dialog_bin()
+                 else "AppleScript display dialog — attention/app/build.sh for the native app"))
     rows.append(("banners", "terminal-notifier" if shutil.which("terminal-notifier") else "osascript display notification"))
     rows.append(("tailscale ip", tailscale_ip() or "none found — the daemon will bind 127.0.0.1 unless ATTN_BIND is set"))
     url = cfg("ATTN_URL")
