@@ -3469,6 +3469,73 @@ def normalize_breaks(text: str) -> str:
     return text.replace("\\n", "\n")
 
 
+# --- agentvm instruct hook (brief-30 C slice c, owner yes 2026-10-27) ------------------------------
+# A Slack message that asks the meeting agent (agentvm's Solo, in or out of a call) to do something
+# is forwarded to its instruction inbox through agentvm's dev/control/slack_relay.py, with the Slack
+# sender's id: the box decides their standing (owner, invited, or refused). The answer comes back in
+# the same thread as a draft for the owner's check mark (origin agent:, which never auto-sends).
+# On by default; AGENTVM_SLACK_INSTRUCT=off in ~/.slack-autoreply/.env turns it off. No key: it goes over ssh.
+AGENTVM_RELAY_DEFAULT = str(Path.home() / ".slack-autoreply/agentvm/slack_relay.py")   # from agentvm main, dev/control
+AGENTVM_WAIT_S = 1800
+
+
+def agentvm_relay(*args: str, timeout: float = 60) -> subprocess.CompletedProcess:
+    # the agentvm CLI's own transport: ssh to the box as the owner, with this machine's keys (owner, 2026-10-27:
+    # "use the Solo cli and the keys needed with it"); never a key from a file
+    env = {k: v for k, v in os.environ.items() if k not in ("AGENTVM_URL", "AGENTVM_KEY")}
+    relay = config.env("AGENTVM_RELAY") or AGENTVM_RELAY_DEFAULT
+    return subprocess.run([sys.executable, relay, *args], capture_output=True, text=True, timeout=timeout, env=env)
+
+
+def instruct_forward(item: dict, text: str, identity: str) -> str:
+    if config.env("AGENTVM_SLACK_INSTRUCT").lower() in ("off", "0", "no"):
+        sys.exit("instruct is switched off (AGENTVM_SLACK_INSTRUCT=off): use hold or escalate instead")
+    if item.get("simulated"):
+        return f"simulated: would forward to {identity}: {text[:80]}"
+    thread = item.get("reply_thread_ts") or item["ts"]
+    out = agentvm_relay("forward", "--identity", identity, "--user", item["sender"], "--name", item["sender_name"],
+                        "--channel", item["channel"], "--ts", thread, "--text", text)
+    if out.returncode != 0:
+        sys.exit(f"agentvm refused it: {(out.stderr or out.stdout).strip()[:300]}\n   use hold or escalate instead")
+    task_id = json.loads(out.stdout)["task_id"]
+    item["agentvm"] = {"identity": identity, "task_id": task_id, "thread_ts": thread, "at": now_iso()}
+    item["status"] = "instructed"
+    save_item(item)
+    with open(config.p("agentvm-instruct.log"), "a", encoding="utf-8") as log_out:
+        subprocess.Popen([sys.executable, SCRIPT, "instruct-wait", item["id"]], stdin=subprocess.DEVNULL,
+                         stdout=log_out, stderr=subprocess.STDOUT, start_new_session=True)
+    return f"forwarded to {identity} as {task_id}; its answer comes back here as a draft for your ✅"
+
+
+def cmd_instruct_wait(a):
+    """Detached: wait for the agentvm item, then draft its answer in the thread for the owner's ✅."""
+    item = load_item(a.item)
+    av = item.get("agentvm") or {}
+    out = agentvm_relay("wait", av["task_id"], "--timeout", str(AGENTVM_WAIT_S), timeout=AGENTVM_WAIT_S + 60)
+    if out.returncode == 3:   # it waits on the owner's yes (never the Slack sender's): wait on for the end
+        log.info("agentvm %s waits on the owner: %s", av["task_id"], (out.stdout or "").strip()[:200])
+        out = agentvm_relay("wait", av["task_id"], "--through-owner", "--timeout", str(AGENTVM_WAIT_S),
+                            timeout=AGENTVM_WAIT_S + 60)
+    said = (out.stdout or "").strip()
+    if out.returncode == 0:
+        text = said or "Done."
+    elif out.returncode == 3:
+        text = said or "It needs a yes before it goes on."
+    elif out.returncode == 1:
+        text = f"Couldn't get that done: {said or 'it stopped'}"
+    else:
+        log.warning("agentvm wait for %s failed: %s", item["id"], (out.stderr or said)[:300])
+        text = "I couldn't reach the meeting agent to finish that; I'll follow up."
+    item["origin"] = f"agent:agentvm-{av.get('identity', 'solo')}"   # always a draft for the owner's check mark
+    item["reply_thread_ts"] = av.get("thread_ts") or item.get("reply_thread_ts")
+    decision = {"action": "reply", "text": text, "sources": ["agentvm"], "used_context": True, "note": "",
+                "urgency": None, "task": "", "role": "", "emoji": "", "thread": False, "at": now_iso()}
+    ledger, _ = load_services()
+    s = Slack()
+    fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
+    print(execute_decision(s, item, decision, ledger, fus, s.resolve_users(CFG["share_trusted"]), state=State()))
+
+
 def cmd_act(a):
     item = load_item(a.item)
     if os.getenv("AUTOREPLY_DISPATCH") == "1" and item.get("status") in ("done", "failed"):
@@ -3481,8 +3548,8 @@ def cmd_act(a):
     text = normalize_breaks(a.text or "").strip()
     if a.text_file:
         text = Path(a.text_file).read_text(encoding="utf-8").strip()
-    if a.action in ("hold", "reply") and not text:
-        sys.exit("--text is required for hold/reply")
+    if a.action in ("hold", "reply", "instruct") and not text:
+        sys.exit("--text is required for hold/reply/instruct")
     if a.action == "ignore" and item.get("mentioned"):
         # Measured: three times the writer took a `hold` that triage had chosen, turned it into
         # silence, and the owner answered the question themselves — every one a direct @mention
@@ -3498,6 +3565,9 @@ def cmd_act(a):
                 "task": getattr(a, "task", None) or "", "role": getattr(a, "role", None) or "",
                 "emoji": emoji, "thread": bool(a.thread), "at": now_iso()}
     item["decision"] = decision
+    if a.action == "instruct":   # agentvm instruct hook (brief-30)
+        print(instruct_forward(item, text, a.identity or config.env("AGENTVM_IDENTITY") or "zen-solo"))
+        return
     if os.getenv("AUTOREPLY_DISPATCH") == "1":
         item["status"] = "decided"
         save_item(item)
@@ -3823,7 +3893,8 @@ def main():
     p.add_argument("item", help="inbox item id, as `delegations` or `inbox` prints it")
     p.set_defaults(fn=cmd_dispatch)
     p = sub.add_parser("deadline"); p.add_argument("--urgency", type=float, required=True); p.set_defaults(fn=cmd_deadline)
-    p = sub.add_parser("act"); p.add_argument("item"); p.add_argument("--action", required=True, choices=["ignore", "ack", "hold", "reply", "escalate"])
+    p = sub.add_parser("act"); p.add_argument("item"); p.add_argument("--action", required=True, choices=["ignore", "ack", "hold", "reply", "escalate", "instruct"])
+    p.add_argument("--identity", help="instruct: the agentvm identity to hand it to (default AGENTVM_IDENTITY, else zen-solo)")
     p.add_argument("--text", help="message text; use \\n for new lines"); p.add_argument("--text-file"); p.add_argument("--sources", help="comma list of where you looked: fs,notion,drive,github,calendar,web …")
     p.add_argument("--note", help="why it needs them (escalate), or what you need from them before it sends (hold/reply)")
     p.add_argument("--task", help="propose a READ-ONLY investigation for an agent; the owner dispatches it with 🤖, never you")
@@ -3831,6 +3902,8 @@ def main():
     p.add_argument("--emoji", help="for ack: the reaction to leave, e.g. +1, tada, eyes. Default ACK_EMOJI")
     p.add_argument("--thread", action="store_true", help="reply in a thread on their message instead of in the channel/DM")
     p.set_defaults(fn=cmd_act)
+    p = sub.add_parser("instruct-wait", help="(internal) wait for an agentvm item and draft its answer")
+    p.add_argument("item"); p.set_defaults(fn=cmd_instruct_wait)
     p = sub.add_parser("say", help="another agent asks Solo to send something, in your voice")
     p.add_argument("intent", help="WHAT happened / what you want said — not finished prose; Solo writes it")
     p.add_argument("--to", dest="target", help="optional: @handle, #channel or ID. Omit it and Solo decides where it belongs")
