@@ -860,6 +860,16 @@ out = ctl("note", U, "prefers short answers"); check("note cli (offline id)", ou
 out = ctl("review-data", "--days", "1"); check("review-data cli", "Recent corrections" in out.stdout and "dossiers" in out.stdout)
 out = ctl("doctor"); check("doctor exits 1 with clear FAILs when unconfigured", out.returncode == 1 and "SLACK_USER_TOKEN" in out.stdout)
 
+# manifest.yaml and doctor agree on scopes: everything doctor requires is granted by the manifest,
+# and the two optional scopes doctor only warns about are there too.
+_man = (ROOT / "manifest.yaml").read_text()
+_user_block = _man.split("    user:\n", 1)[1]
+import re as _re0  # noqa: E402
+_man_scopes = set(_re0.findall(r"^      - (\S+)", _user_block, _re0.M))
+import doctor as _doctor  # noqa: E402
+check("manifest grants every scope doctor requires", _doctor.REQUIRED_SCOPES <= _man_scopes, sorted(_doctor.REQUIRED_SCOPES - _man_scopes))
+check("manifest grants the optional scopes doctor warns about", {"files:write", "users:read.email"} <= _man_scopes)
+
 # ------------------------------------------------- a run that never reached slackctl
 # The first dispatch after the plugin was installed came back in one second as "success" with no
 # tools and no decision, while the next one worked. That is the skill not running, not the writer

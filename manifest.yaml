@@ -67,3 +67,4 @@ oauth_config:
       - reactions:write   # 👀 acks
       - search:read       # build_voice.py pulls your past messages
       - users:read
+      - users:read.email  # look a person up by email, so Solo can @-tag them from Linear/GitHub/email identities
