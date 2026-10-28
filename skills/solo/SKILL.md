@@ -23,6 +23,10 @@ confidently it asks the owner rather than guessing.
 
 `--from` is you — your agent or task name. It appears on the draft so the owner knows who asked.
 
+When you must name a person and only have their email — the assignee on a Linear issue, a GitHub
+author — write it as `@their@email` inside the text (`@sri@staffai.so`) and Solo tags the right
+Slack account. `solo about sri@staffai.so` works the same way. A bare email stays text.
+
 One exception to "do not name a channel or a person": when you are **answering work the owner
 dispatched to you**, the brief you were given carries a `--re <id>`. Pass it exactly as written:
 

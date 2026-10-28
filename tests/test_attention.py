@@ -124,7 +124,9 @@ check("notify shows once and is done", code == 0 and r["state"] == "shown" and a
 
 # ------------------------------------------------------------ expiry and escalation
 t0 = time.time()
-code, r, _ = run("ask", "Decide before the call", "--body", "close", "--priority", "p1", "--deadline", "3s", "--wait")
+# 5s, not 3: each showing costs an interpreter start (~0.5-1s) and the nag gap is 1.2s, so a 3s
+# deadline sometimes expired after one showing and the "shown again" check below went red at random.
+code, r, _ = run("ask", "Decide before the call", "--body", "close", "--priority", "p1", "--deadline", "5s", "--wait")
 check("a p1 nobody answers expires at its deadline, exit 4", code == 4 and r["state"] == "expired" and time.time() - t0 < 10, f"{code} {r}")
 check("…after being shown more than once", attn.load_ask(r["id"])["shown"] >= 2, str(attn.load_ask(r["id"])["shown"]))
 

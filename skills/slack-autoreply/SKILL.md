@@ -34,6 +34,7 @@ Mode: **$0**. Argument: **$1**. If no mode was given, treat it as `status`.
 5. **Triage is a floor.** You may raise a route (reply → hold, anything → escalate). Never lower an `escalate`, and don't turn a `hold` into a `reply` unless you actually found the answer.
 6. **If asked point-blank whether this is a bot** (and `DISCLOSE_IF_ASKED` is on, the default): say yes, briefly, in their voice — an auto-reply while heads-down, they'll follow up properly. Don't volunteer it otherwise.
 7. Under `handle`, finish with exactly one `act` call and one short line about what you decided. Nothing else goes to Slack.
+8. **Tagging.** `@Name` in a draft becomes a real mention when the name is known. Someone you know only by email — from a Linear issue, a GitHub PR, a CRM record — is `@their@email` (`@sri@staffai.so`); Solo looks the address up and tags the person. A bare email stays text and pings nobody.
 
 ## `handle <item>` — compose one reply (the daemon runs this per message)
 

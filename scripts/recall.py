@@ -51,8 +51,9 @@ def trim(text: str, n: int = 1500) -> str:
 def resolve_target(slack, s: str) -> tuple[str, str, str]:
     """'@priya' / 'U…' → ('people', uid, name); '#general' / 'C…' / 'G…' → ('channels', cid, name); 'D…' → the person in that DM."""
     s = s.strip()
-    if s.startswith("@") or re.fullmatch(r"[UW][A-Z0-9]{6,}", s):
-        uid = s if not s.startswith("@") else next(iter(slack.resolve_users([s])), None)
+    if s.startswith("@") or re.fullmatch(r"[UW][A-Z0-9]{6,}", s) or re.fullmatch(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}", s):
+        # '@priya', a Slack id, or 'priya@company.com' (users.lookupByEmail, via resolve_users)
+        uid = s if re.fullmatch(r"[UW][A-Z0-9]{6,}", s) else next(iter(slack.resolve_users([s])), None)
         if not uid:
             raise SystemExit(f"no Slack user matches {s}")
         return "people", uid, slack.name_of(uid)
@@ -69,7 +70,7 @@ def resolve_target(slack, s: str) -> tuple[str, str, str]:
         if not cid:
             raise SystemExit(f"no channel matches {s}")
         return "channels", cid, slack.channel_name(cid)
-    raise SystemExit(f"can't resolve {s!r}: use @handle, #channel, or a Slack ID")
+    raise SystemExit(f"can't resolve {s!r}: use @handle, an email, #channel, or a Slack ID")
 
 
 def dm_channel(slack, uid: str) -> str:

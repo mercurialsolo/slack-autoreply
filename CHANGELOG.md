@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.1 — 2026-10-28
+
+**Tag a person by email**
+- `@their@email` in a draft, a `say`, or as a `say`/`about` target resolves to that person's
+  Slack account (`users.lookupByEmail`), so an agent that knows someone only from a Linear issue
+  or a GitHub PR can still ping them. A bare email stays text. New user scope `users:read.email`
+  in `manifest.yaml`; `doctor` warns (not fails) when the installed app lacks it, like `files:write`.
+
+**`act --action instruct`**
+- A Slack message that asks the meeting agent (agentvm's Solo) to do something is handed to its
+  instruction inbox with the sender's id; the answer comes back in the same thread as a draft for
+  the owner's ✅. `AGENTVM_SLACK_INSTRUCT=off` turns it off. Ported from the mini, where it had
+  been added outside the repo.
+
 ## 1.3.0 — 2026-10-27
 
 **The owner's desktop: `attention/attn.py`**

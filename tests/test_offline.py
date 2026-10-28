@@ -71,6 +71,10 @@ class FakeClient:
     def chat_getPermalink(self, channel, message_ts): return {"permalink": f"https://slack/{channel}/{message_ts}"}
     def users_getPresence(self, user): return {"presence": "away"}
     def users_list(self, **k): return {"members": [{"id": U, "name": "priya", "profile": {"display_name": "Priya"}, "real_name": "Priya"}], "response_metadata": {}}
+    def users_lookupByEmail(self, email):
+        self.email_lookups = getattr(self, "email_lookups", 0) + 1
+        if email == "priya@example.com": return {"user": {"id": U, "name": "priya"}}
+        raise RuntimeError("The request to the Slack API failed.\nThe server responded with: {'ok': False, 'error': 'users_not_found'}")
     def conversations_list(self, **k): return {"channels": [{"id": C, "name": "growth"}], "response_metadata": {}}
     def conversations_history(self, channel, **k):
         msgs = self.history.get(channel, [])
@@ -1344,6 +1348,25 @@ check("@here is left inert rather than made to blast",
       S.restore_mentions("@here please", _look) == "@here please")
 check("an already-formed mention is untouched",
       S.restore_mentions("already <@U0SRI> tagged", _look) == "already <@U0SRI> tagged")
+
+# A person the writer knows only by email — from Linear, GitHub or a CRM — is tagged as @their@email.
+# A bare email is still text: "mail me at owner@example.com" never pings owner.
+_names["sri@staffai.so"] = "U0SRI"
+check("@email is restored to a mention of that person",
+      S.restore_mentions("@sri@staffai.so can you look", _look) == "<@U0SRI> can you look")
+check("an @email nobody owns stays as written",
+      S.restore_mentions("@ghost@staffai.so?", _look) == "@ghost@staffai.so?")
+check("@email at the end of a sentence keeps its punctuation",
+      S.restore_mentions("cc @sri@staffai.so.", _look) == "cc <@U0SRI>.")
+_sl = S.Slack()
+check("Slack.mention_id resolves an email through users.lookupByEmail",
+      _sl.mention_id("priya@example.com") == U and _sl.mention_id("PRIYA@example.com") == U)
+check("an unknown email resolves to nothing, quietly", _sl.mention_id("nobody@example.com") is None)
+check("email lookups are cached per address", _sl.client.email_lookups == 2)
+check("resolve_users takes an email", _sl.resolve_users(["priya@example.com"]) == {U})
+check("say/about target can be an email",
+      recall.resolve_target(_sl, "priya@example.com")[:2] == ("people", U))
+check("…and a leading @ on it is fine too", recall.resolve_target(_sl, "@priya@example.com")[:2] == ("people", U))
 
 # The guard above only catches an option shipped undocumented. It would not have caught this one
 # once the skill mentioned it — "the writer can find it and still never uses it" is not a thing a

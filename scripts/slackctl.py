@@ -80,7 +80,10 @@ def in_quiet_hours(spec: str, now: datetime | None = None) -> bool:
 # (@sri.k), so link_names would not have caught it either. This is the inverse of that rule.
 # The lookbehind keeps us out of emails (owner@example.com) and URLs (x.com/@sri); an apostrophe is
 # allowed inside the name so O'Brien resolves, and a trailing possessive is handed back unchanged.
-MENTION_RE = re.compile(r"(?<![A-Za-z0-9._%+\-/:])@([A-Za-z][A-Za-z0-9._'\u2019-]*[A-Za-z0-9]|[A-Za-z])")
+# "@sri@staffai.so" — a leading @ on an email — is a mention of the person that email belongs to
+# (users.lookupByEmail, scope users:read.email); a bare email stays text, as it should.
+MENTION_RE = re.compile(r"(?<![A-Za-z0-9._%+\-/:])@([A-Za-z][A-Za-z0-9._'\u2019-]*[A-Za-z0-9](?:@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})?|[A-Za-z])")
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-']+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
 MENTION_KEEP = {"here", "channel", "everyone"}   # leave these inert rather than make Solo able to blast
 
 
@@ -131,6 +134,10 @@ def slack_md(text: str, name_of) -> str:
 
 def quote(text: str) -> str:
     return "\n".join("> " + line for line in (text or "").splitlines())
+
+
+def looks_like_email(s: str) -> bool:
+    return bool(EMAIL_RE.fullmatch((s or "").strip()))
 
 
 def looks_like_user_id(s: str) -> bool:
@@ -762,6 +769,10 @@ class Slack:
             e = e.lstrip("@")
             if looks_like_user_id(e):
                 ids.add(e)
+            elif looks_like_email(e):
+                uid = self.user_by_email(e)
+                if uid:
+                    ids.add(uid)
             else:
                 handles.add(e.lower())
         if handles:
@@ -849,8 +860,27 @@ class Slack:
                 return m
         return None
 
+    def user_by_email(self, email: str) -> str | None:
+        """The person a workspace email belongs to, or None. Needs the users:read.email user scope
+        (manifest.yaml has it; `doctor` warns when the installed app does not)."""
+        key = email.strip().lower()
+        cache = self.__dict__.setdefault("_emails", {})
+        if key not in cache:
+            try:
+                cache[key] = self.client.users_lookupByEmail(email=key)["user"]["id"]
+            except Exception as e:
+                why = error_text(e)
+                if why == "missing_scope":
+                    log.warning("users.lookupByEmail needs the users:read.email scope — reinstall the app (doctor says so)")
+                elif why != "users_not_found":
+                    log.warning("users.lookupByEmail %s: %s", key, why)
+                cache[key] = None
+        return cache[key]
+
     def mention_id(self, name: str) -> str | None:
-        """Display name, real name, handle or an unambiguous first name -> user id."""
+        """Display name, real name, handle, an unambiguous first name, or an email -> user id."""
+        if looks_like_email(name):
+            return self.user_by_email(name)
         if self._mentions is None:
             m, seen_first = {}, {}
             cursor = None

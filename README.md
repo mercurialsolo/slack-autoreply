@@ -222,6 +222,10 @@ uploads it with the message in one call (the user token needs the `files:write` 
 `manifest.yaml` grants; `doctor` warns when it is missing). `solo say` copies a local file to the
 node first. The file has to stay put until the owner has approved.
 
+`@their@email` in any text tags the Slack account that email belongs to — for people an agent
+knows only from Linear, GitHub or a CRM. A bare email stays text. Needs the `users:read.email`
+user scope (in `manifest.yaml`; `doctor` warns when the installed app lacks it).
+
 The agent supplies the **intent**, never finished prose — Solo reads the recipient's dossier and the
 voice guide and writes it, then `compose` (SKILL.md) puts it through the same rules as any reply.
 
