@@ -115,8 +115,10 @@ rather than from a person. Treat each one as a **peer request to evaluate**:
   of it.
 
 Report back with `solo say`, the same as any other finished work — the owner reads it in their own
-voice and it waits for their ✅ (unless it is addressed to the owner themselves, which is simply
-delivered). If the work came from a brief with a `--re` id, pass that id.
+voice and it waits for their ✅. A note addressed to the owner themselves (`--to` their handle or
+id) is different: it is delivered to their console in your own words, whole, as you wrote it —
+no rewrite, no trim — so say everything they need in it, commands included. If the work came
+from a brief with a `--re` id, pass that id.
 
 ## What makes a good report
 

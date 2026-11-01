@@ -2512,14 +2512,33 @@ class Daemon(Slack):
                     "anything else is kept as feedback on how I write, and folded in at the next review")
 
     def on_console_message(self, ev: dict) -> None:
-        """The owner typed to Solo in its DM. Commands first, everything else is feedback."""
+        """The owner typed to Solo in its DM. Commands first, everything else is feedback.
+
+        A reply *in the thread* of a note an agent sent through Solo is neither: it is the owner
+        answering that agent. It goes to the coordinator's inbox when there is one on this
+        machine, and Solo answers in the thread, where the owner is looking.
+        """
         said = clean_text(ev.get("text", ""), self.name_of).strip()
         if not said:
             return
+        # Slack can deliver one message twice: answer it once.
+        seen = self.__dict__.setdefault("_console_seen", set())
+        if ev.get("ts") in seen:
+            return
+        if len(seen) > 1000:
+            seen.clear()
+        seen.add(ev.get("ts"))
+        thread = ev.get("thread_ts")
+        in_thread = bool(thread) and thread != ev.get("ts")
         low = said.lower()
         reply = None
         try:
-            if low in ("help", "?", "commands"):
+            if in_thread and (inbox := coordinator_inbox()):
+                with open(inbox, "a", encoding="utf-8") as f:
+                    f.write(f"- {now_iso()} owner (Slack thread reply to the note at {thread}): {said}\n")
+                log.info("console thread reply passed to the coordinator: %s", said[:100])
+                reply = "got it — passed to the coordinator"
+            elif low in ("help", "?", "commands"):
                 reply = self.CONSOLE_HELP
             elif low.startswith("pause"):
                 rest = said[5:].strip()
@@ -2565,7 +2584,7 @@ class Daemon(Slack):
             reply = f"that failed: {e}"
         if reply:
             try:
-                self.bot.chat_postMessage(channel=self.bot_dm, text=reply)
+                self.bot.chat_postMessage(channel=self.bot_dm, text=reply, **({"thread_ts": thread} if thread else {}))
             except Exception as e:  # noqa: BLE001
                 log.warning("could not answer in the console (%s)", e)
 
@@ -3087,7 +3106,12 @@ def cmd_say(a):
     Agent-originated messages draft for the owner's ✅, whatever the trust ledger says. The ledger
     graduates routes that a *person* asked for; nothing here was asked for by a person, so there is
     no track record that could earn an automatic send. The one exception is a message TO the
-    owner: it reaches nobody else, so it is delivered to their console instead of drafted there.
+    owner: it reaches nobody else, so it is delivered to their console instead of drafted there —
+    and in the agent's own words, without the writer. There is no voice to put it in (the owner
+    is the reader, not the author) and nothing to trim: through the writer a note came out as one
+    beat, and a coordinator's note lost the command the owner needed (31 Oct). It also means a
+    note to the owner cannot be lost to a writer that is out of quota, which is how the release
+    notes of 27 Oct and the refusals of 29 and 31 Oct went missing.
     """
     config.ensure_dirs()
     re_item = getattr(a, "re_item", None)
@@ -3170,6 +3194,16 @@ def cmd_say(a):
                            + (f"; {a.why}" if a.why else "") + ")")
     save_item(item)
     print(f"queued {item['id']} → {name} (asked by {a.from_})" + (f" with {describe_files(files)}" if files else ""))
+    if channel in (s.self_dm, s.bot_dm):
+        # Same test `execute_decision` applies: the owner's own DM. The words are the agent's,
+        # verbatim; `execute_decision` still records policy and outcome, and still falls back to
+        # a draft if the console cannot be reached.
+        item["decision"] = {"action": "reply", "text": a.intent, "verbatim": True}
+        save_item(item)
+        ledger, _ = load_services()
+        fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
+        print(execute_decision(s, item, item["decision"], ledger, fus, set(), state=State()))
+        return
     if CFG["dispatch"] != "claude":
         print(f"compose it with: claude -p '/solo:slack-autoreply compose {item_path(item['id'])}'")
         return
@@ -3506,6 +3540,17 @@ def normalize_breaks(text: str) -> str:
 # the same thread as a draft for the owner's check mark (origin agent:, which never auto-sends).
 # On by default; AGENTVM_SLACK_INSTRUCT=off in ~/.slack-autoreply/.env turns it off. No key: it goes over ssh.
 AGENTVM_RELAY_DEFAULT = str(Path.home() / ".slack-autoreply/agentvm/slack_relay.py")   # from agentvm main, dev/control
+AGENTVM_COORD_INBOX_DEFAULT = str(Path.home() / "agentvm-handoff/coord/inbox.md")     # the coordinator's inbox, one line per message
+
+
+def coordinator_inbox() -> Path | None:
+    """The coordinator's inbox on this machine, or None where there is no coordinator.
+
+    AGENTVM_COORD_INBOX overrides the default. The parent directory is the test: a machine
+    without the handoff tree has nobody reading the file, and a note appended there is lost.
+    """
+    path = Path(config.env("AGENTVM_COORD_INBOX") or AGENTVM_COORD_INBOX_DEFAULT).expanduser()
+    return path if path.parent.is_dir() else None
 AGENTVM_WAIT_S = 1800
 
 
@@ -3517,13 +3562,24 @@ def agentvm_relay(*args: str, timeout: float = 60) -> subprocess.CompletedProces
     return subprocess.run([sys.executable, relay, *args], capture_output=True, text=True, timeout=timeout, env=env)
 
 
+def slack_verified_email(uid: str) -> str:
+    """The user's profile email as Slack verified it (users.info, the users:read.email scope), or "" when unread."""
+    try:
+        return ((Slack().client.users_info(user=uid)["user"].get("profile") or {}).get("email") or "").strip().lower()
+    except Exception as e:  # noqa: BLE001 - the box then sees no address: a guest, refused, never a guessed standing
+        log.warning("agentvm: no verified email for %s (%s)", uid, e)
+        return ""
+
+
 def instruct_forward(item: dict, text: str, identity: str) -> str:
     if config.env("AGENTVM_SLACK_INSTRUCT").lower() in ("off", "0", "no"):
         sys.exit("instruct is switched off (AGENTVM_SLACK_INSTRUCT=off): use hold or escalate instead")
     if item.get("simulated"):
         return f"simulated: would forward to {identity}: {text[:80]}"
     thread = item.get("reply_thread_ts") or item["ts"]
+    email = slack_verified_email(item["sender"])   # the box's trust level comes from it, never from a name
     out = agentvm_relay("forward", "--identity", identity, "--user", item["sender"], "--name", item["sender_name"],
+                        *(["--email", email] if email else []),
                         "--channel", item["channel"], "--ts", thread, "--text", text)
     if out.returncode != 0:
         sys.exit(f"agentvm refused it: {(out.stderr or out.stdout).strip()[:300]}\n   use hold or escalate instead")

@@ -70,7 +70,8 @@ class FakeClient:
     def conversations_info(self, channel): return {"channel": {"name": "growth", "user": {D: U, D2: U2}.get(channel)}}
     def chat_getPermalink(self, channel, message_ts): return {"permalink": f"https://slack/{channel}/{message_ts}"}
     def users_getPresence(self, user): return {"presence": "away"}
-    def users_list(self, **k): return {"members": [{"id": U, "name": "priya", "profile": {"display_name": "Priya"}, "real_name": "Priya"}], "response_metadata": {}}
+    def users_list(self, **k): return {"members": [{"id": U, "name": "priya", "profile": {"display_name": "Priya"}, "real_name": "Priya"},
+                                                   {"id": "UME", "name": "barada", "profile": {"display_name": "Barada"}, "real_name": "Barada"}], "response_metadata": {}}
     def users_lookupByEmail(self, email):
         self.email_lookups = getattr(self, "email_lookups", 0) + 1
         if email == "priya@example.com": return {"user": {"id": U, "name": "priya"}}
@@ -1149,6 +1150,35 @@ ans, _ = _console("too formal — keep it shorter with Sri")
 check("free text is kept as feedback for review", "noted" in ans.lower()
       and "shorter with Sri" in (S.config.p("console_feedback.jsonl").read_text()))
 
+# A reply in the thread of a note an agent sent through Solo is the owner answering that agent, not
+# feedback on how Solo writes — so it goes to the coordinator's inbox, and Solo answers in the
+# thread. Ported from the mini (31 Oct), where it had been patched live and a deploy would have
+# erased it.
+_coord_inbox = TMP / "coord" / "inbox.md"; _coord_inbox.parent.mkdir(parents=True, exist_ok=True)
+os.environ["AGENTVM_COORD_INBOX"] = str(_coord_inbox)
+def _console_ev(text, ts, thread_ts=None):
+    d.bot = FakeClient(); d.bot_dm = "DBOT"
+    ev = {"type": "message", "user": "UME", "channel": "DBOT", "channel_type": "im", "ts": ts, "text": text}
+    if thread_ts:
+        ev["thread_ts"] = thread_ts
+    d.on_event(ev)
+    return list(d.bot.posted)
+_tp = _console_ev("yes, go with the fallback lane", "1800000001.000100", thread_ts="1800000000.000100")
+check("a thread reply under an agent's note goes to the coordinator's inbox",
+      "go with the fallback lane" in _coord_inbox.read_text() and "1800000000.000100" in _coord_inbox.read_text())
+check("…and Solo answers in that thread", len(_tp) == 1 and _tp[0][2] == "1800000000.000100" and "passed to" in _tp[0][1], _tp)
+check("…not as voice feedback", "fallback lane" not in S.config.p("console_feedback.jsonl").read_text())
+_tp2 = _console_ev("yes, go with the fallback lane", "1800000001.000100", thread_ts="1800000000.000100")
+check("a message Slack delivers twice is answered once", _tp2 == [] and _coord_inbox.read_text().count("fallback lane") == 1)
+os.environ["AGENTVM_COORD_INBOX"] = str(TMP / "nowhere" / "inbox.md")
+_tp3 = _console_ev("shorter, please", "1800000002.000100", thread_ts="1800000000.000100")
+check("with no coordinator inbox on this machine a thread reply is kept as feedback, in the thread",
+      "shorter, please" in S.config.p("console_feedback.jsonl").read_text() and "noted" in _tp3[-1][1]
+      and _tp3[-1][2] == "1800000000.000100", _tp3)
+_tp4 = _console_ev("status", "1800000003.000100")
+check("a top-level console message is still answered flat", _tp4[-1][2] is None and "MODE=" in _tp4[-1][1])
+os.environ.pop("AGENTVM_COORD_INBOX")
+
 # "approve everything" has to include the reaction, or the one unapproved thing is the one that
 # goes wrong. ignore stays automatic because it sends nothing at all.
 check("MODE=draft makes even an ack wait",
@@ -1512,6 +1542,36 @@ _said = S.approve_draft(d, _fi2, d.ledger, d.followups, d.state, _fts2)
 check("put back, a second ✅ sends it", len(fc.uploads) == 1 and _fts2 not in d.state.read()["pending"])
 check("a draft that carries a file is always the owner's to approve, whatever MODE says",
       S.load_item(_fi2["id"])["policy"]["effective"] == "draft")
+
+# A note addressed to the owner is the agent's words, not a brief for a draft: nobody else reads
+# it, so there is no voice to put it in and nothing to trim. Through the writer it came out as one
+# beat — on 31 Oct a coordinator's note lost the sysctl command the owner needed and had to be
+# sent again — and every compose the weekly limit refused (29 and 31 Oct) dropped one. So it never
+# touches Claude: the words go to the console as they were given.
+_long_note = ("Mini release still failing, one step further: vsock works, now bubblewrap in devc fails with "
+              "'setting up uid map: Permission denied'.\nNeeds on the agentvm VM: colima ssh -p agentvm -- sudo "
+              "sysctl kernel.apparmor_restrict_unprivileged_userns=0 (resets on VM reboot). The fallback lane "
+              "holds until you say so; the PR is #1739 and CI is green on it, twice.")
+_n_con2, _pend2 = len(_con.posted), dict(d.state.read()["pending"])
+os.environ["CLAUDE_BIN"] = "/nonexistent-claude"; S.CFG["claude_bin"] = "/nonexistent-claude"
+try:
+    S.cmd_say(_say_args(_long_note, to="@barada", frm="factory-pr1739"))
+finally:
+    os.environ["CLAUDE_BIN"] = str(FAKE_CLAUDE); S.CFG["claude_bin"] = str(FAKE_CLAUDE)
+_vn = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.json"), key=lambda q: q.stat().st_mtime)][-1]
+_vn_posts = [q[1] for q in _con.posted[_n_con2:]]
+check("a note to the owner is delivered without the writer", _vn["status"] == "done" and _vn["outcome"]["status"] == "sent"
+      and _vn["decision"].get("verbatim") is True, str(_vn.get("outcome")))
+check("…in the agent's own words, whole", len(_vn_posts) == 1 and _long_note in _vn_posts[0], _vn_posts)
+check("…headed by who sent it", _vn_posts[0].startswith("📨 *factory-pr1739 → you*"))
+check("…with nothing left pending", d.state.read()["pending"] == _pend2)
+check("…and no gate pretending to apply", _vn["policy"]["effective"] == "auto" and not _vn["decision"].get("used_context"))
+# to anyone else the writer still runs: the words are a brief, and the owner's ✅ stands between
+_n_fc2 = len(fc.posted)
+S.cmd_say(_say_args("the mini release is green again, #1739 merged", to="@priya", frm="factory-pr1739"))
+_vp = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.json"), key=lambda q: q.stat().st_mtime)][-1]
+check("a note to anyone else is still written by the writer and drafted",
+      not _vp["decision"].get("verbatim") and _vp["policy"]["effective"] == "draft" and not [q for q in fc.posted[_n_fc2:] if q[0] == D], str(_vp.get("decision")))
 S.Slack = _RealSlack
 
 # ------------------------------------------------ an urgent escalation reaches the desktop

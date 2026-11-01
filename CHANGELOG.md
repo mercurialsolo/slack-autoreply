@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.3.2 — 2026-10-31
+
+**A note to the owner arrives whole**
+- `say --to <owner>` no longer goes through the writer. The owner is the reader of such a note,
+  not its author, so there was no voice to put it in — and the one-beat rule for reports was
+  trimming it: a coordinator's note on 31 Oct lost the sysctl command the owner needed and had to
+  be sent again. It is now delivered to the console in the agent's own words, verbatim. It also
+  no longer touches Claude, so a writer out of weekly quota (27, 29 and 31 Oct) can no longer
+  drop it. Notes to anyone else are unchanged: a brief, written in the owner's voice, drafted
+  for their ✅.
+
+**Console thread replies reach the coordinator** (ported from the mini, where it had been
+patched live)
+- A reply in the thread of an agent's note is the owner answering that agent, not feedback on
+  how Solo writes: it is appended to the coordinator's inbox (`AGENTVM_COORD_INBOX`, default
+  `~/agentvm-handoff/coord/inbox.md`) and Solo answers in the thread. Without a coordinator on
+  the machine it is kept as feedback, as before. A message Slack delivers twice is answered once.
+- `act --action instruct` passes the sender's Slack-verified email to the relay, so the box's
+  trust level comes from the address, never from a display name.
+
 ## 1.3.1 — 2026-10-28
 
 **Tag a person by email**
