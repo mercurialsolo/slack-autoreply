@@ -253,6 +253,24 @@ words, and it guesses wrong. That drafts in {owner}'s voice and waits for their 
 the only way it reaches anyone. If you cannot answer it, say that instead of guessing."""
 
 
+# The standing brief for an SR addressed to the owner. The writer's `--task` is a question it
+# could not answer; this is the whole ask, handed over on arrival. It is still read-only — a fix
+# is a PR someone opens afterwards, and the report says where it would live.
+SR_TASK = """An SR (service request) addressed to {owner} from {who} in {where}. Find the CAUSE and
+answer it, the way {owner} would in that thread: one numbered point per point they raised, facts
+first, no promises of dates.
+
+For each point: what is actually happening and why (name the file, function, key, plan step or
+query behind it), what it means for them, and either the fix and where it lives or what you could
+not reproduce and what you checked. Measure where you can — prod read-only DB counts, Langfuse
+traces, run logs, the live template — and say when each fact is from. Leave internal ticket
+numbers, trace ids and seller contact details out of the answer and put them in --why.
+
+The SR thread so far, oldest first:
+{thread}
+{permalink}"""
+
+
 def record_delegation(**row) -> None:
     row["at"] = now_iso()
     row.setdefault("conversation", "")
@@ -2049,6 +2067,13 @@ class Daemon(Slack):
             record_eng_request(channel=channel, ts=ts, sender=sender, status="filed", issue=number, url=url, label=label,
                                test=test, assignee=owner, **lin)
         log.info("eng: filed #%s%s for %s", number, f" and {lin['linear']}" if lin else "", self.name_of(owner))
+        if owner == self.me:
+            # The coding agent above gets the issue; the owner also owes an answer in the thread.
+            # Same settle as the pickup, so the detail Sri posts under the title is in the brief.
+            t = threading.Timer(CFG["eng_settle_minutes"] * 60 + 5,
+                                lambda: self._submit(self.sr_filed, channel, ts, sender, who))
+            t.daemon = True
+            t.start()
         reply = self.eng_reply(number, url, lin, label, self.name_of(owner) if people is not None else None)
         if label and label == self.local_label():
             # push: start the agent here once the thread has had time to fill in; the tick
@@ -2655,6 +2680,9 @@ class Daemon(Slack):
         item["triage"] = None if t.source == "default" else t.__dict__ | {"raw": None}
         save_item(item)
         log.info("%s in %s: %s → %s", who, ctype, clean[:80], t.summary() if item["triage"] else "no triage")
+        # An SR for the owner is handed to the agent now, whatever the writer decides below; the
+        # writer's hold or ack in the thread still goes through as a draft.
+        self.sr_follow_up(item)
         if item["triage"] and t.route == "ignore" and mentioned:
             # Someone typed your name. Four of the six messages Solo routed to silence and you then
             # answered yourself were mentions, and this is the half triage decides on its own — a
@@ -2725,6 +2753,76 @@ class Daemon(Slack):
             self._count(item["channel"])
             marg = (result or {}).get("marginal_cost_usd")
             log.info("%s%s", summary, f" · ${marg:.3f} (session ${cost:.2f})" if marg else "")
+
+    # ------------------------------------------------------------ SR investigations
+
+    def sr_investigate(self, item: dict, who: str, transcript: str) -> bool:
+        """Hand an SR addressed to the owner to the agent as an investigation, on arrival.
+
+        `hand_over` waits for the writer to propose a `--task`, and the writer proposes only when
+        triage scores the ask as something it cannot answer. An SR is always that: it names a
+        cause to find in systems the writer cannot see. On 3 Nov Sri's three-point follow-up on
+        SR-100 drew a bare "Will do" and no agent. So the SR path does not wait to be asked.
+
+        One dispatch per message, keyed by the item id rather than the conversation: an SR thread
+        carries several distinct asks over a day, and `open_dispatch`'s per-thread window exists
+        to collapse repeats of ONE question. The writer's own proposal on the same message still
+        runs through `hand_over`, where `open_dispatch` sees this row and does not ask twice.
+
+        The item is saved first so `say --re <id>` can find the conversation to answer into; the
+        agent's report lands in the SR thread (or the DM) as a draft for the owner's ✅, the same
+        gate as every other report. True when something was handed over.
+        """
+        if not CFG["sr_investigate"] or CFG["delegate_mode"] != "auto" or not CFG["delegate_peer"]:
+            return False
+        if item.get("simulated") or item["id"] in dispatched_item_ids():
+            return False
+        where = describe_where(item)
+        item["decision"] = {"action": "hold", "text": "", "task": SR_TASK.format(
+            owner=self.me_name, who=who, where=where, thread=(transcript or item.get("text", ""))[:6000],
+            permalink=item.get("permalink") or "")}
+        save_item(item)
+        msg = dispatch_task(item, who, where)
+        log.info("sr: %s", msg)
+        if msg.startswith("handed to"):
+            self.notify(f"🤖 *SR from {who} in {where}* — asked `{CFG['delegate_role'] or 'the agent'}` to find "
+                        f"the cause. Its answer comes back in that thread as a draft for your ✅."
+                        + (f"\n{item['permalink']}" if item.get("permalink") else ""))
+            return True
+        self.notify(f"⚠️ Could not hand {who}'s SR to an agent: {msg}")
+        return False
+
+    def sr_filed(self, channel: str, ts: str, sender: str, who: str) -> None:
+        """The settle timer fired for an SR filed for the owner: read the thread as it stands now
+        (the detail usually lands a minute after the title) and hand it over."""
+        msgs = self.eng_thread(channel, ts)
+        if not msgs:
+            return
+        transcript = "\n".join(f"{self.name_of(m.get('user'))}: {clean_text(m.get('text', ''), self.name_of)}" for m in msgs)
+        item = {"id": f"{channel}-{ts.replace('.', '_')}", "created": now_iso(), "status": "queued", "simulated": False,
+                "channel": channel, "channel_type": "channel", "channel_name": self.channel_name(channel),
+                "ts": ts, "thread_ts": None, "reply_thread_ts": ts,
+                "sender": sender, "sender_name": who, "sender_handle": self.handle_of(sender),
+                "text": clean_text(msgs[0].get("text", ""), self.name_of), "permalink": self.permalink(channel, ts),
+                "context": transcript, "mentioned": True, "answers_you": False, "triage": None}
+        self.sr_investigate(item, who, transcript)
+
+    def sr_follow_up(self, item: dict) -> bool:
+        """A message that is an SR ask for the owner, arriving through the normal inbound path: a
+        follow-up under a filed SR that @-mentions them, or an SR-numbered message in a DM."""
+        channel, thread_ts, ctype = item["channel"], item.get("thread_ts"), item.get("channel_type")
+        is_sr = False
+        if self.eng_channel and channel == self.eng_channel and thread_ts and item.get("mentioned"):
+            is_sr = eng_request(channel=channel, ts=thread_ts) is not None
+        elif ctype == "im" and CFG["sr_dm_match"]:
+            is_sr = re.search(CFG["sr_dm_match"], item.get("text", "")) is not None
+        if not is_sr:
+            return False
+        try:
+            transcript = self.transcript(channel, thread_ts, 40) if thread_ts else item.get("context", "")
+        except Exception:  # noqa: BLE001
+            transcript = item.get("context", "")
+        return self.sr_investigate(item, item.get("sender_name", "someone"), transcript)
 
     def hand_over(self, item: dict, decision: dict) -> None:
         """Under DELEGATE_MODE=auto, send the proposal the writer made instead of waiting for 🤖.

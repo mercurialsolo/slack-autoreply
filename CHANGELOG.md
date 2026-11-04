@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.3 — 2026-11-03
+
+**An SR for the owner is investigated on arrival**
+- `hand_over` waited for the writer to propose a `--task`, and the writer proposes only when
+  triage scores the ask as unanswerable. On 3 Nov Sri's three-point follow-up on SR-100 in the
+  request channel drew a bare "Will do" and no agent; the cause sat in prod and Langfuse for a
+  session to find by hand. Now an SR filed for the owner (after the same settle as the pickup, so
+  the detail under the title is in the brief), a follow-up under one that @-mentions them, or an
+  SR-numbered message in a DM is handed to the agent as a find-the-cause investigation the moment
+  it arrives (`SR_INVESTIGATE`, on by default; `SR_DM_MATCH` names the DM pattern). One dispatch
+  per message, keyed by the item rather than the thread: an SR thread carries several distinct
+  asks a day, and `open_dispatch` still stops the writer's own proposal asking the same thread
+  twice. The report comes back through `say --re` into the thread or DM it was asked in, as a
+  draft for the owner's ✅, like every other report. Needs `DELEGATE_MODE=auto` and a peer.
+
 ## 1.3.2 — 2026-10-31
 
 **A note to the owner arrives whole**

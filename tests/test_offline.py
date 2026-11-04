@@ -2382,5 +2382,69 @@ check("SOLO_INFISICAL=off keeps a machine on .env", "SOLO_INFISICAL=off" in _lin
 for _k in (*_C.SECRET_KEYS, _C.LOADED_MARK, "SOLO_INFISICAL", "INFISICAL_NODE_ENV", "INFISICAL_MINT_TOKEN", "INFISICAL_BIN"):
     os.environ.pop(_k, None)
 
+# ------------------------------------------------------------ SR investigations
+# `hand_over` waits for the writer to propose a `--task`, and the writer proposes only when triage
+# scores the ask as unanswerable. On 3 Nov Sri's three-point follow-up on SR-100 drew a bare
+# "Will do" and no agent. An SR for the owner is now handed over on arrival, one dispatch per
+# message, and the report comes back into the thread it was asked in.
+def _sr_stub():
+    sent = []
+    saved = (S.dispatch_task, S.Daemon.notify)
+    S.dispatch_task = lambda it, who, where: (sent.append(it["id"]),
+                                              S.record_delegation(item=it["id"], peer="p", outcome="dispatched",
+                                                                  conversation=S.session_key(it)), "handed to p: …")[2]
+    S.Daemon.notify = lambda self, t: None
+    return sent, saved
+
+
+def _sr_item(id_, channel, ctype, ts, text, thread_ts=None, mentioned=True):
+    return {"id": id_, "created": S.now_iso(), "status": "queued", "simulated": False,
+            "channel": channel, "channel_type": ctype, "channel_name": "eng" if ctype == "channel" else None,
+            "ts": ts, "thread_ts": thread_ts, "reply_thread_ts": thread_ts or (ts if ctype == "channel" else None),
+            "sender": U, "sender_name": "Priya", "sender_handle": "priya", "text": text,
+            "permalink": "https://slack/x", "context": "", "mentioned": mentioned, "answers_you": False, "triage": None}
+
+
+_old_cfg = {k: S.CFG[k] for k in ("delegate_mode", "delegate_peer", "sr_investigate")}
+S.CFG.update(delegate_mode="auto", delegate_peer="p", sr_investigate=True)
+fc.replies = getattr(fc, "replies", {})
+fc.replies["1700000300.000"] = [
+    {"user": U, "ts": "1700000300.000", "text": "*SR-70* <@UME> reset-identity leaves the user with no_instance"},
+    {"user": U, "ts": "1700000301.000", "text": "1. the detail Sri posts a minute later"}]
+_sent, _saved = _sr_stub()
+try:
+    _fu = _sr_item(f"{E}-1700000310_000", E, "channel", "1700000310.000", "can you check item 2", thread_ts="1700000300.000")
+    check("a follow-up under a filed SR that @-mentions the owner is handed over on arrival",
+          d.sr_follow_up(_fu) is True and _sent == [_fu["id"]])
+    check("…once per message", d.sr_follow_up(_fu) is False and len(_sent) == 1)
+    check("…and the saved item sends the report back into that thread",
+          S.report_target(S.load_item(_fu["id"]))["reply_thread_ts"] == "1700000300.000")
+    check("…with the standing brief and the thread in it",
+          "find the cause" in S.load_item(_fu["id"])["decision"]["task"].lower()
+          and "detail Sri posts" in S.load_item(_fu["id"])["decision"]["task"])
+    check("…and open_dispatch sees it, so the writer's own proposal does not ask the thread twice",
+          S.open_dispatch(_fu, 6) is not None)
+    check("a thread that is not a filed SR is left to the writer",
+          d.sr_follow_up(_sr_item(f"{E}-1700000320_000", E, "channel", "1700000320.000", "x", thread_ts="1700000999.000")) is False)
+    check("a follow-up that does not name the owner is left to the writer",
+          d.sr_follow_up(_sr_item(f"{E}-1700000330_000", E, "channel", "1700000330.000", "fyi", thread_ts="1700000300.000", mentioned=False)) is False)
+    _dm = _sr_item(f"{D}-1700000340_000", D, "im", "1700000340.000", "re SR-100: the summaries look wrong")
+    check("an SR-numbered DM is handed over too, and answers flat in the DM",
+          d.sr_follow_up(_dm) is True and _dm["id"] in _sent and S.report_target(S.load_item(_dm["id"]))["reply_thread_ts"] is None)
+    check("a plain DM is not", d.sr_follow_up(_sr_item(f"{D}-1700000350_000", D, "im", "1700000350.000", "lunch?")) is False)
+    d.sr_filed(E, "1700000300.000", U, "Priya")
+    _filed_id = f"{E}-1700000300_000"
+    check("the SR itself is handed over after the settle, with the thread's detail in the brief",
+          _filed_id in _sent and "detail Sri posts" in S.load_item(_filed_id)["decision"]["task"])
+    S.CFG["delegate_mode"] = "shadow"
+    check("in shadow nothing is handed over by itself",
+          d.sr_follow_up(_sr_item(f"{E}-1700000360_000", E, "channel", "1700000360.000", "x", thread_ts="1700000300.000")) is False)
+    S.CFG.update(delegate_mode="auto", sr_investigate=False)
+    check("SR_INVESTIGATE=0 switches it off",
+          d.sr_follow_up(_sr_item(f"{E}-1700000370_000", E, "channel", "1700000370.000", "x", thread_ts="1700000300.000")) is False)
+finally:
+    S.dispatch_task, S.Daemon.notify = _saved
+    S.CFG.update(_old_cfg)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{passed} checks passed")
