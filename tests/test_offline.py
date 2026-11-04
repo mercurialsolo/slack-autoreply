@@ -1618,6 +1618,14 @@ _st = d.state.read(); _st["owner_group"]["at"] = time.time() - 400; S.STATE_FILE
 S.cmd_say(_say_args("Helsinki shipped v0.554.0", to="@barada", frm="another-agent"))
 check("after five minutes a note starts a new message", _con.posted[-1][2] is None and len(_con.updates) == _u_g + 1)
 
+# Until Interactivity is on in the Slack app a press only shows a warning icon, so buttons wait for
+# OWNER_BUTTONS=1 and the choices are named in words, with the answer page.
+_n_a0 = len(_con.posted)
+S.cmd_say(_say_args("Merge #1739?", to="@barada", frm="release-lane", options=["Yes", "No"], link="https://factory.example/ask/t_8"))
+check("without OWNER_BUTTONS the choices are named, with the answer page, and no buttons",
+      "👉 *Yes* · *No* — <https://factory.example/ask/t_8|answer here>" in _con.posted[_n_a0][1]
+      and not getattr(_con, "blocks", {}).get(_con.posted[_n_a0][3]), _con.posted[_n_a0])
+os.environ["OWNER_BUTTONS"] = "1"
 # An ask comes with buttons, never "reply yes/no" — and the press is the answer.
 _n_a = len(_con.posted)
 S.cmd_say(_say_args("v0.553.0 is green on Helsinki. Ship it to Hillsboro now, or wait for the freeze to lift?", to="@barada",
@@ -1645,7 +1653,7 @@ d.on_button(_press("UME", "Ship now"))
 check("a second press does not change the answer", S.load_item(_ask["id"])["answer"]["choice"] == "Wait")
 _ans_out = _capture(lambda: S.cmd_answer(SimpleNamespace(item=_ask["id"], wait=0)))
 check("`answer` prints the choice", _ans_out.strip() == "Wait", _ans_out)
-os.environ.pop("AGENTVM_COORD_INBOX", None)
+os.environ.pop("AGENTVM_COORD_INBOX", None); os.environ.pop("OWNER_BUTTONS", None)
 check("buttons are for the owner only: --option to anyone else is refused",
       "buttons for the owner" in _refusal(to="@priya", options=["Yes", "No"]))
 S.Slack = _RealSlack

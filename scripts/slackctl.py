@@ -1276,6 +1276,12 @@ def error_text(e: Exception) -> str:
     return why or " ".join(str(e).split())[:200]
 
 
+def owner_buttons() -> bool:
+    """Buttons on an ask need Interactivity on in the Slack app (manifest: settings.interactivity).
+    Until the owner has switched it on and set OWNER_BUTTONS=1, the choices are named in words."""
+    return config.env("OWNER_BUTTONS").lower() in ("1", "on", "yes", "true")
+
+
 def deliver_to_owner(slack: Slack, item: dict, text: str) -> tuple[str, list[str]]:
     """Hand an agent's message to the owner — posted in the console as delivered, not as a draft.
 
@@ -1295,7 +1301,7 @@ def deliver_to_owner(slack: Slack, item: dict, text: str) -> tuple[str, list[str
     note = owner_note.from_text(body, sender, status=spec.get("status"), headline=spec.get("headline"),
                                 points=spec.get("points"), details=spec.get("details"),
                                 options=spec.get("options"), link=spec.get("link") or "")
-    r = owner_note.render(note)
+    r = owner_note.render(note, buttons=owner_buttons())
     item["note_rendered"] = owner_note.to_dict(note)
     if item.get("files"):
         ts, file_ids = slack.post_files(slack.console, r["text"], item["files"], None)

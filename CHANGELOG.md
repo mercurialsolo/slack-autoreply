@@ -16,7 +16,8 @@
 - Asks get buttons: `--option Yes --option No` (plus `--link` to the answer page). The owner's
   press goes to the coordinator's inbox like a typed thread reply, is kept on the note
   (`answer <say-id> [--wait N]`), and the buttons give way to the choice. Only the owner's press
-  counts. Needs Interactivity on in the Slack app (manifest updated).
+  counts. Needs Interactivity on in the Slack app (manifest updated) and `OWNER_BUTTONS=1`;
+  until then the choices are named in the message with the answer link.
 - Notes from the same agent (or `--group` key) inside five minutes become one message, edited as
   they arrive, each one's detail in its thread: a release burst badges once.
 - Laptop side: nothing. `solo` stays a pass-through; all of this runs on the node.

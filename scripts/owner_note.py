@@ -279,13 +279,19 @@ def footer(note: Note, has_details: bool) -> str:
     return line
 
 
-def render(note: Note) -> dict:
-    """{text, blocks, details}: text is the message (and the notification); blocks carry buttons."""
+def render(note: Note, buttons: bool = True) -> dict:
+    """{text, blocks, details}: text is the message (and the notification); blocks carry buttons.
+
+    `buttons=False` is for a Slack app whose Interactivity is still off: a press there only shows
+    the owner a warning icon. The choices are then named in the message, with the answer page."""
     lines = [headline_line(note)] + body_lines(note)
+    if note.options and not buttons:
+        lines.append("👉 " + " · ".join(f"*{o}*" for o in note.options)
+                     + (f" — <{note.link}|answer here>" if note.link else " — answer in the thread"))
     foot = footer(note, bool(note.details))
     text = "\n".join(lines + ([foot] if foot else []))
     blocks = None
-    if note.options:
+    if note.options and buttons:
         elements = [{"type": "button", "action_id": f"solo_answer_{i}",
                      "text": {"type": "plain_text", "text": o[:75], "emoji": True}, "value": o[:2000],
                      **({"style": "primary"} if i == 0 and o.lower() in ("yes", "ok", "go", "approve") else {})}

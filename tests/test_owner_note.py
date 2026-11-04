@@ -73,6 +73,9 @@ check("…the choices are buttons, never 'reply yes/no'",
       [e["text"]["text"] for e in acts] == ["Ship now", "Wait", "Open the answer page"]
       and [e.get("value") for e in acts[:2]] == ["Ship now", "Wait"] and "reply" not in r["text"].lower())
 check("…a Yes is the primary button", N.render(N.from_text("Merge #1739?", "x", options=["Yes", "No"]))["blocks"][1]["elements"][0].get("style") == "primary")
+off = N.render(N.from_text("Merge #1739?", "x", options=["Yes", "No"]), buttons=False)
+check("…with Interactivity still off: the choices in words, no blocks", off["blocks"] is None
+      and "👉 *Yes* · *No* — answer in the thread" in off["text"], off["text"])
 done = N.answered_blocks(r["blocks"], "Wait", "you", "22:41")
 check("…once answered the buttons are gone and the choice is shown",
       not [b for b in done if b["type"] == "actions"] and "✔️ *Wait*" in done[-1]["elements"][0]["text"])
