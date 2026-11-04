@@ -2390,9 +2390,9 @@ for _k in (*_C.SECRET_KEYS, _C.LOADED_MARK, "SOLO_INFISICAL", "INFISICAL_NODE_EN
 def _sr_stub():
     sent = []
     saved = (S.dispatch_task, S.Daemon.notify)
-    S.dispatch_task = lambda it, who, where: (sent.append(it["id"]),
+    S.dispatch_task = lambda it, who, where: (sent.append(it["id"]), _sr_briefs.__setitem__(it["id"], it["decision"]["task"]),
                                               S.record_delegation(item=it["id"], peer="p", outcome="dispatched",
-                                                                  conversation=S.session_key(it)), "handed to p: …")[2]
+                                                                  conversation=S.session_key(it)), "handed to p: …")[3]
     S.Daemon.notify = lambda self, t: None
     return sent, saved
 
@@ -2405,6 +2405,7 @@ def _sr_item(id_, channel, ctype, ts, text, thread_ts=None, mentioned=True):
             "permalink": "https://slack/x", "context": "", "mentioned": mentioned, "answers_you": False, "triage": None}
 
 
+_sr_briefs: dict = {}
 _old_cfg = {k: S.CFG[k] for k in ("delegate_mode", "delegate_peer", "sr_investigate")}
 S.CFG.update(delegate_mode="auto", delegate_peer="p", sr_investigate=True)
 fc.replies = getattr(fc, "replies", {})
@@ -2420,8 +2421,9 @@ try:
     check("…and the saved item sends the report back into that thread",
           S.report_target(S.load_item(_fu["id"]))["reply_thread_ts"] == "1700000300.000")
     check("…with the standing brief and the thread in it",
-          "find the cause" in S.load_item(_fu["id"])["decision"]["task"].lower()
-          and "detail Sri posts" in S.load_item(_fu["id"])["decision"]["task"])
+          "find the cause" in _sr_briefs[_fu["id"]].lower() and "detail Sri posts" in _sr_briefs[_fu["id"]])
+    check("…and no decision on the saved item, so the writer's run and its retry guard are untouched",
+          "decision" not in S.load_item(_fu["id"]))
     check("…and open_dispatch sees it, so the writer's own proposal does not ask the thread twice",
           S.open_dispatch(_fu, 6) is not None)
     check("a thread that is not a filed SR is left to the writer",
@@ -2435,7 +2437,7 @@ try:
     d.sr_filed(E, "1700000300.000", U, "Priya")
     _filed_id = f"{E}-1700000300_000"
     check("the SR itself is handed over after the settle, with the thread's detail in the brief",
-          _filed_id in _sent and "detail Sri posts" in S.load_item(_filed_id)["decision"]["task"])
+          _filed_id in _sent and "detail Sri posts" in _sr_briefs[_filed_id])
     S.CFG["delegate_mode"] = "shadow"
     check("in shadow nothing is handed over by itself",
           d.sr_follow_up(_sr_item(f"{E}-1700000360_000", E, "channel", "1700000360.000", "x", thread_ts="1700000300.000")) is False)

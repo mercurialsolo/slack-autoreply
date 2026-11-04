@@ -2769,20 +2769,25 @@ class Daemon(Slack):
         to collapse repeats of ONE question. The writer's own proposal on the same message still
         runs through `hand_over`, where `open_dispatch` sees this row and does not ask twice.
 
-        The item is saved first so `say --re <id>` can find the conversation to answer into; the
-        agent's report lands in the SR thread (or the DM) as a draft for the owner's ✅, the same
-        gate as every other report. True when something was handed over.
+        The item is saved (without a decision) so `say --re <id>` can find the conversation to
+        answer into; the agent's report lands in the SR thread (or the DM) as a draft for the
+        owner's ✅, the same gate as every other report. True when something was handed over.
         """
         if not CFG["sr_investigate"] or CFG["delegate_mode"] != "auto" or not CFG["delegate_peer"]:
             return False
         if item.get("simulated") or item["id"] in dispatched_item_ids():
             return False
         where = describe_where(item)
-        item["decision"] = {"action": "hold", "text": "", "task": SR_TASK.format(
+        # The saved item carries NO decision: on the inbound path the writer still runs on this
+        # message, and `handle_with_claude` reads an existing decision as the writer having
+        # acted (its retry guard, then `execute_decision`), so a placeholder here would be
+        # executed as an empty hold. The task travels on a copy, into the delegations row.
+        if not item_path(item["id"]).exists():
+            save_item(item)
+        brief = {**item, "decision": {"action": "hold", "text": "", "task": SR_TASK.format(
             owner=self.me_name, who=who, where=where, thread=(transcript or item.get("text", ""))[:6000],
-            permalink=item.get("permalink") or "")}
-        save_item(item)
-        msg = dispatch_task(item, who, where)
+            permalink=item.get("permalink") or "")}}
+        msg = dispatch_task(brief, who, where)
         log.info("sr: %s", msg)
         if msg.startswith("handed to"):
             self.notify(f"🤖 *SR from {who} in {where}* — asked `{CFG['delegate_role'] or 'the agent'}` to find "
