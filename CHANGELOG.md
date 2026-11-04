@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.4.0 — 2026-11-04
+
+**A note to the owner reads at a glance**
+- The owner, 4 Nov: "messages are not well formatted here for readability … use icons, emojis and
+  language that is more human readable". A release note arrived as one paragraph of shas, metric
+  names and millisecond counts. Every note to the owner is now shaped by `scripts/owner_note.py`:
+  a headline with a status icon (✅ live · ⚠️ warning · 🔴 rolled back/failed · ⏸️ held/frozen ·
+  🚀 shipping · ❓ needs you), at most three plain bullets with the box and version in bold,
+  seconds rather than ms, no shas, metric names or log paths, and the agent's words, whole, in a
+  "🔎 Details" reply in the thread. A command the owner has to run is never rewritten (31 Oct).
+  Deterministic — no writer, so no quota can drop it.
+- `say` takes the shape explicitly when the agent knows it: `--status`, `--headline`, `--point`
+  (×3), `--details`, `--link`, `--group`.
+- Asks get buttons: `--option Yes --option No` (plus `--link` to the answer page). The owner's
+  press goes to the coordinator's inbox like a typed thread reply, is kept on the note
+  (`answer <say-id> [--wait N]`), and the buttons give way to the choice. Only the owner's press
+  counts. Needs Interactivity on in the Slack app (manifest updated).
+- Notes from the same agent (or `--group` key) inside five minutes become one message, edited as
+  they arrive, each one's detail in its thread: a release burst badges once.
+- Laptop side: nothing. `solo` stays a pass-through; all of this runs on the node.
+
 ## 1.3.3 — 2026-11-03
 
 **An SR for the owner is investigated on arrival**

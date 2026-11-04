@@ -26,6 +26,10 @@ features:
 
 settings:
   socket_mode_enabled: true
+  # Buttons on an ask to the owner (`say --option Yes --option No`): the press arrives over the
+  # same socket. Without this Slack shows the owner a warning icon on the button instead.
+  interactivity:
+    is_enabled: true
   org_deploy_enabled: false
   token_rotation_enabled: false
   event_subscriptions:

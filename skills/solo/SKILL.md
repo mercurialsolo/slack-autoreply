@@ -166,6 +166,31 @@ else reads their own DM, so it is delivered straight to their console, headed wi
 nothing to approve. Use it for status they asked you to send them; use a channel or `--re` for
 anything their team should see.
 
+### How a note to the owner reads
+
+Solo shapes it so the owner can read it on a phone: a **headline with a status icon**, at most
+**three plain bullets**, and your words, whole, in a **Details** reply in the message's thread.
+Icons: ✅ live and green · ⚠️ live with a warning · 🔴 rolled back or failed · ⏸️ held or frozen ·
+🚀 shipping · ❓ needs you. Notes from you inside five minutes become one message.
+
+Free text works, and Solo reads the shape from it (seconds not ms, no shas, no metric names, no
+log paths in the body). To say it exactly, give the shape yourself:
+
+```
+solo say "<full technical detail>" --to @owner --from release \
+  --status failed --headline "Helsinki rolled back v0.552 → stays on v0.551" \
+  --point "replies were 0.4 s slower on one test run" --point "next: re-run tonight, nothing needed from you" \
+  --link https://dashboard/releases/552
+```
+
+- `--status` ok | warn | failed | held | shipping | ask | info picks the icon (default: read from your words).
+- `--headline` one line, plain words. `--point` is repeatable, three at most: what happened, why, what next.
+- `--details` the technical detail for the thread (default: your intent, whole). `--link` a dashboard or log.
+- `--group <key>` groups notes that share the key, instead of by sender.
+- To ask the owner something, give the choices as buttons, never "reply yes/no":
+  `--option Yes --option No` (and `--link` to the answer page). Their press is passed to the
+  coordinator and kept on the note: `solo answer <say-id>` prints it (`--wait 600` to block).
+
 You get no delivery receipt. Do not wait for one, and do not re-send.
 
 ## If `solo` does not run
