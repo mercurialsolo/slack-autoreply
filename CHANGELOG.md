@@ -2,6 +2,15 @@
 
 ## 1.4.0 — 2026-11-04
 
+**Review fixes before merge**
+- A typed reply in the thread of an ask is its answer (kept on the item, `answer <say-id>` prints it,
+  passed to the coordinator when there is one). With buttons off it was filed as voice feedback.
+- Grouping posts the first note, whole, in the thread when it is folded to one line; its bullets were lost.
+- Only a ms reading and what it is compared with become seconds — "the last 200 runs", "build 1234"
+  and "1500 calls" stay counts. Bare URLs are never rewritten. `&`, `<`, `>` are escaped for mrkdwn.
+- Up to 24 choice buttons (was 5, the rest silently dropped); a section stays under Slack's 3000
+  characters; explicit `--point`s obey the three-bullet rule, the rest go to Details.
+
 **A note to the owner reads at a glance**
 - The owner, 4 Nov: "messages are not well formatted here for readability … use icons, emojis and
   language that is more human readable". A release note arrived as one paragraph of shas, metric

@@ -119,6 +119,19 @@ try:
     check("an unknown status is refused", False)
 except ValueError:
     check("an unknown status is refused", True)
+check("a count after a ms reading stays a count", N.humanize("reply_heard_p50_ms: 1200 vs 800 median of the last 200 runs, build 1234")
+      == "reply time 1.2 s vs 0.8 s median of the last 200 runs, build 1234", N.humanize("reply_heard_p50_ms: 1200 vs 800 median of the last 200 runs, build 1234"))
+check("…and 'across 1500 calls' too", N.humanize("first_token_ms: 950 across 1500 calls") == "time to first word 0.9 s across 1500 calls")
+check("a bare URL is left whole", "https://ci.example.com/runs/run.log" in N.render(N.from_text("see https://ci.example.com/runs/run.log", "x"))["text"]
+      and "https://github.com/x/y/releases/tag/v1.2.3" in N.render(N.from_text("released https://github.com/x/y/releases/tag/v1.2.3", "x"))["text"])
+check("Slack's control characters are escaped", "latency &lt;2 s &amp; error &gt;1%" in N.render(N.from_text("latency <2 s & error >1%", "x"))["text"]
+      and "<@U123>" in N.render(N.from_text("ping <@U123> about it", "x"))["text"])
+_many = N.render(N.from_text("Pick a box", "x", options=list("ABCDEFG")))
+check("more than five choices are all buttons", [e["text"]["text"] for e in _many["blocks"][1]["elements"]] == list("ABCDEFG"))
+_long = N.render(N.from_text("x", "x", headline="Run `make " + "a" * 4000 + "`", options=["Yes", "No"]))
+check("a section never passes Slack's 3000 characters", len(_long["blocks"][0]["text"]["text"]) <= 3000)
+_pts = N.from_text("x", "x", headline="h", points=list("abcde"))
+check("explicit points obey the three-bullet rule, the rest in Details", len(_pts.bullets) == 3 and all(f"• {c}" in _pts.details for c in "cde"))
 check("ms on its own becomes seconds", N.humanize("took 1460 ms") == "took 1.5 s" and N.humanize("took 40 ms") == "took 40 ms")
 
 print(f"\n{passed} checks passed")

@@ -1335,6 +1335,10 @@ def deliver_to_owner(slack: Slack, item: dict, text: str) -> tuple[str, list[str
             ts = group["ts"]
             notes = [owner_note.from_dict(n) for n in group["notes"]]
             slack.console_update(ts, owner_note.render_group(notes, sender))
+            if len(notes) == 2:
+                # The first note's bullets just left the message for its one-line entry: put it,
+                # whole, in the thread before the second, so "each one's detail is in the thread" holds.
+                slack.console_post(owner_note.render(notes[0], buttons=False)["text"], thread_ts=ts)
             # the new note in full, under the message that now lists it
             slack.console_post("\n".join(x for x in (r["text"], r["details"]) if x), thread_ts=ts)
             slack._ping(r["text"])  # noqa: SLF001 - an edit does not notify
@@ -2671,7 +2675,22 @@ class Daemon(Slack):
         low = said.lower()
         reply = None
         try:
-            if in_thread and (inbox := coordinator_inbox()):
+            ask = ((self.state.read().get("asks") or {}).get(thread) or {}) if in_thread else {}
+            if ask.get("item") and item_path(ask["item"]).exists() and not load_item(ask["item"]).get("answer"):
+                # A typed reply under an ask is its answer — the only way to give one while the
+                # buttons wait for Interactivity, and as good as a press once they are on.
+                item = load_item(ask["item"])
+                item["answer"] = {"choice": said, "at": now_iso(), "by": self.me, "typed": True}
+                save_item(item)
+                origin = item.get("origin", "").removeprefix("agent:")
+                if inbox := coordinator_inbox():
+                    with open(inbox, "a", encoding="utf-8") as f:
+                        f.write(f"- {now_iso()} owner (Slack thread reply to the ask at {thread}, {item['id']} from {origin}): {said}\n")
+                    reply = f"got it — *{said[:80]}*, passed to the coordinator"
+                else:
+                    reply = f"got it — *{said[:80]}*. `{origin}` reads it with `answer {item['id']}`"
+                log.info("owner answered %s in the thread: %s", item["id"], said[:100])
+            elif in_thread and (inbox := coordinator_inbox()):
                 with open(inbox, "a", encoding="utf-8") as f:
                     f.write(f"- {now_iso()} owner (Slack thread reply to the note at {thread}): {said}\n")
                 log.info("console thread reply passed to the coordinator: %s", said[:100])

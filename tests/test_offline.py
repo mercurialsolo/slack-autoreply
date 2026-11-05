@@ -95,7 +95,9 @@ class FakeClient:
         return {"files": [{"id": f"F{self.counter}", "name": f["filename"],
                            "shares": {"public": {k["channel"]: [{"ts": ts}]}}} for f in k["file_uploads"]]}
     def reactions_add(self, channel, timestamp, name): self.reactions.append((channel, timestamp, name)); return {}
-    def chat_update(self, channel, ts, text, blocks=None): self.updates.append((channel, ts, text)); return {}
+    def chat_update(self, channel, ts, text, blocks=None):
+        self.updates.append((channel, ts, text)); self.update_blocks = getattr(self, "update_blocks", {}); self.update_blocks[ts] = blocks
+        return {}
     def search_messages(self, query, **k):
         return {"messages": {"matches": [{"ts": "1699000000.000", "user": U, "text": "the series A deck v3 is final", "channel": {"id": D, "is_im": True}, "permalink": "https://slack/x"}], "paging": {"pages": 1}}}
 
@@ -1611,7 +1613,9 @@ check("the second, inside five minutes, joins it: one message, edited, not a sec
 check("…which leads with the worst of the two and lists each",
       _g_upd[0][2].startswith("⏸️ *2 updates* from release-lane") and "• ✅ *Helsinki* shipped" in _g_upd[0][2]
       and "• ⏸️ *Hillsboro* frozen at *v0.537.0*" in _g_upd[0][2], _g_upd)
-check("…and the new note in full goes in its thread", _g_posts[1][2] == _g_posts[0][3] and "Hillsboro" in _g_posts[1][1], _g_posts)
+check("…the first note, whole, goes in its thread once it is folded to one line",
+      _g_posts[1][2] == _g_posts[0][3] and _g_posts[1][1].startswith("✅ *Helsinki* shipped *v0.552.0*"), _g_posts)
+check("…and the new note in full goes in its thread", _g_posts[2][2] == _g_posts[0][3] and "Hillsboro" in _g_posts[2][1], _g_posts)
 S.cmd_say(_say_args("Helsinki shipped v0.553.0", to="@barada", frm="another-agent"))
 check("another agent's note is not folded into it", _con.posted[-1][2] is None and len(_con.updates) == _u_g + 1)
 _st = d.state.read(); _st["owner_group"]["at"] = time.time() - 400; S.STATE_FILE.write_text(json.dumps(_st))
@@ -1625,6 +1629,19 @@ S.cmd_say(_say_args("Merge #1739?", to="@barada", frm="release-lane", options=["
 check("without OWNER_BUTTONS the choices are named, with the answer page, and no buttons",
       "👉 *Yes* · *No* — <https://factory.example/ask/t_8|answer here>" in _con.posted[_n_a0][1]
       and not getattr(_con, "blocks", {}).get(_con.posted[_n_a0][3]), _con.posted[_n_a0])
+# With no buttons, the owner's typed reply in the ask's thread is the answer (review of PR: it used to
+# be filed as voice feedback, and `answer` stayed "unanswered" for ever).
+_ask0 = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.json"), key=lambda q: q.stat().st_mtime)][-1]
+os.environ["AGENTVM_COORD_INBOX"] = str(TMP / "nowhere" / "inbox.md")
+_bot0 = (d.bot, d.bot_dm)
+_ta = _console_ev("Yes", "1800000100.000100", thread_ts=_con.posted[_n_a0][3])
+d.bot, d.bot_dm = _bot0
+check("a typed reply under an ask is its answer", S.load_item(_ask0["id"]).get("answer", {}).get("choice") == "Yes"
+      and _ta and _ta[-1][2] == _con.posted[_n_a0][3] and "answer " + _ask0["id"] in _ta[-1][1], _ta)
+check("…and `answer` prints it", _capture(lambda: S.cmd_answer(SimpleNamespace(item=_ask0["id"], wait=0))).strip() == "Yes")
+check("…not kept as voice feedback", not any(json.loads(x).get("said") == "Yes" for x in
+      S.config.p("console_feedback.jsonl").read_text().splitlines() if x.strip()))
+os.environ.pop("AGENTVM_COORD_INBOX", None)
 os.environ["OWNER_BUTTONS"] = "1"
 # An ask comes with buttons, never "reply yes/no" — and the press is the answer.
 _n_a = len(_con.posted)
@@ -1647,7 +1664,9 @@ _n_b = len(_con.posted); _u_b = len(_con.updates)
 d.on_button(_press("UME", "Wait"))
 check("the owner's press is kept on the note", S.load_item(_ask["id"]).get("answer", {}).get("choice") == "Wait")
 check("…passed to the coordinator, as a typed thread reply would be", _coord.exists() and _coord.read_text().strip().endswith(": Wait"))
-check("…the buttons give way to the choice", _con.updates[_u_b:] and _con.updates[_u_b][1] == _ask_msg[3] and "✔️ Wait" in _con.updates[_u_b][2])
+check("…the buttons give way to the choice", _con.updates[_u_b:] and _con.updates[_u_b][1] == _ask_msg[3] and "✔️ Wait" in _con.updates[_u_b][2]
+      and not any(b["type"] == "actions" for b in (_con.update_blocks.get(_ask_msg[3]) or []))
+      and any("Wait" in str(b) for b in (_con.update_blocks.get(_ask_msg[3]) or [])), _con.update_blocks.get(_ask_msg[3]))
 check("…and Solo says so in the thread", _con.posted[_n_b:] and _con.posted[_n_b][2] == _ask_msg[3] and "*Wait*" in _con.posted[_n_b][1])
 d.on_button(_press("UME", "Ship now"))
 check("a second press does not change the answer", S.load_item(_ask["id"])["answer"]["choice"] == "Wait")

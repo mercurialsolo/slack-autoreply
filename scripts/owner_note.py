@@ -74,6 +74,7 @@ LABEL_RE = re.compile(r"^\s*(?:not live(?: now)?|live(?: now)?|status|update|fyi
 CLAUSE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z❓🔴⚠⏸🚀✅])|;\s+|,\s+(?=[A-Z][a-z]{2,}\s+" + BOX_VERBS + r"\b)")
 HEADLINE_MAX = 120
 BULLETS_MAX = 3
+SECTION_MAX = 2900  # Slack's limit on a section block's text is 3000
 GROUP_WINDOW_S = 300
 
 
@@ -125,13 +126,13 @@ def _seconds(ms: float) -> str:
 
 
 def _protect(text: str):
-    """Code spans and Slack links are the agent's exact words: hide them from every rewrite."""
+    """Code spans, Slack links and bare URLs are the agent's exact words: hide them from every rewrite."""
     kept: list[str] = []
 
     def keep(m):
         kept.append(m.group(0))
         return f"\x00{len(kept) - 1}\x00"
-    return re.sub(r"```.*?```|`[^`\n]+`|<[^>\s]+>", keep, text, flags=re.S), kept
+    return re.sub(r"```.*?```|`[^`\n]+`|<[^>\s]+>|\bhttps?://[^\s<>|]+[^\s<>|.,;:!?)]", keep, text, flags=re.S), kept
 
 
 def _restore(text: str, kept: list[str]) -> str:
@@ -174,8 +175,11 @@ def humanize(text: str) -> str:
     def ms_run(m):
         words, unit, rest = m.group(1), m.group(2), m.group(3)
         if unit:
-            rest = re.sub(r"([-+]?)(?<![\w.])(\d{3,}(?:\.\d+)?)(?![\w.])",
-                          lambda n: f"{n.group(1)}{_seconds(float(n.group(2)))}", rest)
+            # Only the reading and what it is set against (`vs 824`, `median 824`, `-> 900`) are
+            # milliseconds; "the last 200 runs" and "build 1234" are counts, left as they are.
+            rest = re.sub(r"(^\s*|\bvs\.?\s+(?:median\s+)?|\bmedian\s+|->\s*|→\s*|\bto\s+|\bfrom\s+|,\s*)"
+                          r"([-+]?)(?<![\w.])(\d{3,}(?:\.\d+)?)(?![\w.])(?!\s+(?:runs?|calls?|samples?|times|items?|builds?)\b)",
+                          lambda n: f"{n.group(1)}{n.group(2)}{_seconds(float(n.group(3)))}", rest)
         return words + " " + rest
     t = re.sub(r"\x01([^\x02]*)\x02(ms)?\x03\s*([^()\x01;]*)", ms_run, t)
     t = MS_RE.sub(lambda m: m.group(1) + (_seconds(float(m.group(2))) if float(m.group(2)) >= 100 else f"{m.group(2)} ms"), t)
@@ -193,9 +197,15 @@ def humanize(text: str) -> str:
     return _restore(t, kept)
 
 
+def _escape(t: str) -> str:
+    """Slack's three control characters, as entities (an entity already written stays as it is)."""
+    return re.sub(r"&(?!(?:amp|lt|gt);)", "&amp;", t).replace("<", "&lt;").replace(">", "&gt;")
+
+
 def emphasize(text: str) -> str:
     """mrkdwn bold for the box and the version — the two things the eye looks for."""
     t, kept = _protect(text)
+    t = _escape(t)
     if not COMMAND_RE.search(text):
         t = BOX_RE.sub(lambda m: m.group(0) if m.group(1) in WORDS_STOP else f"*{m.group(1)}*", t)
         t = VERSION_RE.sub(r"*\1*", t)
@@ -233,8 +243,13 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
     if headline:
         head = headline.strip()
         bullets = [p.strip() for p in (points or []) if p and p.strip()]
+        given = list(bullets)
+        if len(bullets) > BULLETS_MAX:
+            bullets = bullets[: BULLETS_MAX - 1] + [f"…and {len(bullets) - BULLETS_MAX + 1} more in the thread"]
         st = norm_status(status) or ("ask" if options else worst([status_of(head)] + [status_of(b) for b in bullets]))
         whole = details if details is not None else (intent if intent and intent != head else "")
+        if len(given) > BULLETS_MAX and not all(g in whole for g in given):
+            whole = "\n".join(x for x in [whole] + [f"• {g}" for g in given] if x)  # the folded points, whole
         return Note(st, head, bullets, whole, options, link, sender)
     st = norm_status(status) or ("ask" if options else worst(statuses))
     if not parts:
@@ -295,11 +310,14 @@ def render(note: Note, buttons: bool = True) -> dict:
         elements = [{"type": "button", "action_id": f"solo_answer_{i}",
                      "text": {"type": "plain_text", "text": o[:75], "emoji": True}, "value": o[:2000],
                      **({"style": "primary"} if i == 0 and o.lower() in ("yes", "ok", "go", "approve") else {})}
-                    for i, o in enumerate(note.options[:5])]
+                    for i, o in enumerate(note.options[:24])]
         if note.link:
             elements.append({"type": "button", "action_id": "solo_answer_link", "url": note.link,
                              "text": {"type": "plain_text", "text": "Open the answer page", "emoji": True}})
-        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}},
+        section = "\n".join(lines)
+        if len(section) > SECTION_MAX:  # Slack refuses the whole message past 3000; the whole text is in Details
+            section = section[: SECTION_MAX - 1].rsplit("\n", 1)[0] + "\n…"
+        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": section}},
                   {"type": "actions", "block_id": "solo_ask", "elements": elements}]
         if foot:
             blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": foot}]})
