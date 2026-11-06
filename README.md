@@ -69,7 +69,7 @@ Each step ends with how you know it worked.
 ```
 ./install.sh && python3 tests/test_offline.py
 ```
-Last line: `379 checks passed`. Either way the daemon runs from the plugin's own directory, so
+Last line: `450 checks passed`. Either way the daemon runs from the plugin's own directory, so
 after `claude plugin update solo` run `/solo:deploy` again to re-point the service.
 
 **3. Slack app.** api.slack.com/apps → *Create New App* → *From a manifest* → paste `manifest.yaml`. Then:
@@ -233,6 +233,37 @@ Two properties that make this safe to hand to an autonomous agent:
 - **The boundaries do not move.** Credentials, dates, money, people, anything outside this
   workspace's work still escalate. An agent asking does not make a thing allowed; the limits are
   about what reaches the recipient, not who requested it.
+
+### A project's questions, SRs and dev requests, routed to the factory
+
+With `~/.slack-autoreply/intake.json`, Solo reads a project's channels (and, if you say so, your DMs
+and the project's Linear) and routes what people raise there. Config, not code — read on every
+message, so an edit applies without a restart:
+
+```json
+{"repo": "staffai",
+ "channels": {"C0123ABC": {}, "C0456DEF": {"customer": "Acme"}},
+ "dms": true,
+ "internal": ["U01AAA", "U02BBB"],
+ "customers": {"U09CCC": "Acme"},
+ "linear_project": "StaffAI"}
+```
+
+A reasoning model (`claude -p --model opus`, no tools; `classify_cmd` overrides it) reads each
+message with its thread and calls it a **question**, a **service request**, a **dev request**, or
+nothing. A question is answered by Solo from its context like any message — or, when the answer needs
+the code read, becomes a `--kind research` factory task whose answer comes back as a draft. An SR or
+dev request becomes `factory submit --repo <repo>`: P1 for a customer-facing SR, P2 otherwise, with
+the requester, the customer and the thread link on the brief. The brief carries the reader's summary
+with personal data left out (and scrubbed again), never the message. One task per thread; a
+follow-up instructs it, and a second report of the same thing joins the open task or issue.
+
+Nothing goes to a customer without your ✅: any reply in a customer channel or to a listed customer
+is a draft, and no emoji is left on their message. The bot's "logged as P2, t_…" acknowledgement
+auto-sends only to people on `internal`; for anyone else you get the note in Solo's DM. When the
+task's PR merges (and `live_cmd`, if you set one, exits 0 for it), Solo drafts the update for the
+requester in the same thread, through `say --re`, for your ✅. Issues taken in from Linear are
+reported on Linear by the factory itself.
 
 ## Notes and limits
 
