@@ -28,6 +28,12 @@ FAKE_CLAUDE = TMP / "fakeclaude"
 FAKE_CLAUDE.write_text(f"""#!/usr/bin/env bash
 # pretend Claude Code: records a decision via slackctl act, emits stream-json like the real CLI
 prompt="$2"; item="${{prompt##* }}"
+printf 'CCD=%s %s\\n' "${{CLAUDE_CONFIG_DIR:-}}" "$*" >> {TMP}/claude-calls.log
+_auth='{{"loggedIn":true,"authMethod":"claude.ai"}}'
+if [ "$1 $2" = "auth status" ]; then echo "${{FAKE_AUTH:-$_auth}}"; exit 0; fi
+if [ "$1 $2" = "plugin list" ]; then [ -f "${{FAKE_PLUGINS_FILE:-/nonexistent}}" ] && cat "$FAKE_PLUGINS_FILE" && exit 0; exit 1; fi
+if [ "$1 $2" = "plugin enable" ] || [ "$1 $2" = "plugin install" ]; then [ -f "${{FAKE_HEAL_TO:-/nonexistent}}" ] && cp "$FAKE_HEAL_TO" "$FAKE_PLUGINS_FILE"; exit 0; fi
+if [ "$1" = "-p" ] && [ -f "${{FAKE_PLUGINS_FILE:-/nonexistent}}" ] && ! grep -q '"enabled": true' "$FAKE_PLUGINS_FILE"; then echo '{{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0,"result":"/solo:slack-autoreply isn'"'"'t available in this session"}}'; exit 0; fi
 if [ -n "${{FAKE_FAIL_RESUME:-}}" ] && printf '%s ' "$@" | grep -q -- '--resume'; then echo "No conversation found" >&2; exit 1; fi
 if [ -f "${{FAKE_LIMIT:-/nonexistent}}" ]; then echo '{{"type":"result","subtype":"success","is_error":true,"num_turns":1,"total_cost_usd":0,"terminal_reason":"api_error","result":"You'"'"'ve hit your weekly limit · resets 12pm (America/Los_Angeles)"}}'; exit 1; fi
 if [ -f "${{FAKE_SKIP_ONCE:-/nonexistent}}" ]; then rm -f "$FAKE_SKIP_ONCE"; printf '%s\\n' "$@" > "$FAKE_SKIP_ONCE.argv"; echo '{{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.0,"result":"nothing to do"}}'; exit 0; fi
@@ -2048,6 +2054,216 @@ check("a logged-out run is not healthy, however it exits", not S.writer_healthy(
 check("a successful run is healthy", S.writer_healthy(UP)[0])
 check("no result at all falls back to what the process said",
       S.writer_healthy(None, "exit 1: boom")[1] == "exit 1: boom")
+
+# ------------------------------------------------- the writer heals itself before each compose
+# 11-06: `solo say` failed with "/solo:slack-autoreply isn't available in this session". A daemon
+# started from a factory pool worker inherits its CLAUDE_CONFIG_DIR, which points `claude -p` at a
+# plugin cache without Solo. Each failure class gets one bounded heal, then one alert with the fix.
+CALLS = TMP / "claude-calls.log"
+PLUGINS, HEALED = TMP / "plugins.json", TMP / "plugins-healed.json"
+_mine = {"id": "solo@solo", "installPath": str(S.config.SKILL_DIR)}
+HEALED.write_text(json.dumps([{**_mine, "enabled": True}]))
+
+
+def _calls(kind="-p"):
+    return [l for l in (CALLS.read_text().splitlines() if CALLS.exists() else []) if l.split(" ", 1)[1:2] and l.split(" ", 1)[1].startswith(kind)]
+
+
+def _writer_case(plugins=None, heal_to=None, auth=None):
+    """Point the fake claude at a plugin list / heal result / auth answer, reset the counters."""
+    for k in ("FAKE_PLUGINS_FILE", "FAKE_HEAL_TO", "FAKE_AUTH"):
+        os.environ.pop(k, None)
+    PLUGINS.unlink(missing_ok=True)
+    if plugins is not None:
+        PLUGINS.write_text(json.dumps(plugins)); os.environ["FAKE_PLUGINS_FILE"] = str(PLUGINS)
+    if heal_to:
+        os.environ["FAKE_HEAL_TO"] = str(heal_to)
+    if auth:
+        os.environ["FAKE_AUTH"] = auth
+    CALLS.unlink(missing_ok=True)
+    S._PREFLIGHT.clear()
+
+
+_wn: list[str] = []
+_real_notify_w = S.Daemon.notify
+S.Daemon.notify = lambda self, text: _wn.append(text)
+_d_old = d.dispatch
+d.dispatch = "claude"
+_seq = [0]
+
+
+def _compose_item():
+    _seq[0] += 1
+    it = {"id": f"HEAL-{_seq[0]}.000", "channel": D, "channel_type": "im", "sender": U, "sender_name": "Priya",
+          "text": "around?", "created": S.now_iso(), "status": "queued", "reply_thread_ts": None,
+          "ts": f"{_seq[0]}.500", "triage": None, "context": "(none)"}
+    S.save_item(it)
+    return it
+
+
+try:
+    # env: an inherited CLAUDE_CONFIG_DIR is dropped, a pinned one wins
+    os.environ["CLAUDE_CONFIG_DIR"] = str(TMP / "pool-worker-claude")
+    check("the writer does not inherit another agent's CLAUDE_CONFIG_DIR",
+          "CLAUDE_CONFIG_DIR" not in S.claude_command({"id": "x"})[1] and "CLAUDE_CONFIG_DIR" not in S.writer_env())
+    S.CFG["writer_config_dir"] = str(TMP / "pinned")
+    check("WRITER_CLAUDE_CONFIG_DIR pins it instead", S.writer_env()["CLAUDE_CONFIG_DIR"] == str(TMP / "pinned")
+          and S.writer_config_dir() == TMP / "pinned")
+    S.CFG["writer_config_dir"] = ""
+    _writer_case()
+    S.compose(_compose_item(), d.state)
+    check("…and every claude call a compose makes runs without it (auth, plugin list, -p)",
+          CALLS.exists() and all(l.startswith("CCD= ") for l in CALLS.read_text().splitlines())
+          and _calls("auth") and _calls("-p"), CALLS.read_text()[:300] if CALLS.exists() else "no calls")
+    os.environ.pop("CLAUDE_CONFIG_DIR")
+
+    # the classes, as data: every one names a fix, and the blocking ones are found before a model call
+    check("every failure class names its fix and its heal",
+          set(S.WRITER_FAILURES) == {"plugin_missing", "logged_out", "credential_expiring", "nonzero_exit", "empty_result"}
+          and all(v["fix"] and "heal" in v and "blocks" in v for v in S.WRITER_FAILURES.values()))
+    _missing = {"type": "result", "subtype": "success", "is_error": False,
+                "result": "/solo:slack-autoreply isn't available in this session"}
+    check("plugin_missing: the 11-06 'success' is classified, and is not healthy",
+          S.classify_run(_missing, "") == "plugin_missing" and not S.writer_healthy(_missing)[0])
+    check("logged_out", S.classify_run(DOWN, "") == "logged_out")
+    check("nonzero_exit: no result and an exit code, or an is_error result",
+          S.classify_run(None, "exit 1: boom") == "nonzero_exit"
+          and S.classify_run({"type": "result", "is_error": True, "result": "You've hit your weekly limit"}, "") == "nonzero_exit")
+    check("empty_result: no result and nothing said, or success with no tools and no decision",
+          S.classify_run(None, "") == "empty_result" and S.classify_run(UP, "", [], False) == "empty_result")
+    check("a run that decided is not a failure", S.classify_run(UP, "", ["Bash"], True) is None)
+
+    # credential_expiring, read from the run's own result
+    _soon = (datetime.now() + timedelta(hours=5)).timestamp()
+    check("credential_expiring: epoch seconds, ms and ISO inside the window",
+          S.credential_expiring({"credential_expires_at": _soon}) and S.credential_expiring({"credential_expires_at": _soon * 1000})
+          and S.credential_expiring({"credential_expires_at": (datetime.now() + timedelta(hours=5)).isoformat()}))
+    check("…and quiet when far off, absent or unreadable",
+          not S.credential_expiring({"credential_expires_at": (datetime.now() + timedelta(days=30)).timestamp()})
+          and not S.credential_expiring(UP) and not S.credential_expiring({"credential_expires_at": "soonish"}))
+    _wn.clear()
+    d.credential_watch({**UP, "credential_expires_at": _soon}); d.credential_watch({**UP, "credential_expires_at": _soon})
+    check("an expiring login is said once, with the fix", len(_wn) == 1 and "expires" in _wn[0] and "claude /login" in _wn[0], str(_wn))
+
+    # plugin_check: the plugin `claude -p` loads must be the one the daemon runs from
+    _writer_case([{**_mine, "enabled": True}])
+    check("plugin loads from the daemon's own dir: ok", S.plugin_check()[0])
+    _writer_case([{**_mine, "enabled": False}])
+    _pc = S.plugin_check()
+    check("disabled: not ok, and the heal is `claude plugin enable`", not _pc[0] and _pc[2] == ["plugin", "enable", "solo@solo"])
+    _writer_case([{"id": "solo@solo", "installPath": str(TMP / "elsewhere"), "enabled": True}])
+    _pc = S.plugin_check()
+    check("loaded from another dir: not ok, and not 'healed' by guessing", not _pc[0] and "elsewhere" in _pc[1] and _pc[2] is None)
+    _writer_case([])
+    check("none installed: not ok", not S.plugin_check()[0])
+    _writer_case()
+    check("a plugin list that cannot be read is not called missing", S.plugin_check()[0])
+
+    # plugin_missing before the run: heal once, then compose
+    _writer_case([{**_mine, "enabled": False}], heal_to=HEALED)
+    _it = _compose_item(); _wn.clear()
+    d.handle_with_claude(dict(_it))
+    check("plugin_missing: healed by one `claude plugin enable`, then the compose goes through",
+          len(_calls("plugin enable")) == 1 and S.load_item(_it["id"]).get("decision") and not [n for n in _wn if "cannot draft" in n],
+          f"{_calls('plugin')} {_wn}")
+
+    # plugin_missing that no heal fixes: no model call, one alert naming the fix, then quiet
+    _writer_case([{**_mine, "enabled": False}])
+    d.state.update(lambda x: x.update(health={"ok": True}))
+    _wn.clear()
+    _it = _compose_item(); d.handle_with_claude(dict(_it))
+    check("plugin_missing, unhealed: no model is paid for", not _calls("-p") and len(_calls("plugin enable")) == 1)
+    check("…one alert, with the exact fix", len([n for n in _wn if "cannot draft" in n]) == 1
+          and any("*Fix:*" in n and "claude plugin" in n for n in _wn), str(_wn))
+    check("…and the item records the class", (S.load_item(_it["id"]).get("outcome") or {}).get("class") == "plugin_missing")
+    _wn.clear(); d.handle_with_claude(dict(_compose_item()))
+    check("…a second message does not re-announce it", not [n for n in _wn if "cannot draft" in n], str(_wn))
+    check("…and still heals at most once per compose", len(_calls("plugin enable")) == 2)
+
+    # plugin_missing seen only by the run (the check said fine): heal, one fresh rerun
+    _writer_case([{**_mine, "enabled": False}], heal_to=HEALED)
+    _real_pf = S.writer_preflight
+    S.writer_preflight = lambda fresh=False, ttl=60: (None, "")
+    try:
+        _it = _compose_item()
+        _t, _r, _e, _cls = S.compose(_it, d.state)
+    finally:
+        S.writer_preflight = _real_pf
+    check("plugin_missing after the run: re-asserted, rerun once, decided",
+          _cls is None and len(_calls("-p")) == 2 and len(_calls("plugin enable")) == 1
+          and S.load_item(_it["id"]).get("decision"), f"{_cls} {_calls('-p')}")
+
+    # logged_out: nothing to heal unattended, no model call, the fix is /login
+    _writer_case(auth='{"loggedIn": false, "authMethod": "none"}')
+    d.state.update(lambda x: x.update(health={"ok": True}))
+    _wn.clear(); d.handle_with_claude(dict(_compose_item()))
+    check("logged_out: no model call, no heal attempt", not _calls("-p") and not _calls("plugin"))
+    check("…one alert naming /login", len(_wn) == 2 and "cannot draft" in _wn[0] and "claude /login" in _wn[0], str(_wn))
+
+    # nonzero_exit: one fresh rerun, never a loop
+    _writer_case()
+    d.state.update(lambda x: x.update(health={"ok": True}))
+    _lim2 = TMP / "limit2"; _lim2.write_text("x"); os.environ["FAKE_LIMIT"] = str(_lim2)
+    try:
+        _wn.clear(); _it = _compose_item(); d.handle_with_claude(dict(_it))
+    finally:
+        os.environ.pop("FAKE_LIMIT"); _lim2.unlink()
+    check("nonzero_exit: exactly one rerun, then it stops", len(_calls("-p")) == 2, str(_calls("-p")))
+    check("…and the writer is marked down once", len([n for n in _wn if "cannot draft" in n]) == 1, str(_wn))
+    d.state.update(lambda x: x.update(health={"ok": True}))
+
+    # empty_result: a success that did nothing gets one fresh rerun
+    _writer_case()
+    _skip = TMP / "skip-heal"; _skip.write_text("x"); os.environ["FAKE_SKIP_ONCE"] = str(_skip)
+    try:
+        _it = _compose_item(); _t, _r, _e, _cls = S.compose(_it, d.state)
+    finally:
+        os.environ.pop("FAKE_SKIP_ONCE")
+    check("empty_result: one fresh rerun and it decides", _cls is None and len(_calls("-p")) == 2
+          and "--session-id" in _calls("-p")[1] and S.load_item(_it["id"]).get("decision"))
+
+    # `solo say` names the class and the fix instead of a bare "could not compose"
+    _src_h = _compose_item()["id"]
+    S.record_delegation(item=_src_h, peer="somepeer", role="scout", task="read the UC-3 log",
+                        outcome="dispatched", counterpart="Priya")
+    _writer_case([{**_mine, "enabled": False}])
+    try:
+        S.cmd_say(_say_args("UC-3 finished", re=_src_h)); _say_exit = ""
+    except SystemExit as e:
+        _say_exit = str(e)
+    check("say: plugin_missing is reported with the fix", "plugin_missing" in _say_exit and "fix:" in _say_exit, _say_exit[:300])
+
+    # the liveness check: every LIVENESS_MINUTES, free, separate from the paid probe
+    _writer_case([{**_mine, "enabled": True}])
+    _n, _h, _c = _probe(UP, health={"ok": True, "last_liveness": S.now_iso()}, mins=0)
+    check("liveness: not re-run inside its 10 minutes", not _calls("auth") and not _c)
+    _old = (datetime.now() - timedelta(minutes=11)).isoformat(timespec="seconds")
+    _n, _h, _c = _probe(UP, health={"ok": True, "last_liveness": _old}, mins=0)
+    check("liveness: after 10 minutes it checks login and plugin, no model call",
+          _calls("plugin list") and not _c and not _n and _h.get("last_liveness", "") > _old)
+    _writer_case([{**_mine, "enabled": False}], heal_to=HEALED)
+    _n, _h, _c = _probe(UP, health={"ok": True}, mins=0, logged_in=(True, ""))
+    check("liveness: a disabled plugin is healed before it is reported", len(_calls("plugin enable")) == 1 and not _n and not _c, str(_n))
+    _writer_case([{"id": "solo@solo", "installPath": str(TMP / "elsewhere"), "enabled": True}])
+    _n, _h, _c = _probe(UP, health={"ok": True}, mins=0, logged_in=(True, ""))
+    check("liveness: an unhealable plugin is one alert with the fix", len(_n) == 1 and "*Fix:*" in _n[0]
+          and _h.get("cls") == "plugin_missing" and not _c, str(_n))
+
+    # daemon start pins the plugin: the check runs even inside the 10 minutes
+    _writer_case([{**_mine, "enabled": False}], heal_to=HEALED)
+    d.state.update(lambda x: x.update(health={"ok": True, "last_liveness": S.now_iso()}))
+    _real_auth_w = S.writer_logged_in
+    S.writer_logged_in = lambda: (True, "")
+    try:
+        d.probe_writer(force=True)
+    finally:
+        S.writer_logged_in = _real_auth_w
+    check("daemon start: the plugin is re-asserted before the first message", len(_calls("plugin enable")) == 1)
+finally:
+    _writer_case()
+    S.Daemon.notify = _real_notify_w
+    d.dispatch = _d_old
+    d.state.update(lambda x: x.update(health={}))
 
 # ---------------------------------------------------- engineering requests
 # One channel where anyone on the team can ask for a code change. Solo files it as a labelled

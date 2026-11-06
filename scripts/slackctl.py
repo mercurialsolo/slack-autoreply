@@ -1787,14 +1787,35 @@ def claude_command(item: dict, session: tuple[str, bool] | None = None, prompt: 
     if session:
         sid, resume = session
         cmd += (["--resume", sid] if resume else ["--session-id", sid])
-    env = dict(os.environ)
+    env = writer_env()
     env["AUTOREPLY_DISPATCH"] = "1"
     env["AUTOREPLY_HOME"] = str(config.STATE_DIR)
     if item.get("sealed"):
         env["AUTOREPLY_SEALED"] = "1"
+    return cmd, env, cwd
+
+
+def writer_env(base: dict | None = None) -> dict:
+    """The environment every `claude` call the daemon makes runs under.
+
+    Not `os.environ` as inherited. On 11-06 `solo say` failed with "/solo:slack-autoreply isn't
+    available in this session": a daemon started from a factory pool worker carries that worker's
+    CLAUDE_CONFIG_DIR, which points `claude -p` at a different plugin cache, one without Solo.
+    The writer runs under the owner's ~/.claude unless WRITER_CLAUDE_CONFIG_DIR pins another.
+    """
+    env = dict(os.environ if base is None else base)
+    if CFG["writer_config_dir"]:
+        env["CLAUDE_CONFIG_DIR"] = str(Path(os.path.expanduser(CFG["writer_config_dir"])))
+    else:
+        env.pop("CLAUDE_CONFIG_DIR", None)
     if not CFG["dispatch_use_api_key"]:
         env.pop("ANTHROPIC_API_KEY", None)   # bill the subscription login, not the API key
-    return cmd, env, cwd
+    return env
+
+
+def writer_config_dir() -> Path:
+    """The Claude Code config dir `writer_env` gives the writer."""
+    return Path(os.path.expanduser(CFG["writer_config_dir"] or "~/.claude"))
 
 
 PROBE_PROMPT = "reply with exactly: pong"
@@ -1811,7 +1832,8 @@ def writer_logged_in() -> tuple[bool, str]:
     It cannot see a rate limit, only the login. That is what the paid probe is for.
     """
     try:
-        p = subprocess.run([CFG["claude_bin"], "auth", "status"], capture_output=True, text=True, timeout=30)
+        p = subprocess.run([CFG["claude_bin"], "auth", "status"], capture_output=True, text=True, timeout=30,
+                           env=writer_env(), stdin=subprocess.DEVNULL)
         info = json.loads((p.stdout or "").strip() or "{}")
     except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as e:
         # Unreadable is not the same as logged out — say so rather than crying wolf.
@@ -1835,6 +1857,10 @@ def writer_healthy(result: dict | None, err: str = "") -> tuple[bool, str]:
     if result.get("is_error"):
         why = result.get("result") or result.get("subtype") or result.get("terminal_reason") or "error"
         return False, " ".join(str(why).split())[:200]
+    if classify_run(result, err) in ("plugin_missing", "logged_out"):
+        # "/solo:slack-autoreply isn't available in this session" came back as a success: rc 0,
+        # no is_error, and a writer that never ran.
+        return False, " ".join(str(result.get("result") or "").split())[:200]
     return True, ""
 
 
@@ -1856,6 +1882,215 @@ def conversation_lock(item: dict):
             yield
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
+
+
+PLUGIN = "solo"
+
+# Every way a compose fails that Solo knows how to name, kept as data so the pre-compose check,
+# the liveness tick and the alert all say the same thing. `heal` is the one bounded thing tried
+# before alerting: "plugin" re-asserts the plugin, "fresh_session" reruns once in a new session,
+# None means nothing on this machine can fix it unattended. `blocks` classes are found before a
+# model call is paid for, and mark the writer down; the others are about one run.
+# Never more than one heal per compose, and the alert is edge-triggered: no silent retry loop.
+WRITER_FAILURES = {
+    "plugin_missing": {
+        "heal": "plugin", "blocks": True,
+        "fix": (f"run `claude plugin list` as the daemon's user and check `{PLUGIN}` is installed and enabled "
+                f"from {config.SKILL_DIR}; if not, `claude plugin install {PLUGIN}@{PLUGIN}` or re-run /solo:deploy. "
+                "If the daemon was started from another agent's session, restart it from a plain shell "
+                "(an inherited CLAUDE_CONFIG_DIR is the usual cause)"),
+    },
+    "logged_out": {
+        "heal": None, "blocks": True,
+        "fix": "run `claude /login` on this machine (or `claude setup-token` for unattended use)",
+    },
+    "credential_expiring": {
+        "heal": None, "blocks": False,
+        "fix": "run `claude /login` on this machine before it expires (or `claude setup-token` for a long-lived token)",
+    },
+    "nonzero_exit": {
+        "heal": "fresh_session", "blocks": False,
+        "fix": "read the daemon log (`solo logs`) for the writer's stderr; `solo doctor` checks the login and plugin",
+    },
+    "empty_result": {
+        "heal": "fresh_session", "blocks": False,
+        "fix": "the writer ran but never reached slackctl; `solo doctor` checks the plugin and its allow-list",
+    },
+}
+
+PLUGIN_MISSING_RE = re.compile(r"isn't available in this session|is not available in this session|"
+                               r"unknown (slash )?command|unknown skill", re.I)
+LOGGED_OUT_RE = re.compile(r"not logged in|please run /login|invalid api key|oauth token (has )?expired", re.I)
+
+
+def classify_run(result: dict | None, err: str = "", tools: list | None = None, decided: bool | None = None) -> str | None:
+    """Which WRITER_FAILURES class a finished run fell into, or None if it did its job.
+
+    `tools`/`decided` are what the run left behind; pass them when the caller knows, so a run that
+    returned success and did nothing is caught too."""
+    said = f"{(result or {}).get('result') or ''} {err or ''}"
+    if PLUGIN_MISSING_RE.search(said):
+        return "plugin_missing"
+    if LOGGED_OUT_RE.search(said):
+        return "logged_out"
+    if result is None:
+        return "nonzero_exit" if (err or "").startswith(("exit ", "timeout", "claude binary not found")) else "empty_result"
+    if result.get("is_error"):
+        return "nonzero_exit"
+    if decided is False and not tools:
+        return "empty_result"
+    return None
+
+
+def credential_expiring(result: dict | None, now: datetime | None = None) -> str | None:
+    """When the writer's login runs out, if that is inside CREDENTIAL_WARN_HOURS. Else None.
+
+    Read from the run's own result (`credential_expires_at`: epoch seconds, epoch ms or ISO), so
+    noticing costs nothing extra."""
+    raw = (result or {}).get("credential_expires_at")
+    if raw in (None, ""):
+        return None
+    try:
+        if isinstance(raw, (int, float)) or str(raw).replace(".", "", 1).isdigit():
+            n = float(raw)
+            at = datetime.fromtimestamp(n / 1000 if n > 1e11 else n)
+        else:
+            at = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if at.tzinfo is not None:
+                at = at.astimezone().replace(tzinfo=None)
+    except (ValueError, OSError, OverflowError):
+        return None
+    now = now or datetime.now()
+    if at - now > timedelta(hours=CFG["credential_warn_hours"]):
+        return None
+    return at.isoformat(timespec="minutes")
+
+
+def installed_plugins(claude_bin: str | None = None) -> list[dict] | None:
+    """What `claude plugin list --json` says under the writer's env, or None when that could not be asked."""
+    try:
+        p = subprocess.run([claude_bin or CFG["claude_bin"], "plugin", "list", "--json"], capture_output=True,
+                           text=True, timeout=30, env=writer_env(), stdin=subprocess.DEVNULL)
+        if p.returncode != 0:
+            return None
+        data = json.loads(p.stdout or "[]")
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return None
+    if isinstance(data, dict):
+        data = data.get("plugins", [])
+    return data if isinstance(data, list) else None
+
+
+def plugin_check() -> tuple[bool, str, list[str] | None]:
+    """Is the plugin `claude -p` loads the one this daemon runs from? (ok, why not, heal command).
+
+    The writer's skill calls `${CLAUDE_PLUGIN_ROOT}/scripts/slackctl.py` and the daemon allows
+    only its own path, so a plugin loaded from anywhere else is as broken as none. A list that
+    cannot be read is not evidence of anything and passes."""
+    root = config.SKILL_DIR
+    if config.SKILL_COMMAND != f"/{PLUGIN}:slack-autoreply":
+        return True, "", None   # the pre-plugin skill layout; nothing here to check
+    installs = installed_plugins()
+    if installs is None:
+        return True, "", None
+    mine = [i for i in installs if isinstance(i, dict) and str(i.get("id", "")).startswith(f"{PLUGIN}@")]
+    here = [i for i in mine if i.get("installPath") and Path(i["installPath"]).resolve() == root.resolve()]
+    if here and all(i.get("enabled", True) for i in here):
+        return True, "", None
+    if here:
+        return False, f"plugin {here[0]['id']} is disabled", ["plugin", "enable", here[0]["id"]]
+    if mine:
+        return False, f"plugin {mine[0]['id']} loads from {mine[0].get('installPath')}, but the daemon runs from {root}", None
+    in_cache = (writer_config_dir() / "plugins" / "cache") in root.resolve().parents
+    return False, (f"no plugin named {PLUGIN} is installed for {writer_config_dir()}"), \
+        (["plugin", "install", f"{PLUGIN}@{PLUGIN}"] if in_cache else None)
+
+
+_PREFLIGHT: dict = {}
+
+
+def writer_preflight(fresh: bool = False, ttl: float = 60) -> tuple[str | None, str]:
+    """The pre-compose check: (failure class, why) for the classes that block, or (None, "").
+
+    No model call: `claude auth status` and `claude plugin list`. Cached for a minute so a burst
+    of messages does not pay for it each time; a heal clears the cache."""
+    hit = _PREFLIGHT.get("v")
+    if not fresh and hit and time.time() - hit[0] < ttl:
+        return hit[1]
+    ok, why = writer_logged_in()
+    out: tuple[str | None, str] = (None, "")
+    if not ok:
+        out = ("logged_out", why)
+    else:
+        pok, pwhy, _ = plugin_check()
+        if not pok:
+            out = ("plugin_missing", pwhy)
+    _PREFLIGHT["v"] = (time.time(), out)
+    return out
+
+
+def heal_writer(cls: str) -> str:
+    """The one bounded heal for a failure class. Returns what it did, for the log."""
+    how = WRITER_FAILURES.get(cls, {}).get("heal")
+    _PREFLIGHT.clear()
+    if how == "plugin":
+        ok, why, cmd = plugin_check()
+        if ok:
+            return "plugin present"
+        if not cmd:
+            return f"nothing to re-assert ({why})"
+        try:
+            p = subprocess.run([CFG["claude_bin"], *cmd], capture_output=True, text=True, timeout=120,
+                               env=writer_env(), stdin=subprocess.DEVNULL)
+            return f"ran `claude {' '.join(cmd)}` → exit {p.returncode}"
+        except (OSError, subprocess.SubprocessError) as e:
+            return f"`claude {' '.join(cmd)}` failed: {type(e).__name__}"
+        finally:
+            _PREFLIGHT.clear()
+    if how == "fresh_session":
+        return "retrying once in a fresh session"
+    return "no unattended fix"
+
+
+def compose(item: dict, state: "State | None" = None, prompt: str | None = None) -> tuple[list[str], dict | None, str, str | None]:
+    """Run the writer on an item with the pre-compose check and at most one heal.
+
+    Returns (tools, result, stderr, failure class or None). A blocking class found before the run
+    is healed once and re-checked; if it holds, no model call is made. A class found after the run
+    gets its heal and one rerun in a fresh session. Whatever is left is the caller's to alert on."""
+    state = state or State()
+    cls, why = writer_preflight()
+    if cls:
+        log.warning("pre-compose check: %s (%s) — %s", cls, why, heal_writer(cls))
+        cls, why = writer_preflight(fresh=True)
+        if cls:
+            return [], None, why, cls
+    tools, result, err = run_claude(item, state, prompt)
+    cls = classify_run(result, err, tools, _decided(item))
+    if cls and WRITER_FAILURES[cls]["heal"]:
+        # Seen once on the first dispatch after the plugin was installed: a one-second "success"
+        # with no tools and no decision, while the next dispatch worked. Resuming would replay a
+        # transcript in which nothing happened, so the rerun is a fresh session, and it is once.
+        log.warning("compose of %s: %s (%s) — %s", item.get("id"), cls, run_said(result, err), heal_writer(cls))
+        tools, result, err = run_claude(item, state, prompt, fresh=True)
+        cls = classify_run(result, err, tools, _decided(item))
+        item["healed"] = True
+    return tools, result, err, cls
+
+
+def _decided(item: dict) -> bool | None:
+    try:
+        return bool(load_item(item["id"]).get("decision"))
+    except (SystemExit, KeyError):
+        return None
+
+
+def writer_alert(why: str, cls: str | None) -> str:
+    """The one alert for a writer that cannot draft, naming the fix."""
+    fix = WRITER_FAILURES.get(cls or "", {}).get("fix")
+    return (f"⚠️ *Solo cannot draft* — {why}\n" + (f"*Fix:* {fix}\n" if fix else "")
+            + "_triage still runs and pending drafts can still be ✅'d, but every new "
+              "message will fail until this is fixed._")
 
 
 def run_claude(item: dict, state: "State | None" = None, prompt: str | None = None, fresh: bool = False) -> tuple[list[str], dict | None, str]:
@@ -3074,19 +3309,10 @@ class Daemon(Slack):
         with self.sem, self.chan_locks[item["channel"]]:
             item["status"] = "handling"
             save_item(item)
-            tools, result, err = run_claude(item, self.state)
-            retried = False
-            if not tools and not load_item(item["id"]).get("decision"):
-                # The writer never reached slackctl: no tools, no `act`. That is not a judgement
-                # about the message, it is the skill not running — seen once on the first dispatch
-                # after the plugin was installed, a one-second "success" with no decision, while
-                # the next dispatch worked. Resuming would replay a transcript in which nothing
-                # happened, so the retry is a fresh session, and it happens once.
-                log.warning("writer used no tools and left no decision for %s (%s) — retrying once in a fresh session",
-                            item["id"], run_said(result, err))
-                tools, result, err = run_claude(item, self.state, fresh=True)
-                retried = True
-            self.writer_verdict(result, err)
+            # The pre-compose check, one heal per failure class, and the rerun live in `compose`.
+            tools, result, err, cls = compose(item, self.state)
+            retried = bool(item.pop("healed", False))
+            self.writer_verdict(result, err, cls)
             session = item.get("session")
             item = load_item(item["id"])  # Claude's `act` wrote the decision
             item["session"] = session
@@ -3100,8 +3326,12 @@ class Daemon(Slack):
                                "said": run_said(result, err), "retried": retried}
                 save_item(item)
                 log.error("Claude returned no decision for %s: %s", item["id"], item["outcome"]["why"])
+                item["outcome"]["class"] = cls
+                save_item(item)
+                fix = WRITER_FAILURES.get(cls or "", {}).get("fix")
                 self.notify(f"⚠️ Couldn't handle a message from *{item['sender_name']}* ({describe_where(item)}): {item['outcome']['why'][:200]}\n{quote(item['text'][:300])}"
-                            + (f"\n{item['permalink']}" if item.get("permalink") else ""))
+                            + (f"\n{item['permalink']}" if item.get("permalink") else "")
+                            + (f"\n*Fix:* {fix}" if fix and not WRITER_FAILURES[cls]["blocks"] else ""))
                 return
             item["run"] = {"tools": tools, "cost_usd": (result or {}).get("marginal_cost_usd"),
                            "cost_session_total": cost, "turns": (result or {}).get("num_turns"),
@@ -3274,7 +3504,7 @@ class Daemon(Slack):
                     f"_that is what I got wrong and you fixed, still unread. run_ `solo review` "
                     f"_to fold it in; nothing here changes until you do._")
 
-    def probe_writer(self) -> None:
+    def probe_writer(self, force: bool = False) -> None:
         """Notice a dead writer before a message pays to discover it.
 
         `handle_with_claude` does alert on a failure, but only after a real message has already
@@ -3285,62 +3515,90 @@ class Daemon(Slack):
         Idle-gated, not tick-gated: every healthy writer run stamps `health.last_ok`, so a day
         with traffic spends nothing and only quiet stretches pay for a probe. Alerts are
         edge-triggered — once when it breaks, once when it comes back, never per tick.
+
+        Two halves. The liveness check, every LIVENESS_MINUTES and free: logged in, and the plugin
+        `claude -p` loads is the one this daemon runs from — either failing gets its one heal and a
+        re-check before it counts. The paid probe, every HEALTH_PROBE_MINUTES of idleness, off by
+        default. `force` runs the liveness check now: daemon start pins the plugin with it.
         """
-        mins = CFG["health_probe_minutes"]
+        mins, live = CFG["health_probe_minutes"], CFG["liveness_minutes"]
         if self.dispatch != "claude" or self.state.pause_info() is not None:
             return
         if not self._probe_lock.acquire(blocking=False):
             return
         try:
             h = self.state.read().get("health") or {}
-            ok, why = writer_logged_in()
-            if ok and mins > 0:
-                last = max(h.get("last_ok") or "", h.get("last_probe") or "")
-                if last and datetime.now() - datetime.fromisoformat(last) < timedelta(minutes=mins):
-                    return
+
+            def recent(key: str, minutes: float) -> bool:
+                v = h.get(key) or ""
+                return bool(v) and minutes > 0 and datetime.now() - datetime.fromisoformat(v) < timedelta(minutes=minutes)
+
+            paid_due = mins > 0 and not (recent("last_ok", mins) or recent("last_probe", mins))
+            if not (force or paid_due or not recent("last_liveness", live)):
+                return
+            cls, why = writer_preflight(fresh=True)
+            if cls and WRITER_FAILURES[cls]["heal"]:
+                log.warning("liveness: %s (%s) — %s", cls, why, heal_writer(cls))
+                cls, why = writer_preflight(fresh=True)
+            ok = cls is None
+            self.state.update(lambda d: d.update(health={**(d.get("health") or {}), "last_liveness": now_iso()}))
+            if ok and paid_due:
                 _, result, err = _run_claude_once({"id": "PROBE"}, (str(uuid.uuid4()), False), prompt=PROBE_PROMPT)
                 ok, why = writer_healthy(result, err)
+                cls = None if ok else classify_run(result, err)
+                self.credential_watch(result)
             elif ok and (h.get("ok", True) or h.get("source") == "run"):
-                # Logged in, paid probe off. Nothing changed — or a real run marked the writer
-                # down for a reason login cannot see (a usage limit), and only a real run clears
-                # that: see writer_verdict.
+                # Logged in, plugin there, paid probe not due. Nothing changed — or a real run
+                # marked the writer down for a reason these checks cannot see (a usage limit), and
+                # only a real run clears that: see writer_verdict.
                 return
             was_ok = h.get("ok", True)
             self.state.update(lambda d: d.update(health={
-                "ok": ok, "why": why, "last_probe": now_iso(), "source": "tick",
+                **(d.get("health") or {}),
+                "ok": ok, "why": why, "cls": cls, "last_probe": now_iso(), "source": "tick",
                 "last_ok": now_iso() if ok else (h.get("last_ok") or ""),
                 "since": now_iso() if ok != was_ok else (h.get("since") or now_iso())}))
-            log.info("writer probe: %s", "ok" if ok else f"DOWN — {why}")
-            if not ok and was_ok:
-                self.notify(f"⚠️ *Solo cannot draft* — {why}\n"
-                            f"_triage still runs and pending drafts can still be ✅'d, but every new "
-                            f"message will fail until this is fixed._")
+            log.info("writer probe: %s", "ok" if ok else f"DOWN — {cls}: {why}")
+            if not ok and (was_ok or (h.get("cls") and h.get("cls") != cls)):
+                self.notify(writer_alert(why, cls))
             elif ok and not was_ok:
                 self.notify(f"✅ *Solo can draft again* — the writer answered at "
                             f"{datetime.now():%H:%M}. Nothing was lost while it was down.")
         finally:
             self._probe_lock.release()
 
-    def writer_verdict(self, result: dict | None, err: str) -> None:
+    def writer_verdict(self, result: dict | None, err: str, cls: str | None = None) -> None:
         """A real run is the arbiter of writer health, in both directions.
 
         `claude auth status` cannot see a usage limit: on 23 Oct the node was logged in and every
         run came back in a second with "You've hit your weekly limit", and nothing told the owner
         because only a *successful* run ever touched health. A run that reached the model clears
         a down state and says so; a run the model refused marks it down and says why, once."""
+        self.credential_watch(result)
         h = self.state.read().get("health") or {}
         was_ok = h.get("ok", True)
         ok, why = writer_healthy(result, err)
-        if ok == was_ok:
+        if cls and WRITER_FAILURES.get(cls, {}).get("blocks"):
+            ok = False
+        cls = None if ok else (cls or classify_run(result, err))
+        if ok == was_ok and (ok or not h.get("cls") or h.get("cls") == cls):
             return
         self.state.update(lambda d: d.update(health={**(d.get("health") or {}), "ok": ok, "why": why if not ok else "",
-                                                     "source": "run", "since": now_iso(), **({"last_ok": now_iso()} if ok else {})}))
+                                                     "cls": cls, "source": "run", "since": now_iso(),
+                                                     **({"last_ok": now_iso()} if ok else {})}))
         if ok:
             self.notify(f"✅ *Solo can draft again* — the writer answered at {datetime.now():%H:%M}. Nothing was lost while it was down.")
         else:
-            self.notify(f"⚠️ *Solo cannot draft* — {why}\n"
-                        f"_triage still runs and pending drafts can still be ✅'d, but every new "
-                        f"message will fail until this is fixed._")
+            self.notify(writer_alert(why, cls))
+
+    def credential_watch(self, result: dict | None) -> None:
+        """Say once, per expiry, that the writer's login is about to run out."""
+        at = credential_expiring(result)
+        if not at or (self.state.read().get("health") or {}).get("expiry_warned") == at:
+            return
+        self.state.update(lambda d: d.update(health={**(d.get("health") or {}), "expiry_warned": at}))
+        self.notify(f"⏳ *Solo's Claude login expires {at.replace('T', ' ')}* — after that it cannot draft.\n"
+                    f"*Fix:* {WRITER_FAILURES['credential_expiring']['fix']}")
 
     def run(self) -> None:
         from slack_sdk.socket_mode import SocketModeClient
@@ -3373,6 +3631,11 @@ class Daemon(Slack):
         if self.dispatch == "claude":
             cmd, _, cwd = claude_command({"id": "ITEM"})
             log.info("will run: %s  (cwd %s)", shlex.join(cmd), cwd)
+            if os.environ.get("CLAUDE_CONFIG_DIR") and not CFG["writer_config_dir"]:
+                log.warning("dropping inherited CLAUDE_CONFIG_DIR=%s — the writer runs under %s",
+                            os.environ["CLAUDE_CONFIG_DIR"], writer_config_dir())
+            # Pin the plugin before the first message: heal once and alert now, not on a compose.
+            self.probe_writer(force=True)
         try:
             while True:
                 time.sleep(300)
@@ -3497,12 +3760,15 @@ def cmd_status(a):
     if CFG["dispatch"] == "claude":
         h = st.get("health") or {}
         ok, why = writer_logged_in()
+        cls = None if ok else "logged_out"
         if ok and not h.get("ok", True):
-            ok, why = False, h.get("why") or "?"   # a known failure the free check cannot see
+            ok, why, cls = False, h.get("why") or "?", h.get("cls")   # a known failure the free check cannot see
         last_ok = (h.get("last_ok") or "")[11:16]
         print(f"writer: {'ok' if ok else 'DOWN — ' + why}"
               + (f" · last good {last_ok}" if last_ok else "")
               + ("" if ok else f" · since {(h.get('since') or '')[11:16] or 'unknown'}"))
+        if not ok and (fix := WRITER_FAILURES.get(cls or "", {}).get("fix")):
+            print(f"  fix: {fix}")
     n, since = review_debt()
     ev = last_eval()
     print(f"learning: {n} corrections unreviewed (VOICE.md {since[:10] or '?'}) · "
@@ -3688,7 +3954,7 @@ def cmd_say(a):
     if CFG["dispatch"] != "claude":
         print(f"compose it with: claude -p '/solo:slack-autoreply compose {item_path(item['id'])}'")
         return
-    tools, result, err = run_claude(item, State(), prompt=f"{config.SKILL_COMMAND} compose {item_path(item['id'])}")
+    tools, result, err, cls = compose(item, State(), prompt=f"{config.SKILL_COMMAND} compose {item_path(item['id'])}")
     item = load_item(item["id"])
     if not item.get("decision"):
         why_not = run_said(result, err) if (result or err) else "no decision"
@@ -3709,7 +3975,9 @@ def cmd_say(a):
         s.console_post(f"⚠️ *Solo could not write a message from `{a.from_}`* — {why_not[:200]}\n"
                        f"_nothing went to anyone. It was meant for {dest}. Below are {a.from_}'s own words, "
                        f"not a draft in your voice: place it, rewrite it or drop it._\n{quote(a.intent[:1200])}")
-        sys.exit(f"Solo could not compose it: {why_not}\n"
+        fix = WRITER_FAILURES.get(cls or "", {}).get("fix")
+        sys.exit(f"Solo could not compose it{f' ({cls})' if cls else ''}: {why_not}\n"
+                 + (f"   fix: {fix}\n" if fix else "") +
                  f"   the message is in the owner's Solo DM in your own words instead — nothing was sent to anyone")
     ledger, _ = load_services()
     fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
@@ -3968,11 +4236,9 @@ def cmd_ask(a):
            "--disallowedTools", "Write,Edit,NotebookEdit,Agent,WebFetch,WebSearch,ToolSearch",
            "--strict-mcp-config",
            "--max-turns", str(min(CFG["claude_max_turns"], 15))]
-    env = dict(os.environ)
+    env = writer_env()
     env["AUTOREPLY_DISPATCH"] = "1"
     env["AUTOREPLY_HOME"] = str(config.STATE_DIR)
-    if not CFG["dispatch_use_api_key"]:
-        env.pop("ANTHROPIC_API_KEY", None)
     try:
         # stdin must be closed, not inherited: `claude -p` waits on it and then runs with a
         # degraded context in which the allowlist does not take, so every Bash call is denied.

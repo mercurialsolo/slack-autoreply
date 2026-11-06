@@ -143,6 +143,15 @@ CFG = dict(
     # (cache creation on a 1M-context model), so watching an idle night would cost more than the
     # night's work. Set it to e.g. 360 if you want it.
     health_probe_minutes=env_int("HEALTH_PROBE_MINUTES", 0),
+    # The free half, every LIVENESS_MINUTES: `claude auth status` plus `claude plugin list`, no
+    # model call. 0 checks on every tick (5 min).
+    liveness_minutes=env_int("LIVENESS_MINUTES", 10),
+    # Warn this long before the writer's login runs out (the run result's credential_expires_at).
+    credential_warn_hours=env_float("CREDENTIAL_WARN_HOURS", 48),
+    # The Claude Code config dir the writer runs under. Empty: drop any inherited
+    # CLAUDE_CONFIG_DIR so `claude -p` uses ~/.claude, where the plugin is installed. A daemon
+    # started from a factory pool worker inherited that worker's dir and lost /solo:slack-autoreply.
+    writer_config_dir=env("WRITER_CLAUDE_CONFIG_DIR", "").strip(),
     dispatch_parallel=env_int("DISPATCH_PARALLEL", 2),
     dispatch_use_api_key=env_bool("DISPATCH_USE_API_KEY", False),
     session_continuity=env_bool("SESSION_CONTINUITY", True),
