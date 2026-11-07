@@ -105,6 +105,15 @@ CFG = dict(
     # Slack never notifies you about your own messages, and Solo posts as you — so a draft
     # in the self-DM cannot badge. This is how you get told: any command that reaches you.
     notify_cmd=env("NOTIFY_CMD", ""),
+    # The desktop. NOTIFY_CMD is a channel (email, a push) and waits to be read; attention/attn.py
+    # interrupts. An escalation whose urgency reaches ATTN_URGENCY is also put on the owner's
+    # screen, on top, until they ✅/❌ it in Slack or it passes. Empty ATTN_URL = never.
+    attn_url=env("ATTN_URL", ""),
+    # Jev's read of "needs the owner's eyes now" gates the screen; the urgency number only stands
+    # in when Jev did not triage the message. Owner, 2026-10-27: only time-sensitive ones draw attention.
+    attn_needs=env_float("ATTN_NEEDS", 0.7),
+    attn_urgency=env_float("ATTN_URGENCY", 4.5),
+    attn_deadline=env("ATTN_DEADLINE", "30m"),
     ack_style=env("ACK_STYLE", "reaction").strip().lower(),
     ack_emoji=env("ACK_EMOJI", "eyes").strip().strip(":"),
     # follow-ups
@@ -164,6 +173,13 @@ CFG = dict(
     # a `bus send` here queues here and is never seen there — so crossing machines is relay's job.
     delegate_peer=env("DELEGATE_PEER", ""),
     delegate_repeat_hours=env_float("DELEGATE_REPEAT_HOURS", 6),   # don't re-ask the same conversation inside this
+    # SR requests addressed to the owner (an SR filed for them in ENG_CHANNEL, a follow-up under one
+    # that @-mentions them, an SR-numbered message in a DM) are handed to the agent as an
+    # investigation as soon as they arrive, without waiting for the writer to propose one. On 3 Nov
+    # Sri's three-point follow-up on SR-100 got a bare "Will do" and no agent, because the writer
+    # proposes only when triage scores the ask as unanswerable. Needs DELEGATE_MODE=auto and a peer.
+    sr_investigate=env_bool("SR_INVESTIGATE", True),
+    sr_dm_match=env("SR_DM_MATCH", r"\bSR-\d+"),       # what marks a DM message as an SR ask
     delegate_cwd=env("DELEGATE_CWD", ""),
     claudectl_bin=env("CLAUDECTL_BIN", "claudectl"),
     # Engineering requests: one channel whose messages become GitHub issues for a coding agent.

@@ -113,6 +113,8 @@ def check_slack(r: Report):
             r.add(OK, "all required user scopes granted")
         if scopes and "files:write" not in scopes:
             r.add(WARN, "files:write user scope not granted", "`say --file` cannot upload until you add it under OAuth & Permissions and reinstall the app (manifest.yaml has it)")
+        if scopes and "users:read.email" not in scopes:
+            r.add(WARN, "users:read.email user scope not granted", "Solo cannot @-tag a person it only knows by email until you add it under OAuth & Permissions and reinstall the app (manifest.yaml has it)")
         if not scopes:
             r.add(WARN, "could not list scopes", "if `listen` logs missing_scope, reinstall the app from manifest.yaml")
         return c, who
