@@ -83,8 +83,10 @@ class FakeClient:
         if k.get("oldest"): msgs = [m for m in msgs if float(m["ts"]) > float(k["oldest"])]
         return {"messages": list(reversed(msgs))[: k.get("limit", 50)], "response_metadata": {}}
     def conversations_replies(self, channel, ts, **k): return {"messages": getattr(self, "replies", {}).get(ts, []), "response_metadata": {}}
-    def chat_postMessage(self, channel, text, thread_ts=None):
-        self.counter += 1; ts = f"{2000000000 + self.counter}.000000"; self.posted.append((channel, text, thread_ts, ts)); return {"ts": ts}
+    def chat_postMessage(self, channel, text, thread_ts=None, blocks=None):
+        self.counter += 1; ts = f"{2000000000 + self.counter}.000000"; self.posted.append((channel, text, thread_ts, ts))
+        if blocks: self.blocks = getattr(self, "blocks", {}); self.blocks[ts] = blocks
+        return {"ts": ts}
     def files_upload_v2(self, **k):
         if getattr(self, "upload_error", None):
             raise RuntimeError(self.upload_error)
@@ -93,7 +95,9 @@ class FakeClient:
         return {"files": [{"id": f"F{self.counter}", "name": f["filename"],
                            "shares": {"public": {k["channel"]: [{"ts": ts}]}}} for f in k["file_uploads"]]}
     def reactions_add(self, channel, timestamp, name): self.reactions.append((channel, timestamp, name)); return {}
-    def chat_update(self, channel, ts, text): self.updates.append((channel, ts, text)); return {}
+    def chat_update(self, channel, ts, text, blocks=None):
+        self.updates.append((channel, ts, text)); self.update_blocks = getattr(self, "update_blocks", {}); self.update_blocks[ts] = blocks
+        return {}
     def search_messages(self, query, **k):
         return {"messages": {"matches": [{"ts": "1699000000.000", "user": U, "text": "the series A deck v3 is final", "channel": {"id": D, "is_im": True}, "permalink": "https://slack/x"}], "paging": {"pages": 1}}}
 
@@ -1001,17 +1005,19 @@ def _say_to_owner(text, **extra):
 
 _own, _own_out, _own_posts, _own_ups, _own_pend = _say_to_owner(f"P1 merged{S.BEAT}need a Google OAuth client from you")
 check("a message to the owner is delivered, not drafted", _own["policy"]["effective"] == "auto" and _own["outcome"]["status"] == "sent", _own_out)
-check("it lands in the console, headed by the agent that asked",
-      len(_own_posts) == 1 and _own_posts[0][0] == d.console and _own_posts[0][1].startswith("📨 *agentvm-mini → you*"), _own_posts)
-check("with nothing to react to", "✅" not in _own_posts[0][1])
-check("as one message: the two-beat marker is a line break here", S.BEAT not in _own_posts[0][1] and "merged\nneed" in _own_posts[0][1])
+check("it lands in the console as one message, headed by what it needs, signed by the agent that asked",
+      len(_own_posts) == 1 and _own_posts[0][0] == d.console and _own_posts[0][1].startswith("❓ need a Google OAuth client from you")
+      and "_from agentvm-mini_" in _own_posts[0][1], _own_posts)
+check("with nothing to react to", "react" not in _own_posts[0][1])
+check("the two-beat marker became two lines, not two messages", S.BEAT not in _own_posts[0][1] and "• ✅ P1 merged" in _own_posts[0][1])
 check("nothing was left pending for a ✅", d.state.read()["pending"] == _own_pend)
 
 _own_file = Path(S.config.STATE_DIR) / "outbox" / "clip.mp4"; _own_file.parent.mkdir(parents=True, exist_ok=True); _own_file.write_bytes(b"mp4")
 _ownf, _ownf_out, _ownf_posts, _ownf_ups, _ = _say_to_owner("the onboarding clip", files=[{"path": str(_own_file), "name": "clip.mp4", "size": 3}])
 check("a file for the owner goes straight to them too — the human it needed is the one it reaches",
       _ownf["outcome"]["status"] == "sent" and _ownf["outcome"].get("files") and len(_ownf_ups) == 1 and _ownf_ups[0]["channel"] == d.console, _ownf_out)
-check("…uploaded with the words, not posted beside them", _ownf_posts == [] and _ownf_ups[0]["initial_comment"].startswith("📨 *agentvm-mini → you*"))
+check("…uploaded with the words, not posted beside them", _ownf_posts == [] and _ownf_ups[0]["initial_comment"].startswith("📨 the onboarding clip")
+      and "_from agentvm-mini_" in _ownf_ups[0]["initial_comment"], _ownf_ups)
 
 fc.upload_error = "missing_scope"
 _ownx, _ownx_out, _ownx_posts, _, _ownx_pend = _say_to_owner("the onboarding clip", files=[{"path": str(_own_file), "name": "clip.mp4", "size": 3}])
@@ -1230,7 +1236,8 @@ check("the owner is told the agent only reads", "read-only" in _shown)
 # question asked in a DM gets answered in a room. `--re` carries the request's id both ways.
 def _say_args(intent, **kw):
     return SimpleNamespace(intent=intent, target=kw.get("to"), from_=kw.get("frm", "scout"),
-                           why=kw.get("why"), thread_ts=None, re_item=kw.get("re"), files=kw.get("files"))
+                           why=kw.get("why"), thread_ts=None, re_item=kw.get("re"), files=kw.get("files"),
+                           **{k: kw.get(k) for k in ("status", "headline", "points", "details", "options", "link", "group")})
 
 
 def _refusal(**kw):
@@ -1562,8 +1569,11 @@ _vn = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.js
 _vn_posts = [q[1] for q in _con.posted[_n_con2:]]
 check("a note to the owner is delivered without the writer", _vn["status"] == "done" and _vn["outcome"]["status"] == "sent"
       and _vn["decision"].get("verbatim") is True, str(_vn.get("outcome")))
-check("…in the agent's own words, whole", len(_vn_posts) == 1 and _long_note in _vn_posts[0], _vn_posts)
-check("…headed by who sent it", _vn_posts[0].startswith("📨 *factory-pr1739 → you*"))
+check("…headed by what the owner has to do, the command intact", len(_vn_posts) == 2 and _vn_posts[0].startswith("❓ Needs on the agentvm VM: colima ssh")
+      and "kernel.apparmor_restrict_unprivileged_userns=0" in _vn_posts[0], _vn_posts)
+check("…and the agent's own words, whole, in the Details reply in its thread", _long_note in _vn_posts[1] and _vn_posts[1].startswith("🔎 *Details*")
+      and [q[2] for q in _con.posted[_n_con2:]][1] == [q[3] for q in _con.posted[_n_con2:]][0], _vn_posts)
+check("…signed by who sent it", "_from factory-pr1739 · details in the thread_" in _vn_posts[0])
 check("…with nothing left pending", d.state.read()["pending"] == _pend2)
 check("…and no gate pretending to apply", _vn["policy"]["effective"] == "auto" and not _vn["decision"].get("used_context"))
 # to anyone else the writer still runs: the words are a brief, and the owner's ✅ stands between
@@ -1572,6 +1582,99 @@ S.cmd_say(_say_args("the mini release is green again, #1739 merged", to="@priya"
 _vp = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.json"), key=lambda q: q.stat().st_mtime)][-1]
 check("a note to anyone else is still written by the writer and drafted",
       not _vp["decision"].get("verbatim") and _vp["policy"]["effective"] == "draft" and not [q for q in fc.posted[_n_fc2:] if q[0] == D], str(_vp.get("decision")))
+
+# ------------------------------------------------ notes to the owner: grouped, and asks with buttons
+def _exits(fn):
+    try:
+        fn()
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 1
+    return 0
+
+
+def _capture(fn):
+    import contextlib, io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        fn()
+    return buf.getvalue()
+
+
+# Owner, 2026-11-04: "messages are not well formatted here for readability". A release lane sends a
+# burst — three boxes in a minute — and each one badged. Inside five minutes, notes from the same
+# agent become one message that is edited as they arrive, each one's detail in its thread.
+_n_g = len(_con.posted); _u_g = len(_con.updates)
+S.cmd_say(_say_args("Helsinki shipped v0.552.0, all checks green", to="@barada", frm="release-lane"))
+S.cmd_say(_say_args("Hillsboro frozen at v0.537.0 until you lift it", to="@barada", frm="release-lane"))
+_g_posts = _con.posted[_n_g:]; _g_upd = _con.updates[_u_g:]
+check("the first note is a message of its own", _g_posts[0][1].startswith("✅ *Helsinki* shipped *v0.552.0*") and _g_posts[0][2] is None, _g_posts)
+check("the second, inside five minutes, joins it: one message, edited, not a second badge",
+      len([q for q in _g_posts if q[2] is None]) == 1 and len(_g_upd) == 1 and _g_upd[0][1] == _g_posts[0][3], (_g_posts, _g_upd))
+check("…which leads with the worst of the two and lists each",
+      _g_upd[0][2].startswith("⏸️ *2 updates* from release-lane") and "• ✅ *Helsinki* shipped" in _g_upd[0][2]
+      and "• ⏸️ *Hillsboro* frozen at *v0.537.0*" in _g_upd[0][2], _g_upd)
+check("…the first note, whole, goes in its thread once it is folded to one line",
+      _g_posts[1][2] == _g_posts[0][3] and _g_posts[1][1].startswith("✅ *Helsinki* shipped *v0.552.0*"), _g_posts)
+check("…and the new note in full goes in its thread", _g_posts[2][2] == _g_posts[0][3] and "Hillsboro" in _g_posts[2][1], _g_posts)
+S.cmd_say(_say_args("Helsinki shipped v0.553.0", to="@barada", frm="another-agent"))
+check("another agent's note is not folded into it", _con.posted[-1][2] is None and len(_con.updates) == _u_g + 1)
+_st = d.state.read(); _st["owner_group"]["at"] = time.time() - 400; S.STATE_FILE.write_text(json.dumps(_st))
+S.cmd_say(_say_args("Helsinki shipped v0.554.0", to="@barada", frm="another-agent"))
+check("after five minutes a note starts a new message", _con.posted[-1][2] is None and len(_con.updates) == _u_g + 1)
+
+# Until Interactivity is on in the Slack app a press only shows a warning icon, so buttons wait for
+# OWNER_BUTTONS=1 and the choices are named in words, with the answer page.
+_n_a0 = len(_con.posted)
+S.cmd_say(_say_args("Merge #1739?", to="@barada", frm="release-lane", options=["Yes", "No"], link="https://factory.example/ask/t_8"))
+check("without OWNER_BUTTONS the choices are named, with the answer page, and no buttons",
+      "👉 *Yes* · *No* — <https://factory.example/ask/t_8|answer here>" in _con.posted[_n_a0][1]
+      and not getattr(_con, "blocks", {}).get(_con.posted[_n_a0][3]), _con.posted[_n_a0])
+# With no buttons, the owner's typed reply in the ask's thread is the answer (review of PR: it used to
+# be filed as voice feedback, and `answer` stayed "unanswered" for ever).
+_ask0 = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.json"), key=lambda q: q.stat().st_mtime)][-1]
+os.environ["AGENTVM_COORD_INBOX"] = str(TMP / "nowhere" / "inbox.md")
+_bot0 = (d.bot, d.bot_dm)
+_ta = _console_ev("Yes", "1800000100.000100", thread_ts=_con.posted[_n_a0][3])
+d.bot, d.bot_dm = _bot0
+check("a typed reply under an ask is its answer", S.load_item(_ask0["id"]).get("answer", {}).get("choice") == "Yes"
+      and _ta and _ta[-1][2] == _con.posted[_n_a0][3] and "answer " + _ask0["id"] in _ta[-1][1], _ta)
+check("…and `answer` prints it", _capture(lambda: S.cmd_answer(SimpleNamespace(item=_ask0["id"], wait=0))).strip() == "Yes")
+check("…not kept as voice feedback", not any(json.loads(x).get("said") == "Yes" for x in
+      S.config.p("console_feedback.jsonl").read_text().splitlines() if x.strip()))
+os.environ.pop("AGENTVM_COORD_INBOX", None)
+os.environ["OWNER_BUTTONS"] = "1"
+# An ask comes with buttons, never "reply yes/no" — and the press is the answer.
+_n_a = len(_con.posted)
+S.cmd_say(_say_args("v0.553.0 is green on Helsinki. Ship it to Hillsboro now, or wait for the freeze to lift?", to="@barada",
+                    frm="release-lane", options=["Ship now", "Wait"], link="https://factory.example/ask/t_9"))
+_ask = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.json"), key=lambda q: q.stat().st_mtime)][-1]
+_ask_msg = _con.posted[_n_a]; _ask_blocks = getattr(_con, "blocks", {}).get(_ask_msg[3]) or []
+_btns = [e for b in _ask_blocks if b["type"] == "actions" for e in b["elements"]]
+check("an ask is its own message, headed ❓, never grouped", _ask_msg[2] is None and _ask_msg[1].startswith("❓ Ship it to Hillsboro now"), _ask_msg)
+check("…with a button per choice and one to the answer page",
+      [e["text"]["text"] for e in _btns] == ["Ship now", "Wait", "Open the answer page"] and _btns[2]["url"] == "https://factory.example/ask/t_9", _btns)
+check("…and no free-text 'reply yes/no' instruction", "reply" not in _ask_msg[1].lower())
+check("unanswered, `answer` says so and exits 1", _exits(lambda: S.cmd_answer(SimpleNamespace(item=_ask["id"], wait=0))) == 1)
+_coord = TMP / "coord" / "inbox.md"; _coord.parent.mkdir(parents=True, exist_ok=True); os.environ["AGENTVM_COORD_INBOX"] = str(_coord)
+_press = lambda who, val: {"type": "block_actions", "user": {"id": who}, "container": {"message_ts": _ask_msg[3], "channel_id": d.console},
+                           "actions": [{"action_id": "solo_answer_1", "value": val}]}
+d.on_button(_press("USOMEONE", "Ship now"))
+check("a press by anyone but the owner is not an answer", not S.load_item(_ask["id"]).get("answer"))
+_n_b = len(_con.posted); _u_b = len(_con.updates)
+d.on_button(_press("UME", "Wait"))
+check("the owner's press is kept on the note", S.load_item(_ask["id"]).get("answer", {}).get("choice") == "Wait")
+check("…passed to the coordinator, as a typed thread reply would be", _coord.exists() and _coord.read_text().strip().endswith(": Wait"))
+check("…the buttons give way to the choice", _con.updates[_u_b:] and _con.updates[_u_b][1] == _ask_msg[3] and "✔️ Wait" in _con.updates[_u_b][2]
+      and not any(b["type"] == "actions" for b in (_con.update_blocks.get(_ask_msg[3]) or []))
+      and any("Wait" in str(b) for b in (_con.update_blocks.get(_ask_msg[3]) or [])), _con.update_blocks.get(_ask_msg[3]))
+check("…and Solo says so in the thread", _con.posted[_n_b:] and _con.posted[_n_b][2] == _ask_msg[3] and "*Wait*" in _con.posted[_n_b][1])
+d.on_button(_press("UME", "Ship now"))
+check("a second press does not change the answer", S.load_item(_ask["id"])["answer"]["choice"] == "Wait")
+_ans_out = _capture(lambda: S.cmd_answer(SimpleNamespace(item=_ask["id"], wait=0)))
+check("`answer` prints the choice", _ans_out.strip() == "Wait", _ans_out)
+os.environ.pop("AGENTVM_COORD_INBOX", None); os.environ.pop("OWNER_BUTTONS", None)
+check("buttons are for the owner only: --option to anyone else is refused",
+      "buttons for the owner" in _refusal(to="@priya", options=["Yes", "No"]))
 S.Slack = _RealSlack
 
 # ------------------------------------------------ an urgent escalation reaches the desktop
@@ -2447,6 +2550,11 @@ try:
 finally:
     S.dispatch_task, S.Daemon.notify = _saved
     S.CFG.update(_old_cfg)
+
+# The golden examples of how a note to the owner reads run here too, so a deploy (which runs this
+# file) cannot ship a formatter that breaks them.
+_gold = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "test_owner_note.py")], capture_output=True, text=True)
+check("the owner-note golden examples pass", _gold.returncode == 0, (_gold.stdout + _gold.stderr)[-800:])
 
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{passed} checks passed")

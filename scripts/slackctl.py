@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import config  # noqa: E402
 import linear  # noqa: E402
+import owner_note  # noqa: E402
 import recall  # noqa: E402
 import voice  # noqa: E402
 from config import CFG, DELEGATE_REACTIONS, DROP_REACTIONS, OK_SUBTYPES, SEND_REACTIONS  # noqa: E402
@@ -996,25 +997,32 @@ class Slack:
     def console(self) -> str:
         return self.bot_dm or self.self_dm
 
-    def console_post(self, text: str) -> str:
+    def console_post(self, text: str, *, blocks: list | None = None, thread_ts: str | None = None) -> str:
         """Post to the console, falling back to the self-DM if the bot is gone.
 
         A revoked or rotated bot token must cost you the notification, never the draft — so a
         failed bot post lands in the self-DM instead. Reactions are accepted in either
-        conversation precisely so a fallen-back draft can still be approved.
+        conversation precisely so a fallen-back draft can still be approved. `blocks` carries
+        buttons; `text` is still sent, as the notification and the fallback.
         """
+        extra = {k: v for k, v in (("blocks", blocks), ("thread_ts", thread_ts)) if v}
         if self.bot and self.bot_dm:
             try:
-                return self.bot.chat_postMessage(channel=self.bot_dm, text=text)["ts"]
+                return self.bot.chat_postMessage(channel=self.bot_dm, text=text, **extra)["ts"]
             except Exception as e:  # noqa: BLE001
                 log.warning("bot post failed (%s) — falling back to your self-DM, which will not notify", e)
-        return self.post(self.self_dm, text, split=False)
+        if blocks:
+            return self.client.chat_postMessage(channel=self.self_dm, text=restore_mentions(text, self.mention_id), **extra)["ts"]
+        return self.post(self.self_dm, text, thread_ts, split=False)
 
-    def console_update(self, ts: str, text: str) -> None:
+    def console_update(self, ts: str, text: str, *, blocks: list | None = None) -> None:
         """Edit a console message. A message posted by the bot can only be edited by the bot."""
+        extra = {"blocks": blocks} if blocks is not None else {}
         try:
             if self.bot and self.bot_dm:
-                self.bot.chat_update(channel=self.bot_dm, ts=ts, text=text)
+                self.bot.chat_update(channel=self.bot_dm, ts=ts, text=text, **extra)
+            elif extra:
+                self.client.chat_update(channel=self.self_dm, ts=ts, text=text, **extra)
             else:
                 self.update(self.self_dm, ts, text)
         except Exception as e:  # noqa: BLE001 - the outcome is already recorded; the edit is cosmetic
@@ -1268,21 +1276,82 @@ def error_text(e: Exception) -> str:
     return why or " ".join(str(e).split())[:200]
 
 
+def owner_buttons() -> bool:
+    """Buttons on an ask need Interactivity on in the Slack app (manifest: settings.interactivity).
+    Until the owner has switched it on and set OWNER_BUTTONS=1, the choices are named in words."""
+    return config.env("OWNER_BUTTONS").lower() in ("1", "on", "yes", "true")
+
+
 def deliver_to_owner(slack: Slack, item: dict, text: str) -> tuple[str, list[str]]:
     """Hand an agent's message to the owner — posted in the console as delivered, not as a draft.
 
     The console rather than the self-DM, for the reason the console exists: a message the owner
     posts to themselves never badges, the bot's does, and NOTIFY_CMD pings. It reads as a message
-    from the agent, via Solo — not as the owner talking to themselves. `⏎` becomes a line break: a
-    report to the owner is one message, and the two-beat shape is for people they write to.
+    from the agent, via Solo — not as the owner talking to themselves.
+
+    Shaped by `owner_note` (owner, 2026-11-04: "use icons, emojis and language that is more human
+    readable"): a headline with a status icon, at most three plain bullets, and the agent's words,
+    whole, in a "Details" reply in the thread — so the shape never costs the owner a command they
+    needed (31 Oct). A choice comes with buttons. Notes from the same agent (or `--group`) inside
+    five minutes become one message, edited as they arrive, each one's detail in its thread.
     """
-    header = f"📨 *{item.get('origin', 'agent').removeprefix('agent:')} → you*"
-    if item.get("files"):
-        ts, file_ids = slack.post_files(slack.console, f"{header}\n{text}", item["files"], None)
-        slack._ping(f"{header} {text}")  # noqa: SLF001 - same module; post_files does not ping, notify does
-        return ts, file_ids
+    sender = item.get("origin", "agent").removeprefix("agent:")
     body = restore_mentions(text, slack.mention_id).replace(BEAT, "\n")
-    return slack.notify(f"{header}\n{body}"), []
+    spec = item.get("note") or {}
+    note = owner_note.from_text(body, sender, status=spec.get("status"), headline=spec.get("headline"),
+                                points=spec.get("points"), details=spec.get("details"),
+                                options=spec.get("options"), link=spec.get("link") or "")
+    r = owner_note.render(note, buttons=owner_buttons())
+    item["note_rendered"] = owner_note.to_dict(note)
+    if item.get("files"):
+        ts, file_ids = slack.post_files(slack.console, r["text"], item["files"], None)
+        slack._ping(r["text"])  # noqa: SLF001 - same module; post_files does not ping, notify does
+        if r["details"] and ts:
+            slack.console_post(r["details"], thread_ts=ts)
+        return ts, file_ids
+    if note.options:
+        # An ask stands alone: its buttons are the point, and a group would bury them.
+        ts = slack.console_post(r["text"], blocks=r["blocks"])
+        slack._ping(r["text"])  # noqa: SLF001
+        def remember(d):
+            asks = d.setdefault("asks", {})
+            asks[ts] = {"item": item["id"], "at": now_iso()}
+            for old in sorted(asks, key=lambda k: asks[k].get("at", ""))[:-200]:
+                asks.pop(old, None)
+        State().update(remember)
+    else:
+        key = item.get("group") or sender
+        now = time.time()
+
+        def claim(d):
+            g = d.get("owner_group") or {}
+            if g.get("key") == key and now - float(g.get("at") or 0) < owner_note.GROUP_WINDOW_S and g.get("ts"):
+                g["notes"] = (g.get("notes") or []) + [owner_note.to_dict(note)]
+                d["owner_group"] = g
+                return dict(g)
+            return None
+        group = State().update(claim)
+        if group:
+            ts = group["ts"]
+            notes = [owner_note.from_dict(n) for n in group["notes"]]
+            slack.console_update(ts, owner_note.render_group(notes, sender))
+            if len(notes) == 2:
+                # The first note's bullets just left the message for its one-line entry: put it,
+                # whole, in the thread before the second, so "each one's detail is in the thread" holds.
+                slack.console_post(owner_note.render(notes[0], buttons=False)["text"], thread_ts=ts)
+            # the new note in full, under the message that now lists it
+            slack.console_post("\n".join(x for x in (r["text"], r["details"]) if x), thread_ts=ts)
+            slack._ping(r["text"])  # noqa: SLF001 - an edit does not notify
+            return ts, []
+        ts = slack.notify(r["text"])
+        State().update(lambda d: d.__setitem__("owner_group", {"key": key, "ts": ts, "at": now,
+                                                                "notes": [owner_note.to_dict(note)]}))
+    if r["details"] and ts:
+        try:
+            slack.console_post(r["details"], thread_ts=ts)
+        except Exception as e:  # noqa: BLE001 - the headline arrived; the detail is a courtesy
+            log.warning("could not post the details for %s: %s", item["id"], e)
+    return ts, []
 
 
 def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, followups: Followups,
@@ -2533,6 +2602,54 @@ class Daemon(Slack):
 
     # ------------------------------------------------------------ console
 
+    def on_button(self, payload: dict) -> None:
+        """The owner pressed a button on an ask (`say --option`). The choice is the answer.
+
+        It travels the way a typed thread reply does — to the coordinator's inbox when there is one
+        — and is kept on the item, where `answer <say-id>` reads it. The buttons then give way to
+        what was chosen, so the same question cannot be answered twice. Only the owner's press counts.
+        """
+        if payload.get("type") != "block_actions":
+            return
+        user = (payload.get("user") or {}).get("id")
+        cont = payload.get("container") or {}
+        ts, channel = cont.get("message_ts"), cont.get("channel_id")
+        for act in payload.get("actions") or []:
+            aid = act.get("action_id") or ""
+            if not aid.startswith("solo_answer_") or aid == "solo_answer_link":
+                continue
+            if user != self.me:
+                log.warning("button %s pressed by %s, not the owner — ignored", aid, user)
+                return
+            choice = (act.get("value") or "").strip()
+            ask = (self.state.read().get("asks") or {}).get(ts) or {}
+            item_id = ask.get("item")
+            if not item_id or not item_path(item_id).exists():
+                log.warning("button on %s: no ask on record for it", ts)
+                return
+            item = load_item(item_id)
+            if item.get("answer"):
+                return  # double delivery, or a second press before the edit landed
+            item["answer"] = {"choice": choice, "at": now_iso(), "by": user}
+            save_item(item)
+            note = owner_note.from_dict(item.get("note_rendered") or {})
+            head = owner_note.render(note)
+            blocks = owner_note.answered_blocks(head["blocks"], choice, "you", datetime.now().strftime("%H:%M"))
+            self.console_update(ts, f"{head['text']}\n✔️ {choice}", blocks=blocks)
+            if inbox := coordinator_inbox():
+                with open(inbox, "a", encoding="utf-8") as f:
+                    f.write(f"- {now_iso()} owner (Slack button on the note at {ts}, {item_id} from "
+                            f"{item.get('origin', '').removeprefix('agent:')}): {choice}\n")
+                said = f"got it — *{choice}*, passed to the coordinator"
+            else:
+                said = f"got it — *{choice}*. `{item.get('origin', '').removeprefix('agent:')}` reads it with `answer {item_id}`"
+            log.info("owner answered %s: %s", item_id, choice)
+            try:
+                self.console_post(said, thread_ts=ts)
+            except Exception as e:  # noqa: BLE001 - the answer is recorded; the receipt is a courtesy
+                log.warning("could not confirm the answer in the thread: %s", e)
+            return
+
     CONSOLE_HELP = ("`pause` / `pause 2h` / `resume` · `status` · `mode learn|draft|auto`\n"
                     "anything else is kept as feedback on how I write, and folded in at the next review")
 
@@ -2558,7 +2675,22 @@ class Daemon(Slack):
         low = said.lower()
         reply = None
         try:
-            if in_thread and (inbox := coordinator_inbox()):
+            ask = ((self.state.read().get("asks") or {}).get(thread) or {}) if in_thread else {}
+            if ask.get("item") and item_path(ask["item"]).exists() and not load_item(ask["item"]).get("answer"):
+                # A typed reply under an ask is its answer — the only way to give one while the
+                # buttons wait for Interactivity, and as good as a press once they are on.
+                item = load_item(ask["item"])
+                item["answer"] = {"choice": said, "at": now_iso(), "by": self.me, "typed": True}
+                save_item(item)
+                origin = item.get("origin", "").removeprefix("agent:")
+                if inbox := coordinator_inbox():
+                    with open(inbox, "a", encoding="utf-8") as f:
+                        f.write(f"- {now_iso()} owner (Slack thread reply to the ask at {thread}, {item['id']} from {origin}): {said}\n")
+                    reply = f"got it — *{said[:80]}*, passed to the coordinator"
+                else:
+                    reply = f"got it — *{said[:80]}*. `{origin}` reads it with `answer {item['id']}`"
+                log.info("owner answered %s in the thread: %s", item["id"], said[:100])
+            elif in_thread and (inbox := coordinator_inbox()):
                 with open(inbox, "a", encoding="utf-8") as f:
                     f.write(f"- {now_iso()} owner (Slack thread reply to the note at {thread}): {said}\n")
                 log.info("console thread reply passed to the coordinator: %s", said[:100])
@@ -2993,6 +3125,11 @@ class Daemon(Slack):
         sm = SocketModeClient(app_token=app_token, web_client=self.client)
 
         def listener(client, req):
+            if req.type == "interactive":
+                # A button on an ask. Acknowledged first: Slack shows the owner an error after 3 s.
+                client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
+                self._submit(self.on_button, req.payload or {})
+                return
             if req.type != "events_api":
                 return
             client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
@@ -3274,6 +3411,13 @@ def cmd_say(a):
         kind, tid, channel = "channels", cid, cid
         name = cat[cid].split(".", 1)[0].strip().lstrip("#")
         routed = f"Solo placed it in #{name} ({conf:.2f})"
+    to_owner_note = channel in (s.self_dm, s.bot_dm)
+    if getattr(a, "options", None) and not to_owner_note:
+        sys.exit("--option makes buttons for the owner to answer; pass --to the owner (@me), or ask the person in words")
+    try:
+        owner_note.norm_status(getattr(a, "status", None))
+    except ValueError as e:
+        sys.exit(str(e))
     print(f"→ {routed}")
     item = {"id": f"say-{uuid.uuid4().hex[:8]}", "created": now_iso(), "status": "queued",
             "simulated": False, "outbound": True, "origin": f"agent:{a.from_}",
@@ -3288,6 +3432,13 @@ def cmd_say(a):
                        + (f" because: {a.why}" if a.why else "") + ")"}
     if files:
         item["files"] = files
+    spec = {k: v for k, v in (("status", getattr(a, "status", None)), ("headline", getattr(a, "headline", None)),
+                              ("points", getattr(a, "points", None)), ("details", getattr(a, "details", None)),
+                              ("options", getattr(a, "options", None)), ("link", getattr(a, "link", None))) if v}
+    if spec:
+        item["note"] = spec
+    if getattr(a, "group", None):
+        item["group"] = a.group
     if tgt:
         item.update(tgt)
         item["re"] = re_item
@@ -3343,6 +3494,22 @@ def cmd_say(a):
                           report=a.intent[:200])
     print(outcome)
 
+
+
+def cmd_answer(a):
+    """Print the owner's choice on an ask (`say --option …`), or exit 1 while it is unanswered."""
+    if not item_path(a.item).exists():
+        sys.exit(f"no such note: {a.item}")
+    deadline = time.time() + max(0.0, a.wait)
+    while True:
+        ans = load_item(a.item).get("answer")
+        if ans:
+            print(ans.get("choice", ""))
+            return
+        if time.time() >= deadline:
+            print("unanswered", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(min(5.0, max(0.1, deadline - time.time())))
 
 
 def cmd_learn_channels(a):
@@ -4107,7 +4274,23 @@ def main():
                    help="you are answering a request the owner dispatched to you; the brief carries "
                         "the id. Sends the report back to the conversation that asked, instead of "
                         "Solo guessing a channel from your words")
+    g = p.add_argument_group("a note to the owner (shaped as headline, bullets, details)",
+                             "Optional: without them Solo reads the shape from your words. With them, it is exactly yours.")
+    g.add_argument("--status", help=f"one of {', '.join(owner_note.STATUSES)} (aliases: green, red, rollback, frozen, …) — picks the icon")
+    g.add_argument("--headline", help="one short line: what happened, in plain words (no shas, no metric names)")
+    g.add_argument("--point", dest="points", action="append", metavar="TEXT",
+                   help="a bullet, repeatable, at most 3: what happened, why, what next or what is needed")
+    g.add_argument("--details", help="the technical detail; goes in a thread reply (default: your intent, whole)")
+    g.add_argument("--option", dest="options", action="append", metavar="CHOICE",
+                   help="a button the owner can press (Yes / No / A / B), repeatable; the choice is passed to the "
+                        "coordinator and kept on the item — read it with `answer <say-id>`")
+    g.add_argument("--link", help="a dashboard or release-log URL, shown as a link (and a button on an ask)")
+    g.add_argument("--group", help="notes with the same key inside 5 minutes become one message (default: the --from agent)")
     p.set_defaults(fn=cmd_say)
+    p = sub.add_parser("answer", help="what the owner chose on a note with --option buttons")
+    p.add_argument("item", help="the say-… id printed by `say`")
+    p.add_argument("--wait", type=float, default=0, help="seconds to wait for an answer (default: do not wait)")
+    p.set_defaults(fn=cmd_answer)
     p = sub.add_parser("learn-channels", help="learn what each channel you are in is for")
     p.add_argument("--limit", type=int, default=60, help="messages to sample per channel")
     p.add_argument("--refresh", action="store_true", help="rewrite dossiers that already exist")
