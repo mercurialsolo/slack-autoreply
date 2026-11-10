@@ -41,6 +41,7 @@ FAKE_CLAUDE.chmod(0o755)
 ENV = {
     "HOME": str(HOME), "AUTOREPLY_HOME": str(STATE), "REPLY_DELAY_MIN": "0", "REPLY_DELAY_MAX": "0", "OBSERVE_HOURS": "0",
     "CLAUDE_BIN": str(FAKE_CLAUDE), "CONTEXT_DIRS": str(HOME / "proj"), "MODE": "learn", "LOG_LEVEL": "WARNING",
+    "NOTE_SHAPER": "off",  # the fake claude would answer a shaping prompt by acting
 }
 for k in ("SLACK_USER_TOKEN", "SLACK_APP_TOKEN", "ANTHROPIC_API_KEY", "TYPESAFE_API_KEY"):
     os.environ.pop(k, None)
@@ -1006,17 +1007,17 @@ def _say_to_owner(text, **extra):
 _own, _own_out, _own_posts, _own_ups, _own_pend = _say_to_owner(f"P1 merged{S.BEAT}need a Google OAuth client from you")
 check("a message to the owner is delivered, not drafted", _own["policy"]["effective"] == "auto" and _own["outcome"]["status"] == "sent", _own_out)
 check("it lands in the console as one message, headed by what it needs, signed by the agent that asked",
-      len(_own_posts) == 1 and _own_posts[0][0] == d.console and _own_posts[0][1].startswith("❓ need a Google OAuth client from you")
+      len(_own_posts) == 1 and _own_posts[0][0] == d.console and _own_posts[0][1].startswith("❓ Need a Google OAuth client from you")
       and "_from agentvm-mini_" in _own_posts[0][1], _own_posts)
 check("with nothing to react to", "react" not in _own_posts[0][1])
-check("the two-beat marker became two lines, not two messages", S.BEAT not in _own_posts[0][1] and "• ✅ P1 merged" in _own_posts[0][1])
+check("the two-beat marker became two lines, not two messages", S.BEAT not in _own_posts[0][1] and "P1 merged" in _own_posts[0][1] and "• " not in _own_posts[0][1])
 check("nothing was left pending for a ✅", d.state.read()["pending"] == _own_pend)
 
 _own_file = Path(S.config.STATE_DIR) / "outbox" / "clip.mp4"; _own_file.parent.mkdir(parents=True, exist_ok=True); _own_file.write_bytes(b"mp4")
 _ownf, _ownf_out, _ownf_posts, _ownf_ups, _ = _say_to_owner("the onboarding clip", files=[{"path": str(_own_file), "name": "clip.mp4", "size": 3}])
 check("a file for the owner goes straight to them too — the human it needed is the one it reaches",
       _ownf["outcome"]["status"] == "sent" and _ownf["outcome"].get("files") and len(_ownf_ups) == 1 and _ownf_ups[0]["channel"] == d.console, _ownf_out)
-check("…uploaded with the words, not posted beside them", _ownf_posts == [] and _ownf_ups[0]["initial_comment"].startswith("📨 the onboarding clip")
+check("…uploaded with the words, not posted beside them", _ownf_posts == [] and _ownf_ups[0]["initial_comment"].startswith("📨 The onboarding clip")
       and "_from agentvm-mini_" in _ownf_ups[0]["initial_comment"], _ownf_ups)
 
 fc.upload_error = "missing_scope"
@@ -1569,8 +1570,10 @@ _vn = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.js
 _vn_posts = [q[1] for q in _con.posted[_n_con2:]]
 check("a note to the owner is delivered without the writer", _vn["status"] == "done" and _vn["outcome"]["status"] == "sent"
       and _vn["decision"].get("verbatim") is True, str(_vn.get("outcome")))
-check("…headed by what the owner has to do, the command intact", len(_vn_posts) == 2 and _vn_posts[0].startswith("❓ Needs on the agentvm VM: colima ssh")
-      and "kernel.apparmor_restrict_unprivileged_userns=0" in _vn_posts[0], _vn_posts)
+check("…headed by what the owner has to do; the command itself waits in the thread (owner, 2026-11-10)",
+      len(_vn_posts) == 2 and _vn_posts[0].startswith("❓ Needs on the agentvm VM")
+      and "kernel.apparmor" not in _vn_posts[0] and "The command is in the thread" in _vn_posts[0], _vn_posts)
+check("…and the command is whole there", "kernel.apparmor_restrict_unprivileged_userns=0" in _vn_posts[1])
 check("…and the agent's own words, whole, in the Details reply in its thread", _long_note in _vn_posts[1] and _vn_posts[1].startswith("🔎 *Details*")
       and [q[2] for q in _con.posted[_n_con2:]][1] == [q[3] for q in _con.posted[_n_con2:]][0], _vn_posts)
 check("…signed by who sent it", "_from factory-pr1739 · details in the thread_" in _vn_posts[0])
@@ -1611,8 +1614,8 @@ check("the first note is a message of its own", _g_posts[0][1].startswith("✅ *
 check("the second, inside five minutes, joins it: one message, edited, not a second badge",
       len([q for q in _g_posts if q[2] is None]) == 1 and len(_g_upd) == 1 and _g_upd[0][1] == _g_posts[0][3], (_g_posts, _g_upd))
 check("…which leads with the worst of the two and lists each",
-      _g_upd[0][2].startswith("⏸️ *2 updates* from release-lane") and "• ✅ *Helsinki* shipped" in _g_upd[0][2]
-      and "• ⏸️ *Hillsboro* frozen at *v0.537.0*" in _g_upd[0][2], _g_upd)
+      _g_upd[0][2].startswith("⏸️ *2 updates* from release-lane") and "✅ *Helsinki* shipped" in _g_upd[0][2] and "• " not in _g_upd[0][2]
+      and "⏸️ *Hillsboro* frozen at *v0.537.0*" in _g_upd[0][2], _g_upd)
 check("…the first note, whole, goes in its thread once it is folded to one line",
       _g_posts[1][2] == _g_posts[0][3] and _g_posts[1][1].startswith("✅ *Helsinki* shipped *v0.552.0*"), _g_posts)
 check("…and the new note in full goes in its thread", _g_posts[2][2] == _g_posts[0][3] and "Hillsboro" in _g_posts[2][1], _g_posts)
@@ -1627,7 +1630,7 @@ check("after five minutes a note starts a new message", _con.posted[-1][2] is No
 _n_a0 = len(_con.posted)
 S.cmd_say(_say_args("Merge #1739?", to="@barada", frm="release-lane", options=["Yes", "No"], link="https://factory.example/ask/t_8"))
 check("without OWNER_BUTTONS the choices are named, with the answer page, and no buttons",
-      "👉 *Yes* · *No* — <https://factory.example/ask/t_8|answer here>" in _con.posted[_n_a0][1]
+      "👉 *Yes* or *No* — <https://factory.example/ask/t_8|Answer here>" in _con.posted[_n_a0][1]
       and not getattr(_con, "blocks", {}).get(_con.posted[_n_a0][3]), _con.posted[_n_a0])
 # With no buttons, the owner's typed reply in the ask's thread is the answer (review of PR: it used to
 # be filed as voice feedback, and `answer` stayed "unanswered" for ever).
@@ -1650,7 +1653,7 @@ S.cmd_say(_say_args("v0.553.0 is green on Helsinki. Ship it to Hillsboro now, or
 _ask = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.json"), key=lambda q: q.stat().st_mtime)][-1]
 _ask_msg = _con.posted[_n_a]; _ask_blocks = getattr(_con, "blocks", {}).get(_ask_msg[3]) or []
 _btns = [e for b in _ask_blocks if b["type"] == "actions" for e in b["elements"]]
-check("an ask is its own message, headed ❓, never grouped", _ask_msg[2] is None and _ask_msg[1].startswith("❓ Ship it to Hillsboro now"), _ask_msg)
+check("an ask is its own message, headed ❓, never grouped", _ask_msg[2] is None and _ask_msg[1].startswith("❓ *v0.553.0* is green on Helsinki") and "👉 Ship it to Hillsboro now" in _ask_msg[1], _ask_msg)
 check("…with a button per choice and one to the answer page",
       [e["text"]["text"] for e in _btns] == ["Ship now", "Wait", "Open the answer page"] and _btns[2]["url"] == "https://factory.example/ask/t_9", _btns)
 check("…and no free-text 'reply yes/no' instruction", "reply" not in _ask_msg[1].lower())

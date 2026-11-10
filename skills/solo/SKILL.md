@@ -116,8 +116,9 @@ rather than from a person. Treat each one as a **peer request to evaluate**:
 
 Report back with `solo say`, the same as any other finished work — the owner reads it in their own
 voice and it waits for their ✅. A note addressed to the owner themselves (`--to` their handle or
-id) is different: it is delivered to their console in your own words, whole, as you wrote it —
-no rewrite, no trim — so say everything they need in it, commands included. If the work came
+id) is different: it is delivered to their console with no draft to approve, shaped to the owner's
+readability rule (below). Your words stay whole in the Details reply, so say everything they need
+in it, commands included: a command goes to Details, the note says it is there. If the work came
 from a brief with a `--re` id, pass that id.
 
 ## What makes a good report
@@ -168,28 +169,50 @@ anything their team should see.
 
 ### How a note to the owner reads
 
-Solo shapes it so the owner can read it on a phone: a **headline with a status icon**, at most
-**three plain bullets**, and your words, whole, in a **Details** reply in the message's thread.
-Icons: ✅ live and green · ⚠️ live with a warning · 🔴 rolled back or failed · ⏸️ held or frozen ·
-🚀 shipping · ❓ needs you. Notes from you inside five minutes become one message.
+The owner's rule (2026-11-10), for every note Solo writes or relays to a person on any channel:
 
-Free text works, and Solo reads the shape from it (seconds not ms, no shas, no metric names, no
-log paths in the body). To say it exactly, give the shape yourself:
+- **One or two short plain sentences first**: what happened, what it means. Then, only if they must
+  decide something, **one 👉 line asking it as a question with the choices in words**
+  ("Grant more or stop it?"), never "reply yes/no".
+- **No task ids, shas, metric or field names, counters (5/5, 274/1,200), file paths or CLI
+  commands** in the body. They stay whole in the **Details** reply in the message's thread.
+- **Links are text links** with a plain label — `<url|Answer here>`, `<url|What changed>`,
+  `<url|Release page>` — **two at most**, never a bare URL, never an id after a link.
+- **No bulleted lists**, and nothing cut off with "…": the two or three things that matter go in a
+  sentence ("What got better: speed, search and alerts"), the full list goes to Details.
+- Keep the **status icon headline**: ✅ live and green · ⚠️ live with a warning · 🔴 rolled back or
+  failed · ⏸️ held or frozen · 🚀 shipping · ❓ needs you. Notes from you inside five minutes become
+  one message.
+
+What it looks like:
+
+```
+❓ Retro: wire review noise tripwire into reviewer briefs
+The task hit its budget again after one operator grant.
+👉 Grant more or stop it? — Answer here
+```
+
+Free text works: a small model reads what matters from your words, and the rule is applied to
+whatever it writes (no model, no quota: plain rules read it instead). To say it exactly, give the
+shape yourself — it is used as given and still rendered to the rule:
 
 ```
 solo say "<full technical detail>" --to @owner --from release \
   --status failed --headline "Helsinki rolled back v0.552 → stays on v0.551" \
-  --point "replies were 0.4 s slower on one test run" --point "next: re-run tonight, nothing needed from you" \
+  --point "Replies were 0.4 s slower on one test run." --point "It re-runs tonight; nothing needed from you." \
   --link https://dashboard/releases/552
 ```
 
 - `--status` ok | warn | failed | held | shipping | ask | info picks the icon (default: read from your words).
-- `--headline` one line, plain words. `--point` is repeatable, three at most: what happened, why, what next.
-- `--details` the technical detail for the thread (default: your intent, whole). `--link` a dashboard or log.
+- `--headline` one line, plain words. `--point` is a plain sentence, repeatable: the first two go
+  under the headline, the rest to Details.
+- `--details` the technical detail for the thread (default: your intent, whole). `--link` the answer
+  page or a release page, shown as a labelled text link.
 - `--group <key>` groups notes that share the key, instead of by sender.
-- To ask the owner something, give the choices as buttons, never "reply yes/no":
-  `--option Yes --option No` (and `--link` to the answer page). Their press is passed to the
-  coordinator and kept on the note: `solo answer <say-id>` prints it (`--wait 600` to block).
+- To ask the owner something, give the choices: `--option Yes --option No` (and `--link` to the
+  answer page). They show as buttons where Slack allows, otherwise in words on the 👉 line. Their
+  answer is passed to the coordinator and kept on the note: `solo answer <say-id>` prints it
+  (`--wait 600` to block).
 
 You get no delivery receipt. Do not wait for one, and do not re-send.
 

@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
 import linear  # noqa: E402
 import owner_note  # noqa: E402
+import note_shape  # noqa: E402
 import recall  # noqa: E402
 import voice  # noqa: E402
 from config import CFG, DELEGATE_REACTIONS, DROP_REACTIONS, OK_SUBTYPES, SEND_REACTIONS  # noqa: E402
@@ -1290,17 +1291,19 @@ def deliver_to_owner(slack: Slack, item: dict, text: str) -> tuple[str, list[str
     from the agent, via Solo — not as the owner talking to themselves.
 
     Shaped by `owner_note` (owner, 2026-11-04: "use icons, emojis and language that is more human
-    readable"): a headline with a status icon, at most three plain bullets, and the agent's words,
-    whole, in a "Details" reply in the thread — so the shape never costs the owner a command they
+    readable"; 2026-11-10: "1-2 short plain sentences, then at most one line on what is needed"):
+    an icon headline, a sentence or two, one question with its choices in words, at most two text
+    links — no ids, commands or counters — and the agent's words, whole, in a "Details" reply in the thread — so the shape never costs the owner a command they
     needed (31 Oct). A choice comes with buttons. Notes from the same agent (or `--group`) inside
     five minutes become one message, edited as they arrive, each one's detail in its thread.
     """
     sender = item.get("origin", "agent").removeprefix("agent:")
     body = restore_mentions(text, slack.mention_id).replace(BEAT, "\n")
     spec = item.get("note") or {}
+    shaped = None if spec.get("headline") else note_shape.shape(body)  # a model's judgment; None falls back
     note = owner_note.from_text(body, sender, status=spec.get("status"), headline=spec.get("headline"),
                                 points=spec.get("points"), details=spec.get("details"),
-                                options=spec.get("options"), link=spec.get("link") or "")
+                                options=spec.get("options"), link=spec.get("link") or "", shaped=shaped)
     r = owner_note.render(note, buttons=owner_buttons())
     item["note_rendered"] = owner_note.to_dict(note)
     if item.get("files"):
@@ -4274,17 +4277,17 @@ def main():
                    help="you are answering a request the owner dispatched to you; the brief carries "
                         "the id. Sends the report back to the conversation that asked, instead of "
                         "Solo guessing a channel from your words")
-    g = p.add_argument_group("a note to the owner (shaped as headline, bullets, details)",
-                             "Optional: without them Solo reads the shape from your words. With them, it is exactly yours.")
+    g = p.add_argument_group("a note to the owner (shaped as headline, a sentence or two, details)",
+                             "Optional: without them Solo reads the shape from your words. With them, it is yours, held to the same rule.")
     g.add_argument("--status", help=f"one of {', '.join(owner_note.STATUSES)} (aliases: green, red, rollback, frozen, …) — picks the icon")
     g.add_argument("--headline", help="one short line: what happened, in plain words (no shas, no metric names)")
     g.add_argument("--point", dest="points", action="append", metavar="TEXT",
-                   help="a bullet, repeatable, at most 3: what happened, why, what next or what is needed")
+                   help="a plain sentence, repeatable: the first two go under the headline, the rest to Details")
     g.add_argument("--details", help="the technical detail; goes in a thread reply (default: your intent, whole)")
     g.add_argument("--option", dest="options", action="append", metavar="CHOICE",
                    help="a button the owner can press (Yes / No / A / B), repeatable; the choice is passed to the "
                         "coordinator and kept on the item — read it with `answer <say-id>`")
-    g.add_argument("--link", help="a dashboard or release-log URL, shown as a link (and a button on an ask)")
+    g.add_argument("--link", help="the answer page or a release page, shown as a labelled text link (and a button on an ask)")
     g.add_argument("--group", help="notes with the same key inside 5 minutes become one message (default: the --from agent)")
     p.set_defaults(fn=cmd_say)
     p = sub.add_parser("answer", help="what the owner chose on a note with --option buttons")
