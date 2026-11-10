@@ -237,8 +237,8 @@ def clean(piece: str) -> tuple[str, list, bool]:
     return (t if re.search(r"[A-Za-z]", t) else ""), links, had_cmd
 
 
-def _and(words: list[str]) -> str:
-    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
+def _and(words: list[str], conj: str = "and") -> str:
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + f" {conj} " + words[-1]
 
 
 def _fold(header: str, items: list[str]) -> str:
@@ -326,8 +326,9 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
         whole = details if details is not None else (intent if intent and intent != headline.strip() else "")
         if extra and not all(x in whole for x in extra):
             whole = "\n".join(x for x in [whole] + extra if x)  # the points the body had no room for
-        if had_cmd and not any(p and COMMAND_RE.search(p) and p in whole for p in [headline] + points):
-            whole = "\n".join(x for x in [whole, headline] + points if x) if not whole else whole
+        if had_cmd:  # the body says the command is in the thread: make sure it is
+            missing = [p for p in [headline] + points if p and COMMAND_RE.search(p) and p not in whole]
+            whole = "\n".join(x for x in [whole] + missing if x)
     elif shaped:
         head, more = _split_long(c(shaped.get("headline") or ""))
         body = [more, c(note_rules.flat(shaped.get("summary") or ""))]
@@ -341,7 +342,10 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
         cleaned = [x for x in (c(p) for p in _pieces(intent)) if x]
         if not cleaned:
             st = norm_status(status) or ("ask" if options else "info")
-            return Note(st, "(empty note)", links=note_rules.merge_links(given, taken), details=intent,
+            # Only counters, no words around them ("Canary green: 5/5"): the counter is the news.
+            raw = note_rules.tidy(note_rules.TASK_ID_RE.sub("", note_rules.take_links(intent)[0]))
+            head = raw if re.search(r"[A-Za-z]", raw) and len(raw) <= 120 else "(empty note)"
+            return Note(st, head, links=note_rules.merge_links(given, taken), details=intent,
                         options=options, sender=sender)
         ask_i = max((i for i, x in enumerate(cleaned) if x.endswith("?")), default=None)
         asks = cleaned[ask_i] if ask_i is not None else ""
@@ -374,7 +378,7 @@ def _label(label: str) -> str:
 def ask_line(note: Note, buttons: bool = True) -> str:
     q, answer = emphasize(note.ask), note.link
     if note.options and not buttons:
-        choices = _and([f"*{_escape(o)}*" for o in note.options]).replace(", ", ", ").replace(" and ", " or ")
+        choices = _and([f"*{_escape(o)}*" for o in note.options], "or")
         q = f"{q} {choices}".strip()
         return f"👉 {q} — " + (f"<{answer}|Answer here>" if answer else "answer in the thread")
     if q and answer and not (note.options and buttons):

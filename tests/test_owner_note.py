@@ -221,4 +221,17 @@ check("…a short plain line or an agent's own shape needs no model", not note_s
       and not note_shape.wanted(RELEASE, structured=True) and note_shape.wanted(RELEASE))
 check("the rule is in the shaper's prompt", R.RULE in note_shape.PROMPT.format(rule=R.RULE, text="x"))
 
+# Review round 1.
+_o = N.render(N.from_text("Ship it?", "release", options=["Ship it", "Stop and revert"]), buttons=False)["text"]
+check("choices in words keep their own words: 'Stop and revert' is one choice", "*Ship it* or *Stop and revert*" in _o, _o)
+_n = N.from_text("context", "ops", headline="Deploy blocked; run `kubectl rollout undo deploy/api`", details="logs say the api pod crashlooped")
+check("a command taken out of the body is in the thread, even with --details", "kubectl rollout undo" in _n.details
+      and "kubectl" not in N.render(_n)["text"], repr(_n))
+_n = N.from_text("Canary green: 5/5", "release")
+check("a status line that is only a counter keeps its counter", "5/5" in _n.headline, repr(_n))
+os.environ.pop("ANTHROPIC_API_KEY", None)
+os.environ["NOTE_SHAPER"] = "auto"
+check("auto with no key uses the CLI", note_shape.mode() == "claude")
+check("the shaper's statuses are the renderer's", note_shape.STATUSES == N.STATUSES)
+
 print(f"\n{passed} checks passed")

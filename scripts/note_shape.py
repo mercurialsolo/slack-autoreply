@@ -8,7 +8,8 @@ words and answers with the note's parts as JSON. Whatever it says is then held t
 Never load-bearing: no key, no CLI, a timeout, bad JSON — `shape` returns None and the note falls
 back to the deterministic reading. A note to the owner must not depend on a quota (27, 29, 31 Oct).
 
-NOTE_SHAPER: auto (default: the API when ANTHROPIC_API_KEY is set, else the claude CLI) | api |
+NOTE_SHAPER: auto (default: the API when ANTHROPIC_API_KEY is set and DISPATCH_USE_API_KEY on, else the claude
+CLI) | api |
 claude | off. NOTE_SHAPER_MODEL picks the model (default: claude-haiku-5-5).
 """
 from __future__ import annotations
@@ -20,9 +21,10 @@ import subprocess
 
 import config
 import note_rules
+import owner_note
 
-STATUSES = ("ask", "failed", "warn", "held", "shipping", "ok", "info")
-TIMEOUT_S = 40
+STATUSES = owner_note.STATUSES
+TIMEOUT_S = 20  # it runs inside delivery: a slow model costs the owner a late note, not a lost one
 SHORT = 140  # a one-line note this short with no link is already shaped
 
 PROMPT = """You turn an agent's status note into a short note its owner reads on a phone in Slack.
@@ -56,7 +58,8 @@ def wanted(text: str, structured: bool = False) -> bool:
 def mode() -> str:
     m = (config.env("NOTE_SHAPER") or "auto").strip().lower()
     if m == "auto":
-        return "api" if os.environ.get("ANTHROPIC_API_KEY") else "claude"
+        # The API only where the operator opted into billing it (DISPATCH_USE_API_KEY), like dispatch.
+        return "api" if os.environ.get("ANTHROPIC_API_KEY") and config.CFG.get("dispatch_use_api_key") else "claude"
     return m if m in ("api", "claude", "off") else "off"
 
 
