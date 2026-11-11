@@ -5,6 +5,8 @@ install, restart and health commands. Nothing here touches launchd, systemd, Sla
 Each tagged release says how it behaves through files it carries:
     FAILTESTS   its test gate fails             -> never installed, node stays where it was
     BROKEN      its daemon never comes back     -> rolled back to the commit it replaced
+    DIES        its daemon logs in, then exits  -> rolled back too (up means still up after the settle)
+    MAKEX       its install leaves an untracked file in the way of the checkout back
 A node whose ALWAYS_BROKEN marker exists (in the state dir) never comes back on any commit.
 """
 import json
@@ -61,13 +63,24 @@ def run(*args, **extra):
     env = {**GIT_ENV,
            "SOLO_REPO": str(NODE), "SOLO_STATE": str(STATE),
            "SOLO_TEST_CMD": f"test ! -f FAILTESTS && echo test >> {CALLS}",
-           "SOLO_INSTALL_CMD": f"echo install $(git rev-parse --short HEAD) >> {CALLS}",
+           "SOLO_INSTALL_CMD": f"echo install $(git rev-parse --short HEAD) >> {CALLS}; if [ -f MAKEX ]; then echo x > ONLYOLD; fi",
            "SOLO_RESTART_CMD": f"echo restart >> {CALLS}",
            "SOLO_HEALTH_CMD": f"test ! -f BROKEN && test ! -f {STATE}/ALWAYS_BROKEN",
-           "SOLO_HEALTH_WAIT_S": "0"}
+           "SOLO_ALIVE_CMD": "test ! -f DIES",
+           "SOLO_HEALTH_WAIT_S": "0", "SOLO_SETTLE_S": "0"}
     env.update(extra)
     r = subprocess.run(["bash", str(SCRIPT), *args], env=env, capture_output=True, text=True, timeout=60)
     return r.returncode, r.stdout + r.stderr
+
+
+def held():
+    p = STATE / "release-pull.held"
+    return p.read_text().strip() if p.exists() else None
+
+
+def pinned():
+    p = STATE / "release-pull.pinned"
+    return p.read_text().strip() if p.exists() else None
 
 
 def head():
@@ -134,6 +147,13 @@ check("failing tests: refused (exit 1), node stays on the old commit", rc == 1 a
 check("failing tests: nothing installed, no restart", calls() == [])
 check("failing tests: decision line says refused", decisions()[-1]["result"] == "refused"
       and decisions()[-1]["to"] == bad_tests, decisions()[-1])
+check("failing tests: the live checkout never moved; the scratch worktree is gone",
+      not (STATE / "release-pull.wt").exists() and len(git(NODE, "worktree", "list").splitlines()) == 1)
+check("failing tests: the tag is held", held() == "solo--v1.11.0", held())
+rep_n = len(decisions())
+rc, out = run()
+check("a held tag whose tests failed is not tested again on the next tick",
+      rc == 0 and "held" in out and calls() == [] and len(decisions()) == rep_n, out)
 
 # ------------------------------------------------------------------ a release whose daemon does not come back
 broken = release("solo--v1.12.0", files=["BROKEN"], drop=["FAILTESTS"])
@@ -151,9 +171,34 @@ rc, out = run("--tag", "solo--v1.12.0")
 check("--tag by hand overrides the hold (and rolls back again)", rc == 2 and head() == v10, out)
 calls()
 
+# ------------------------------------------------------------------ a hand deploy of an older tag pins the node
+rc, out = run("--tag", "solo--v1.0.0")
+check("--tag an older release deploys it (a hand rollback)", rc == 0 and head() == v1, out)
+check("an older hand deploy does not lift the hold on the newer broken tag", held() == "solo--v1.12.0", held())
+check("an older hand deploy pins the node there", pinned() == "solo--v1.0.0", pinned())
+calls()
 fixed = release("solo--v1.13.0", drop=["BROKEN"])
 rc, out = run()
-check("a newer tag clears the hold and deploys", rc == 0 and head() == fixed and not (STATE / "release-pull.held").exists(), out)
+check("pinned: the timer leaves the node on the hand-picked tag, even past a new one",
+      rc == 0 and head() == v1 and "pinned" in out and calls() == [], out)
+rc, out = run("--check", "--unpin")
+check("--check --unpin changes nothing", rc == 0 and pinned() == "solo--v1.0.0" and head() == v1, out)
+
+rc, out = run("--unpin")
+check("--unpin resumes: the newest tag deploys, clearing the hold and the pin",
+      rc == 0 and head() == fixed and held() is None and pinned() is None, out)
+calls()
+
+# ------------------------------------------------------------------ a daemon that logs in, then dies
+dies = release("solo--v1.13.1", files=["DIES"])
+rc, out = run()
+check("logged in but not alive after the settle: rolled back", rc == 2 and head() == fixed
+      and decisions()[-1]["result"] == "rolled-back" and decisions()[-1]["from"] == dies, out)
+check("the rollback install has its own log; the tag's install log is kept",
+      (STATE / "release-pull.rollback.log").exists() and (STATE / "release-pull.install.log").exists())
+calls()
+fixed = release("solo--v1.13.2", drop=["DIES"])
+run()
 calls()
 
 # ------------------------------------------------------------------ a rollback that does not come back either
@@ -165,15 +210,15 @@ check("after a failed rollback the checkout is still the commit it replaced", he
 (STATE / "ALWAYS_BROKEN").unlink()
 calls()
 
-# ------------------------------------------------------------------ a hand rollback to an older release
-rc, out = run("--tag", "solo--v1.0.0")
-check("--tag an older release deploys it (a hand rollback)", rc == 0 and head() == v1, out)
+# ------------------------------------------------------------------ a deploy by hand of the newest tag unpins
+run("--tag", "solo--v1.0.0")
+newest = release("solo--v1.15.0")
+check("pinned again", pinned() == "solo--v1.0.0" and run()[0] == 0 and head() == v1)
+rc, out = run("--tag", "solo--v1.15.0")
+check("--tag the newest tag deploys it and drops the pin", rc == 0 and head() == newest and pinned() is None, out)
 calls()
 
 # ------------------------------------------------------------------ the node is ahead of the newest tag
-newest = release("solo--v1.15.0")
-run()
-calls()
 ahead = release(None)            # an untagged commit on main, pushed to the node by `solo deploy`
 git(NODE, "fetch", "-q", "origin")
 git(NODE, "checkout", "-q", "--detach", ahead)
@@ -204,6 +249,25 @@ git(NODE, "remote", "set-url", "origin", str(ORIGIN))
 
 rc, out = run("--tag", "solo--v0.0.404")
 check("--tag that does not exist: exit 1", rc == 1 and "no such tag" in out, out)
+
+# ------------------------------------------------------------------ the checkout back fails during a rollback
+git(NODE, "checkout", "-q", "--detach", "solo--v1.16.0")
+run()
+old = release("solo--v1.17.0", files=["ONLYOLD"])
+run()
+calls()
+check("on the release before the bad one", head() == old)
+bad = release("solo--v1.18.0", files=["BROKEN", "MAKEX"], drop=["ONLYOLD"])
+rc, out = run()
+check("checkout back blocked: rollback-failed (exit 3), not a false rolled-back", rc == 3 and head() == bad
+      and decisions()[-1]["result"] == "rollback-failed" and "checkout back" in decisions()[-1]["why"], out)
+check("checkout back blocked: no rollback install ran", calls() == ["test", f"install {bad[:7]}", "restart"])
+(NODE / "ONLYOLD").unlink()
+
+# ------------------------------------------------------------------ a custom tag glob with a slash in it
+release("rel/v2.0.0")
+rc, out = run("--check", SOLO_TAG_GLOB="rel/v*")
+check("SOLO_TAG_GLOB picks tags outside solo--v, slash and all", rc == 0 and "would deploy rel/v2.0.0" in out, out)
 
 # ------------------------------------------------------------------ the decision log is one JSON object a line
 lines = (STATE / "decisions.jsonl").read_text().splitlines()

@@ -200,20 +200,25 @@ A release is a tag `solo--vX.Y.Z` on a green `main`. The node picks it up itself
 `deploy/release-pull.sh` every 10 minutes. That script:
 
 1. fetches tags and takes the newest `solo--v*` one; if the node is on it, or already past it
-   (a hand `solo deploy` of newer work), it does nothing;
-2. checks the tag out and runs `make test` there. If the tests fail, nothing is installed, the
-   checkout goes back, and the old daemon keeps running;
-3. runs `./install.sh`, restarts the service and waits up to 90 seconds for a new `listening as` line;
+   (a hand `solo deploy` of newer work), or the tag failed before (held), it does nothing;
+2. runs `make test` on the tag in a scratch worktree (`~/.slack-autoreply/release-pull.wt`). If the
+   tests fail, the live checkout never moves, nothing is installed, the old daemon keeps running,
+   and the tag is held;
+3. checks the tag out, runs `./install.sh`, restarts the service, waits up to 90 seconds for a new
+   `listening as` line and checks the daemon is still running 20 seconds after that;
 4. if the daemon does not come back, **rolls back**: it checks out the commit it replaced, installs
    and restarts that, and holds the bad tag so the timer does not retry it until a newer tag is cut.
+   `install.sh` copies and never deletes, so files only the bad tag added stay in the plugin copy.
 
 Each decision (deployed, refused, rolled-back, rollback-failed) is one JSON line in
-`~/.slack-autoreply/decisions.jsonl`; the run's own output is in `~/.slack-autoreply/release-pull.log`.
-By hand on the node: `deploy/release-pull.sh --check` says what it would do, and
-`deploy/release-pull.sh --tag solo--v1.4.0` deploys a given release, which is also how you roll back
-to an older one. The node's checkout needs an `origin` it can fetch tags from, and a clean tree;
-release-pull refuses to move a checkout with uncommitted changes. It never sends to Slack and
-never reads `.env`.
+`~/.slack-autoreply/decisions.jsonl`; the run's own output is in `~/.slack-autoreply/release-pull.log`,
+the tests' in `release-pull.test.log`, the installs' in `release-pull.install.log` and
+`release-pull.rollback.log`. By hand on the node: `deploy/release-pull.sh --check` says what it would
+do, and `deploy/release-pull.sh --tag solo--v1.4.0` deploys a given release (a hold does not apply).
+A hand deploy of a tag older than the newest **pins** the node there, so the timer does not undo a
+hand rollback; `--unpin` (or `--tag` the newest tag) resumes. The node's checkout needs an `origin`
+it can fetch tags from, and a clean tree; release-pull refuses to move a checkout with uncommitted
+changes. It never sends to Slack and never reads `.env`.
 
 ### The knowledge base can live in a wiki, not in the state dir
 
