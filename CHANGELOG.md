@@ -14,6 +14,24 @@
 - Anything to a customer is a draft, an ack auto-sends only to internal people, and a merged PR
   brings a drafted update for the requester in the same thread.
 
+## Unreleased — owner notes
+
+**Every note to the owner reads to the owner's rule**
+- The owner, 10 Nov, after a budget ask full of task ids and counters and a release note of bullets
+  cut off with "…" and bare URLs: one or two plain sentences, then at most one 👉 question with the
+  choices in words; no task ids, shas, metric names, counters or commands in the body; links are
+  labelled text links, two at most; no bullet lists, nothing cut off. The rule is
+  `scripts/note_rules.py`, and every way a note comes in is rendered through it.
+- `scripts/note_shape.py`: a small model reads what matters from free text (JSON out, its links must
+  be ones the agent wrote). No key, no quota, a timeout or bad JSON: the plain rules read it instead.
+  `NOTE_SHAPER=auto|api|claude|off`.
+- `owner_note.py` is the one renderer: prose under the icon headline instead of bullets, a long list
+  folded into a sentence with the full list in Details, a command moved to Details whole ("the
+  command is in the thread"), bare URLs as `<url|label>`. `--point` and `--link` are respected and
+  still rendered to the rule. Grouped notes read as sentences.
+- The solo and slack-autoreply skills carry the rule as style know-how.
+
+
 **A release tag reaches the node by itself**
 - `deploy/release-pull.sh` on the node: newest `solo--v*` tag → `make test` in a scratch worktree →
   `install.sh` → restart → wait for `listening as` and check it is still up 20s later. Failing tests

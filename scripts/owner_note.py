@@ -1,29 +1,28 @@
-"""How Solo tells the owner something: a headline with a status icon, a few plain bullets, and the
-technical detail behind a thread reply.
+"""How Solo tells the owner something: an icon headline, one or two plain sentences, at most one
+line asking what is needed, and the agent's words whole in a Details reply in the thread.
 
-The owner, 2026-11-04: "messages are not well formatted here for readability … use icons, emojis and
-language that is more human readable rather than just technical details." A release note arrived as
-one paragraph of shas, metric names and millisecond counts. This module is the one place a note to
-the owner gets its shape, so every agent's note reads the same way:
+The owner, 2026-11-10, after a budget note full of task ids and counters and a release note of
+cut-off bullets and bare URLs, set the rule (note_rules.RULE). This is the one renderer every note
+to the owner goes through, so they all read it:
 
-    🔴 *Helsinki* is not on the build it should be (a rollback, or a deploy by hand)
-    • ⏸️ *Helsinki* held at *v0.551.0*: the no-regression gate was red: reply time 1.2 s vs 0.8 s usually
-    • ⏸️ *Hillsboro* frozen at *v0.537.0*
-    _from solo-one · details in the thread_
+    ❓ Retro: wire review noise tripwire into reviewer briefs.
+    The task hit its budget again after one operator grant.
+    👉 Grant more or stop it? — <https://…/ask/…|Answer here>
+    _from factory · details in the thread_
 
-Nothing is lost: the agent's words go, whole and unedited, into a "Details" reply in the message's
-thread, which is where the 31 Oct sysctl command would still be. The rendering is deterministic, with
-no writer and no model: a note to the owner must not depend on a quota (27, 29 and 31 Oct).
-
-An agent can say exactly what it means (`say --status held --headline … --point …`); a note that
-arrives as free text is read for its status, split into clauses and cleaned up as well as rules can.
-Pure functions only: Slack calls stay in slackctl.
+Three ways in, one way out: an agent's explicit `--headline/--point/--link`, a model's reading of
+free text (note_shape), or — with no model, no quota, no key — the rules below. Whichever it was, the
+parts are cleaned to the rule (note_rules) before they render. Nothing is lost: what the body leaves
+out (ids, commands, the full list) is in Details. Pure functions only: Slack calls stay in slackctl.
 """
 from __future__ import annotations
 
 import json
 import re
 from dataclasses import dataclass, field
+
+import note_rules
+from note_rules import COMMAND_RE
 
 # Most severe first: a message that is several things takes the icon of the worst.
 STATUSES = ("ask", "failed", "warn", "held", "shipping", "ok", "info")
@@ -69,24 +68,11 @@ RUNS_NOT_RE = re.compile(r"\b(\w+) (?:runs|is on) " + SHA + r",? (?:not|instead 
 PATH_RE = re.compile(r"(?<![\w<|])(?:~|/(?:Users|home|var|tmp|private|opt|etc))/[^\s,;)]+|(?<![\w<|/])[\w.\-/]+\.(?:log|jsonl)\b")
 METRIC_RE = re.compile(r"(?<![\w.\-/`])([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\s*:\s*(?=[-+]?\d)")
 MS_RE = re.compile(r"([-+]?)(\d+(?:\.\d+)?)\s?ms\b")
-COMMAND_RE = re.compile(r"`|\b(?:sudo|ssh|colima|kubectl|curl|make|git|solo|python3?|npm|brew|launchctl|factory)\s+\S")
-LABEL_RE = re.compile(r"^\s*(?:not live(?: now)?|live(?: now)?|status|update|fyi|note|summary|tl;?dr)\s*:\s*", re.I)
 CLAUSE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z❓🔴⚠⏸🚀✅])|;\s+|,\s+(?=[A-Z][a-z]{2,}\s+" + BOX_VERBS + r"\b)")
-HEADLINE_MAX = 120
-BULLETS_MAX = 3
+HEADLINE_MAX = 100  # longer, and the headline keeps its what; the why opens the summary
+SUMMARY_MAX = 2  # sentences under the headline
 SECTION_MAX = 2900  # Slack's limit on a section block's text is 3000
 GROUP_WINDOW_S = 300
-
-
-@dataclass
-class Note:
-    status: str
-    headline: str
-    bullets: list[str] = field(default_factory=list)
-    details: str = ""          # whole and unedited; goes in the thread
-    options: list[str] = field(default_factory=list)
-    link: str = ""
-    sender: str = ""
 
 
 def norm_status(s: str | None) -> str | None:
@@ -147,20 +133,20 @@ def _metric_words(name: str) -> str:
 
 
 def _drop_parenthetical(m) -> str:
+    """A bracket keeps only its plain words: "(5 behind v0.773.0, the canary holds it)" reads
+    "(the canary holds it)"; one that is all numbers, names or paths goes."""
     inner = m.group(1)
-    if re.search(r"\d|[=_/\\]|\x00", inner) or len(inner.split()) > 8:
+    if len(inner.split()) > 8:
         return ""
-    return m.group(0)
+    keep = [p for p in re.split(r",\s+", inner) if p.strip() and not re.search(r"\d|[=_/\\]|\x00", p)]
+    if len(keep) == len(re.split(r",\s+", inner)):
+        return m.group(0)
+    return f" ({', '.join(keep)})" if keep else ""
 
 
 def humanize(text: str) -> str:
     """Plain words for a person: seconds not milliseconds, no shas, no metric names, no log paths.
-
-    A clause that carries a command is left exactly as written — the 31 Oct sysctl line is what the
-    owner had to run, and `kernel.…_userns=0` rewritten into words is no longer a command.
-    """
-    if COMMAND_RE.search(text):
-        return text.strip()
+    Code spans and links are left exactly as written (a command is note_rules' to take out whole)."""
     t, kept = _protect(text)
     t = RUNS_NOT_RE.sub(r"\1 is not on the build it should be", t)
     t = SHA_RE.sub("", t)
@@ -193,7 +179,7 @@ def humanize(text: str) -> str:
     t = re.sub(r"\s+([,.;:])", r"\1", t)
     t = re.sub(r"([,;:])(?=[,;:.])", "", t)
     t = re.sub(r"[ \t]{2,}", " ", t).strip(" ,;:")
-    t = re.sub(r"[,;:]?\s+(?:see|in|at|from|under|logs? at)$", "", t).rstrip(" ,;:.")
+    t = re.sub(r"[,;:]?\s+(?:see|in|at|from|under|logs? at)$", "", t).rstrip(" ,;:")
     return _restore(t, kept)
 
 
@@ -212,86 +198,226 @@ def emphasize(text: str) -> str:
     return _restore(t, kept)
 
 
-def _cut(text: str, n: int = HEADLINE_MAX) -> str:
-    if len(text) <= n or COMMAND_RE.search(text):
-        return text
-    cut = text[:n].rsplit(" ", 1)[0].rstrip(" ,;:—-")
-    return cut + "…"
 
 
-def clauses(text: str) -> list[str]:
-    out = []
-    for line in (text or "").splitlines():
-        line = line.strip().lstrip("-•*◦ ").strip()
-        if not line:
+@dataclass
+class Note:
+    status: str
+    headline: str
+    summary: str = ""          # one or two plain sentences under the headline
+    ask: str = ""              # the one question, when the owner has to decide
+    links: list = field(default_factory=list)  # [(url, label)], at most two
+    details: str = ""          # whole and unedited; goes in the thread
+    options: list[str] = field(default_factory=list)
+    sender: str = ""
+
+    @property
+    def link(self) -> str:
+        """The answer page: the link labelled so, or with choices to make, the first link."""
+        for url, label in self.links:
+            if label == "Answer here":
+                return url
+        return self.links[0][0] if self.options and self.links else ""
+
+
+LIST_ITEM_RE = re.compile(r"^\s*(?:[-•*◦]|\d+[.)])\s+")
+THEME_RE = re.compile(r"^\s*\**([^:*]{2,40}?)\**\s*:\s+\S")
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z*❓🔴⚠⏸🚀✅\"'])")
+CMD_NOTE = "The command is in the thread."
+REPLY_LINE_RE = re.compile(r"^\W*(?:please\s+)?(?:reply|respond|answer)\b[^?]{0,30}\b(?:yes|no|ok|approve|go)\b[^?]*$", re.I)
+
+
+def clean(piece: str) -> tuple[str, list, bool]:
+    """One piece of a note, to the rule: (text, links taken out of it, whether a command went)."""
+    t, links = note_rules.take_links(piece or "")
+    t = note_rules.LABEL_RE.sub("", t.strip())
+    t, had_cmd = note_rules.strip_machine(t)
+    t = note_rules.tidy(humanize(t))
+    if note_rules.COUNTER_RE.search(piece or "") and len(re.findall(r"[A-Za-z]+", t)) <= 4:
+        t = ""  # a line of counters with the numbers gone says nothing
+    return (t if re.search(r"[A-Za-z]", t) else ""), links, had_cmd
+
+
+def _and(words: list[str], conj: str = "and") -> str:
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + f" {conj} " + words[-1]
+
+
+def _fold(header: str, items: list[str]) -> str:
+    """A list, as the sentence the owner asked for: "What got better: speed, search and alerts (the
+    full list is in the thread)". Items name their theme ("Search: …"); a list that does not is left
+    to Details."""
+    themes = [m.group(1).strip() for m in (THEME_RE.match(i) for i in items) if m]
+    if not header or not themes:
+        return ""
+    themes = [t if re.match(r"[A-Z]{2}|[A-Z][a-z]*[A-Z]", t) else t[:1].lower() + t[1:] for t in themes[:3]]
+    return f"{header.rstrip(' :')}: {_and(themes)} (the full list is in the thread)"
+
+
+def _pieces(intent: str) -> list[str]:
+    """Free text as the clauses that could be said: icons off, lists folded, link lines kept as links."""
+    out, lines, i = [], [note_rules.ICON_RE.sub("", ln).rstrip() for ln in (intent or "").splitlines()], 0
+    while i < len(lines):
+        ln = lines[i].strip()
+        if not ln:
+            i += 1
             continue
-        if COMMAND_RE.search(line) and "`" in line:
-            out.append(line)
+        if LIST_ITEM_RE.match(ln) or ln.endswith(":") and i + 1 < len(lines) and LIST_ITEM_RE.match(lines[i + 1]):
+            header = ln if ln.endswith(":") and not LIST_ITEM_RE.match(ln) else ""
+            j, items = i + (1 if header else 0), []
+            while j < len(lines) and LIST_ITEM_RE.match(lines[j]):
+                items.append(LIST_ITEM_RE.sub("", lines[j]).strip())
+                j += 1
+            folded = _fold(header, items)
+            out.append(folded) if folded else out.extend("\x00" + x for x in items)  # \x00: only if nothing else
+            i = j
             continue
-        out.extend(c.strip() for c in CLAUSE_SPLIT.split(line) if c and c.strip(" .,;"))
-    return out
+        out.extend(c.strip() for c in CLAUSE_SPLIT.split(ln) if c and c.strip(" .,;"))
+        i += 1
+    plain = [p for p in out if not p.startswith("\x00")]
+    return plain if plain else [p[1:] for p in out]
+
+
+
+
+def _split_long(head: str) -> tuple[str, str]:
+    """A long headline keeps its what; the why opens the summary. Never cut with an ellipsis."""
+    if len(head) <= HEADLINE_MAX:
+        return head, ""
+    if ": " in head and len(head.split(": ", 1)[0]) >= 12:
+        what, why = head.split(": ", 1)
+        return what, note_rules.sentence(why[:1].upper() + why[1:])
+    parts = SENTENCE_SPLIT.split(head, 1)
+    return (parts[0], parts[1]) if len(parts) == 2 else (head, "")
+
+
+def _summary(parts: list[str]) -> str:
+    text = " ".join(note_rules.sentence(p) for p in parts if p)
+    return " ".join(SENTENCE_SPLIT.split(text)[:SUMMARY_MAX]) if text else ""
+
+
+def _norm(t: str) -> list[str]:
+    """The words of a text, in any order: does the body already say all of it?"""
+    return sorted(re.findall(r"[a-z0-9]+", (t or "").lower()))
 
 
 def from_text(intent: str, sender: str = "", *, status: str | None = None, headline: str | None = None,
               points: list[str] | None = None, details: str | None = None, options: list[str] | None = None,
-              link: str = "") -> Note:
-    """Read a note for the owner into a Note. Whatever the agent said explicitly wins over the rules."""
+              link: str = "", shaped: dict | None = None) -> Note:
+    """Read a note for the owner into a Note, to the rule. What the agent said explicitly wins over
+    a model's reading (`shaped`, from note_shape), which wins over the rules' own reading."""
     intent = (intent or "").strip()
     options = [o.strip() for o in (options or []) if o and o.strip()]
-    parts = clauses(intent)
-    statuses = [status_of(c) for c in parts]
+    given = [(link, note_rules.label_for(link, "answer" if options else ""))] if link else []
+    had_cmd, taken = False, []
+
+    def c(piece):
+        nonlocal had_cmd
+        t, ls, h = clean(piece)
+        taken.extend(ls)
+        had_cmd |= h and "one command" in t
+        return t
+
+    asks = ""
     if headline:
-        head = headline.strip()
-        bullets = [p.strip() for p in (points or []) if p and p.strip()]
-        given = list(bullets)
-        if len(bullets) > BULLETS_MAX:
-            bullets = bullets[: BULLETS_MAX - 1] + [f"…and {len(bullets) - BULLETS_MAX + 1} more in the thread"]
-        st = norm_status(status) or ("ask" if options else worst([status_of(head)] + [status_of(b) for b in bullets]))
-        whole = details if details is not None else (intent if intent and intent != head else "")
-        if len(given) > BULLETS_MAX and not all(g in whole for g in given):
-            whole = "\n".join(x for x in [whole] + [f"• {g}" for g in given] if x)  # the folded points, whole
-        return Note(st, head, bullets, whole, options, link, sender)
-    st = norm_status(status) or ("ask" if options else worst(statuses))
-    if not parts:
-        return Note(st, "(empty note)", [], "", options, link, sender)
-    # The headline is the worst clause; the rest are bullets, in the order the agent gave them.
-    lead = next(i for i, s in enumerate(statuses) if s == worst(statuses))
-    cleaned = [LABEL_RE.sub("", humanize(c)) or c for c in parts]
-    head = cleaned[lead]
-    rest = [(statuses[i], c) for i, c in enumerate(cleaned) if i != lead]
-    # A long headline keeps the what; its why becomes the first bullet.
-    if len(head) > 70 and not COMMAND_RE.search(head) and ": " in head:
-        what, why = head.split(": ", 1)
-        if len(what) >= 12:
-            head = what
-            rest.insert(0, ("info", why[0].upper() + why[1:]))
-    bullets = [b.strip() for b in (points or []) if b and b.strip()] or [
-        (f"{ICONS[s]} {c}" if s != "info" and len(set(statuses)) > 1 else c) for s, c in rest]
-    if len(bullets) > BULLETS_MAX:
-        extra = len(bullets) - BULLETS_MAX + 1
-        bullets = bullets[: BULLETS_MAX - 1] + [f"…and {extra} more in the thread"]
-    plain = " ".join([head] + bullets)
-    unchanged = len(parts) <= BULLETS_MAX + 1 and all(c == p for c, p in zip(cleaned, parts)) and len(head) <= HEADLINE_MAX
-    whole = details if details is not None else ("" if unchanged and len(plain) >= len(intent) * 0.9 else intent)
-    return Note(st, head, bullets, whole, options, link, sender)
+        points = [p.strip() for p in (points or []) if p and p.strip()]
+        head, more = _split_long(c(headline))
+        body = [more] + [c(p) for p in points[:SUMMARY_MAX]]
+        st = norm_status(status) or ("ask" if options else worst([status_of(head)] + [status_of(b) for b in body if b]))
+        extra = points[SUMMARY_MAX:]
+        whole = details if details is not None else (intent if intent and intent != headline.strip() else "")
+        if extra and not all(x in whole for x in extra):
+            whole = "\n".join(x for x in [whole] + extra if x)  # the points the body had no room for
+        if had_cmd:  # the body says the command is in the thread: make sure it is
+            missing = [p for p in [headline] + points if p and COMMAND_RE.search(p) and p not in whole]
+            whole = "\n".join(x for x in [whole] + missing if x)
+    elif shaped:
+        head, more = _split_long(c(shaped.get("headline") or ""))
+        body = [more, c(note_rules.flat(shaped.get("summary") or ""))]
+        asks = c(shaped.get("ask") or "")
+        taken[:0] = [(u, lb) for u, lb in shaped.get("links") or []]
+        st = norm_status(status) or ("ask" if options else norm_status(shaped.get("status")) or "info")
+        if not head:
+            return from_text(intent, sender, status=status, details=details, options=options, link=link)
+        whole = details if details is not None else intent
+    else:
+        cleaned = [x for x in (c(p) for p in _pieces(intent)) if x]
+        # "Reply yes or no" is the old way to ask; the question before it is the ask, never the headline
+        if any(x.endswith("?") for x in cleaned):
+            cleaned = [x for x in cleaned if not REPLY_LINE_RE.match(x)] or cleaned
+        if not cleaned:
+            st = norm_status(status) or ("ask" if options else "info")
+            # Only counters, no words around them ("Canary green: 5/5"): the counter is the news.
+            raw = note_rules.tidy(note_rules.TASK_ID_RE.sub("", note_rules.take_links(intent)[0]))
+            head = raw if re.search(r"[A-Za-z]", raw) and len(raw) <= 120 else "(empty note)"
+            return Note(st, head, links=note_rules.merge_links(given, taken), details=intent,
+                        options=options, sender=sender)
+        ask_i = max((i for i, x in enumerate(cleaned) if x.endswith("?")), default=None)
+        asks = cleaned[ask_i] if ask_i is not None else ""
+        rest = [x for i, x in enumerate(cleaned) if i != ask_i]
+        statuses = [status_of(x) for x in cleaned]
+        if rest:
+            rs = [status_of(x) for x in rest]
+            lead = rs.index(worst(rs))
+            head, others = rest[lead], rest[:lead] + rest[lead + 1:]
+        else:
+            head, others, asks = asks, [], ""
+        head, more = _split_long(head)
+        body = [more] + others
+        st = norm_status(status) or ("ask" if options else worst(statuses))
+        whole = details if details is not None else intent
+    summary = _summary([b for b in body if b])
+    if had_cmd and CMD_NOTE not in summary:
+        summary = (summary + " " + CMD_NOTE).strip()
+    note = Note(st, head, summary, note_rules.sentence(asks) if asks else "", note_rules.merge_links(given, taken),
+                whole, options, sender)
+    if details is None and _norm(" ".join([head, summary, asks])) == _norm(intent):
+        note.details = ""  # the body already says all of it: no thread
+    return note
 
 
-def headline_line(note: Note) -> str:
-    return f"{ICONS[note.status]} {emphasize(_cut(note.headline))}"
+def _label(label: str) -> str:
+    return re.sub(r"[<>|*_~`]", "", label or "").strip() or "Open it"
 
 
-def body_lines(note: Note) -> list[str]:
-    return [f"• {emphasize(b)}" for b in note.bullets]
+def ask_line(note: Note, buttons: bool = True) -> str:
+    q, answer = emphasize(note.ask), note.link
+    if note.options and not buttons:
+        choices = _and([f"*{_escape(o)}*" for o in note.options], "or")
+        q = f"{q} {choices}".strip()
+        return f"👉 {q} — " + (f"<{answer}|Answer here>" if answer else "answer in the thread")
+    if q and answer and not (note.options and buttons):
+        return f"👉 {q} — <{answer}|Answer here>"
+    return f"👉 {q}" if q else ""
 
 
 def footer(note: Note, has_details: bool) -> str:
     bits = [f"from {note.sender}"] if note.sender else []
     if has_details:
         bits.append("details in the thread")
-    line = "_" + " · ".join(bits) + "_" if bits else ""
-    if note.link:
-        line = (line + " · " if line else "") + f"<{note.link}|{'answer page' if note.options else 'open the log'}>"
-    return line
+    return "_" + " · ".join(bits) + "_" if bits else ""
+
+
+def body_lines(note: Note, buttons: bool = True) -> list[str]:
+    lines = [f"{ICONS[note.status]} {emphasize(note.headline)}"]
+    if note.summary:
+        lines.append(emphasize(note.summary))
+    q = ask_line(note, buttons)
+    if q:
+        lines.append(q)
+    shown = {note.link} if q and note.link and "|Answer here>" in q or note.options and buttons else set()
+    rest = [(u, lb) for u, lb in note.links if u not in shown]
+    if rest:
+        lines.append(" · ".join(f"<{u}|{_label(lb)}>" for u, lb in rest))
+    return lines
+
+
+def _fit(section: str, n: int = SECTION_MAX) -> str:
+    """Past Slack's 3000 characters the whole message is refused: end at a line or a sentence, never "…"."""
+    if len(section) <= n:
+        return section
+    head = section[:n]
+    cut = max(head.rfind("\n"), max((m.end() for m in re.finditer(r"[.!?](?=\s)", head)), default=-1))
+    return head[:cut].rstrip() if cut > 0 else head.rsplit(" ", 1)[0]
 
 
 def render(note: Note, buttons: bool = True) -> dict:
@@ -299,12 +425,9 @@ def render(note: Note, buttons: bool = True) -> dict:
 
     `buttons=False` is for a Slack app whose Interactivity is still off: a press there only shows
     the owner a warning icon. The choices are then named in the message, with the answer page."""
-    lines = [headline_line(note)] + body_lines(note)
-    if note.options and not buttons:
-        lines.append("👉 " + " · ".join(f"*{o}*" for o in note.options)
-                     + (f" — <{note.link}|answer here>" if note.link else " — answer in the thread"))
+    lines = body_lines(note, buttons)
     foot = footer(note, bool(note.details))
-    text = "\n".join(lines + ([foot] if foot else []))
+    text = _fit("\n".join(lines + ([foot] if foot else [])), 39000)
     blocks = None
     if note.options and buttons:
         elements = [{"type": "button", "action_id": f"solo_answer_{i}",
@@ -314,16 +437,11 @@ def render(note: Note, buttons: bool = True) -> dict:
         if note.link:
             elements.append({"type": "button", "action_id": "solo_answer_link", "url": note.link,
                              "text": {"type": "plain_text", "text": "Open the answer page", "emoji": True}})
-        section = "\n".join(lines)
-        if len(section) > SECTION_MAX:  # Slack refuses the whole message past 3000; the whole text is in Details
-            section = section[: SECTION_MAX - 1].rsplit("\n", 1)[0] + "\n…"
-        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": section}},
+        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": _fit("\n".join(lines))}},
                   {"type": "actions", "block_id": "solo_ask", "elements": elements}]
         if foot:
             blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": foot}]})
-    details = ""
-    if note.details:
-        details = "🔎 *Details*\n" + note.details
+    details = "🔎 *Details*\n" + note.details if note.details else ""
     return {"text": text, "blocks": blocks, "details": details}
 
 
@@ -333,26 +451,34 @@ def answered_blocks(blocks: list[dict] | None, choice: str, who: str, at: str) -
     return kept + [{"type": "context", "elements": [{"type": "mrkdwn", "text": f"✔️ *{choice}* — answered by {who} at {at}"}]}]
 
 
+GROUP_NAMED = 3
+
+
 def render_group(notes: list[Note], sender: str = "") -> str:
-    """Several notes inside the grouping window, as one message: the worst icon, one line per note."""
+    """Several notes inside the grouping window, as one message of prose: the worst icon, then each
+    headline as a sentence with its own icon, three at most and the rest counted."""
     if len(notes) == 1:
         return render(notes[0])["text"]
     st = worst(n.status for n in notes)
-    head = f"{ICONS[st]} *{len(notes)} updates*" + (f" from {sender}" if sender else "")
-    lines = [f"• {headline_line(n)}" for n in notes]
-    if len(lines) > BULLETS_MAX:
-        lines = lines[: BULLETS_MAX - 1] + [f"• …and {len(lines) - BULLETS_MAX + 1} more in the thread"]
-    return "\n".join([head] + lines + ["_each one's detail is in the thread_"])
+    head = f"{ICONS[st]} *{len(notes)} updates*" + (f" from {sender}" if sender else "") + "."
+    said = [f"{ICONS[n.status]} {emphasize(note_rules.sentence(n.headline))}" for n in notes[:GROUP_NAMED]]
+    if len(notes) > GROUP_NAMED:
+        said.append(f"And {len(notes) - GROUP_NAMED} more in the thread.")
+    return " ".join([head] + said) + "\n_each one's detail is in the thread_"
 
 
 def to_dict(note: Note) -> dict:
-    return {"status": note.status, "headline": note.headline, "bullets": note.bullets, "details": note.details,
-            "options": note.options, "link": note.link, "sender": note.sender}
+    return {"status": note.status, "headline": note.headline, "summary": note.summary, "ask": note.ask,
+            "links": [list(x) for x in note.links], "details": note.details, "options": note.options,
+            "link": note.link, "sender": note.sender}
 
 
 def from_dict(d: dict) -> Note:
-    return Note(d.get("status") or "info", d.get("headline") or "", list(d.get("bullets") or []),
-                d.get("details") or "", list(d.get("options") or []), d.get("link") or "", d.get("sender") or "")
+    """A stored note, including one written before the 2026-11-10 rule (bullets and a single link)."""
+    summary = d.get("summary") or " ".join(note_rules.sentence(b) for b in d.get("bullets") or [])
+    links = [tuple(x) for x in d.get("links") or []] or ([(d["link"], "Answer here")] if d.get("link") else [])
+    return Note(d.get("status") or "info", d.get("headline") or "", summary, d.get("ask") or "", links,
+                d.get("details") or "", list(d.get("options") or []), d.get("sender") or "")
 
 
 if __name__ == "__main__":  # quick look: python3 owner_note.py "text"
