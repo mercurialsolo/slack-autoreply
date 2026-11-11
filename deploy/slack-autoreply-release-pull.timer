@@ -1,0 +1,10 @@
+# Runs slack-autoreply-release-pull.service every 10 minutes.
+[Unit]
+Description=slack-autoreply: check for a new release tag every 10 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target

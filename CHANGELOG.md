@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+**A release tag reaches the node by itself**
+- `deploy/release-pull.sh` on the node: newest `solo--v*` tag → `make test` → `install.sh` → restart →
+  wait for `listening as`. Failing tests install nothing; a daemon that does not come back is rolled
+  back to the commit it replaced and the tag is held. One JSON decision line per run in
+  `~/.slack-autoreply/decisions.jsonl`.
+- `deploy/install-release-timer.sh` runs it every 10 minutes (launchd / systemd --user timer).
+- README: where Solo runs and how a release reaches it. `make test` runs `tests/test_release_pull.py`.
+
 ## 1.4.0 — 2026-11-04
 
 **Review fixes before merge**

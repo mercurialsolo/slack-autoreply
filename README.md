@@ -43,7 +43,7 @@ scripts/followups.py     deadline math, reminders, auto-close
 scripts/voice.py         VOICE.md template, sample pulling/picking, continuous capture
 scripts/recall.py        dossiers (people/, channels/), history, search, about
 scripts/config.py        paths + settings
-deploy/                  launchd plist, systemd unit, install-service.sh
+deploy/                  launchd plist, systemd unit, install-service.sh, release-pull.sh (tag → node)
 tests/test_offline.py    379 end-to-end checks with a fake Slack and a fake claude — no tokens needed
 LICENSE                  MIT
 docs/architecture.svg    the diagram above
@@ -182,6 +182,38 @@ There is no second copy of the state — every command runs against the node's:
 | `solo logs [-f]` · `solo restart` · `solo ssh` | the daemon |
 | `solo voice` · `solo pull` · `solo push` | read the voice guide, edit it in the wiki, send it back |
 | `solo train [review\|setup]` | run the training skill **on the node**, interactively |
+
+### Where Solo runs and how a release reaches it
+
+Solo's Slack replies come from one daemon (`slackctl.py listen`) on one always-on machine, the
+**node**. Today the node is the Mac mini named by `SOLO_NODE` in `~/.slack-autoreply/solo.env`. On it:
+
+| | |
+|---|---|
+| the service | launchd agent `com.slack-autoreply` (`systemd --user` unit `slack-autoreply` on Linux), from `deploy/install-service.sh` |
+| the code it runs | the plugin copy at `~/.claude/skills/solo`, made by `./install.sh` from the node's git checkout (`SOLO_REMOTE_REPO`) |
+| its state and log | `~/.slack-autoreply/` and `~/.slack-autoreply/listen.log` (the journal on Linux) |
+| healthy means | a `listening as @…` line in that log after the last restart |
+
+A release is a tag `solo--vX.Y.Z` on a green `main`. The node picks it up itself:
+`deploy/install-release-timer.sh`, run once on the node from its checkout, runs
+`deploy/release-pull.sh` every 10 minutes. That script:
+
+1. fetches tags and takes the newest `solo--v*` one; if the node is on it, or already past it
+   (a hand `solo deploy` of newer work), it does nothing;
+2. checks the tag out and runs `make test` there. If the tests fail, nothing is installed, the
+   checkout goes back, and the old daemon keeps running;
+3. runs `./install.sh`, restarts the service and waits up to 90 seconds for a new `listening as` line;
+4. if the daemon does not come back, **rolls back**: it checks out the commit it replaced, installs
+   and restarts that, and holds the bad tag so the timer does not retry it until a newer tag is cut.
+
+Each decision (deployed, refused, rolled-back, rollback-failed) is one JSON line in
+`~/.slack-autoreply/decisions.jsonl`; the run's own output is in `~/.slack-autoreply/release-pull.log`.
+By hand on the node: `deploy/release-pull.sh --check` says what it would do, and
+`deploy/release-pull.sh --tag solo--v1.4.0` deploys a given release, which is also how you roll back
+to an older one. The node's checkout needs an `origin` it can fetch tags from, and a clean tree;
+release-pull refuses to move a checkout with uncommitted changes. It never sends to Slack and
+never reads `.env`.
 
 ### The knowledge base can live in a wiki, not in the state dir
 
