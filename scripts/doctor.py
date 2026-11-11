@@ -152,9 +152,12 @@ def check_claude(r: Report):
     except Exception as e:
         r.add(WARN, "claude --version failed", str(e)[:120])
     # login: a trivial headless call; if it needs auth it fails fast
-    env = dict(os.environ)
-    if not CFG["dispatch_use_api_key"]:
-        env.pop("ANTHROPIC_API_KEY", None)
+    # The same env the daemon gives the writer: an inherited CLAUDE_CONFIG_DIR would have doctor
+    # check a different login and plugin cache than the writer actually gets.
+    env = slackctl.writer_env()
+    if os.environ.get("CLAUDE_CONFIG_DIR") and not CFG["writer_config_dir"]:
+        r.add(WARN, f"CLAUDE_CONFIG_DIR={os.environ['CLAUDE_CONFIG_DIR']} is set in this shell",
+              f"the daemon drops it and runs the writer under {slackctl.writer_config_dir()}; set WRITER_CLAUDE_CONFIG_DIR to pin another")
     try:
         p = subprocess.run([path, "-p", "reply with exactly: pong", "--output-format", "json", "--max-turns", "1"],
                            capture_output=True, text=True, timeout=90, env=env, cwd=str(config.STATE_DIR))
@@ -209,13 +212,9 @@ PLUGIN = "solo"
 
 
 def installed_plugins(claude_bin: str) -> list[dict] | None:
-    """What `claude plugin list --json` says, or None when that could not be asked."""
-    try:
-        p = subprocess.run([claude_bin, "plugin", "list", "--json"], capture_output=True, text=True, timeout=30)
-        data = json.loads(p.stdout or "[]")
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-        return None
-    return data if isinstance(data, list) else data.get("plugins", [])
+    """What `claude plugin list --json` says under the writer's env, or None when that could not be asked."""
+    import slackctl
+    return slackctl.installed_plugins(claude_bin)
 
 
 def check_context(r: Report):
