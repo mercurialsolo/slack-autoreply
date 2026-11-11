@@ -151,12 +151,16 @@ def load_conf() -> dict | None:
         return None
     if not isinstance(c, dict) or not c.get("repo"):
         return None
-    c.setdefault("channels", {})
-    if isinstance(c["channels"], list):
-        c["channels"] = {cid: {} for cid in c["channels"]}
+    chans = c.get("channels") or {}
+    if isinstance(chans, list):
+        chans = {cid: {} for cid in chans if isinstance(cid, str)}
+    # A hand-edited file can hold the wrong shape; read it as far as it makes sense, never raise later.
+    c["channels"] = {k: (v if isinstance(v, dict) else {}) for k, v in chans.items()} if isinstance(chans, dict) else {}
     c.setdefault("dms", False)
-    c["internal"] = set(c.get("internal") or [])
-    c.setdefault("customers", {})
+    internal = c.get("internal") or []
+    c["internal"] = set(internal) if isinstance(internal, list) else set()
+    custs = c.get("customers")
+    c["customers"] = {k: v for k, v in custs.items() if isinstance(v, str)} if isinstance(custs, dict) else {}
     c.setdefault("factory_bin", "factory")
     c.setdefault("linear_project", "")
     return c

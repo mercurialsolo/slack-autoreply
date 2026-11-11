@@ -2704,6 +2704,32 @@ check("intake: a duplicate of a Linear issue is linked, and its ack promises no 
       _lk["action"] == "duplicate" and _lk["task_id"] == "ENG-777" and "ENG-777" in _lk["ack"] and "update" not in _lk["ack"]
       and SI.rows()[f"slack:{SC}:1710000062.000"]["state"] == "linked", str(_lk))
 
+# a group DM is like a DM: the bot is not in it, so an acknowledgement goes to the owner as the usual note
+_conf0 = (STATE / "intake.json").read_text()
+_cg = json.loads(_conf0); _cg["channels"]["GMPIM001"] = {}
+(STATE / "intake.json").write_text(json.dumps(_cg))
+_np = len(_sent()); _nd = len(_dms())
+_intake_msg(UINT, "GMPIM001", "1710000063.000", "the 500 is seen in Linear too", ctype="mpim")
+check("intake: in a group DM nothing is posted, and the owner gets the full note",
+      len(_sent()) == _np and len(_dms()) == _nd + 1 and "raised a" in _dms()[-1], str(_dms()[-1:]))
+
+# a hand-edited intake.json of the wrong shape is read as far as it makes sense, and never stops a draft
+(STATE / "intake.json").write_text(json.dumps({**json.loads(_conf0), "channels": {SC: "oops"}, "customers": [UCUST]}))
+_bc = SI.load_conf()
+check("intake conf: wrong shapes are read safely", _bc["channels"] == {SC: {}} and _bc["customers"] == {}
+      and SI.customer_of(_bc, SC, UCUST) is None, str(_bc))
+(STATE / "intake.json").write_text(_conf0)
+
+# two reports at once take turns, so the second sees the first one's open task
+import threading as _th
+di.intake_take_lock.acquire()
+_n = len(_submits())
+_t = _th.Thread(target=_intake_msg, args=(UINT, SC, "1710000064.000", "the 500 is seen in Linear again")); _t.start()
+_t.join(0.5)
+_held = len(_submits()) == _n and _t.is_alive()
+di.intake_take_lock.release(); _t.join(10)
+check("intake: a take waits for the one before it", _held and len(_submits()) == _n + 1, str(_held))
+
 # the reader keeps its own login through the scrub; every other secret is gone
 _env_keep = {k: os.environ.get(k) for k in ("CLAUDE_CODE_OAUTH_TOKEN", "SLACK_BOT_TOKEN", "ANTHROPIC_API_KEY", "DISPATCH_USE_API_KEY")}
 os.environ.update(CLAUDE_CODE_OAUTH_TOKEN="oat-x", SLACK_BOT_TOKEN="xoxb-x", ANTHROPIC_API_KEY="sk-x")
@@ -2824,6 +2850,13 @@ try:
     di.poll_intake()
     check("…until it has failed enough, when it goes to the owner and the next is taken",
           len(_submits()) == _n + 1 and any("ENG-960" in m and "skipped" in m for m in _dms()), str(_dms()[-2:]))
+    # the issue the factory opened for one of Solo's tasks is that task: never offered to the reader on its own
+    SI.record(key="slack:CX:own1", source="slack", task_id="t_own1", state="done", linear="ENG-970", title="Own")
+    _issues[:] = [{"identifier": "ENG-970", "title": "Own", "createdAt": "2099-01-03T00:00:00Z"},
+                  {"identifier": "ENG-971", "title": "Other", "createdAt": "2099-01-03T00:00:01Z"}]
+    _eo = di.intake_linear_open(_c)
+    check("linear: the issue of Solo's own task is not offered as a separate issue to link to",
+          "ENG-970" not in _eo and "ENG-971" in _eo, str(_eo))
 finally:
     L.gql = _real_gql2
     os.environ.pop("LINEAR_API_KEY", None)

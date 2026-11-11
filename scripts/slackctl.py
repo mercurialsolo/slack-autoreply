@@ -1997,8 +1997,9 @@ class Daemon(Slack):
         self.eng_routes = {uid: label for who, label in CFG["eng_routes"].items()
                            for uid in self.resolve_users([who])}
         self.eng_lock = threading.Lock()
-        self.intake_lock = threading.Lock()        # guards intake_keys
-        self.intake_keys: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
+        # One take at a time: a second report of the same thing must see the first one's open record,
+        # or two people posting "site is down" become two tasks. Network calls stay outside it.
+        self.intake_take_lock = threading.Lock()
         self.intake_poll_lock = threading.Lock()
         self.eng_launched: dict[int, float] = {}   # issue → when Solo last started a pickup for it
         self.pool = ThreadPoolExecutor(max_workers=8)
@@ -2119,7 +2120,7 @@ class Daemon(Slack):
                    "thread": self.transcript(channel, thread_ts, 12) if thread_ts else "",
                    "where": where, "link": self.permalink(channel, ts), "item": item_id}
             extra_open = self.intake_linear_open(conf)   # a network call: made before the lock, not under it
-            with self.intake_key_lock(key):   # Slack redelivers; one thread must never become two tasks
+            with self.intake_take_lock:   # Slack redelivers, and people repeat each other: one report, one task
                 out = staff_intake.take(conf, msg, owner=self.me_name, extra_open=extra_open)
         except Exception as e:  # noqa: BLE001
             log.warning("intake: %s in %s not routed (%s) — left on the normal path", who, where, e)
@@ -2149,9 +2150,9 @@ class Daemon(Slack):
         if tracked:
             record_delegation(item=item_id, peer="factory", role="factory", task=v["title"], outcome="dispatched",
                               task_id=task_id, counterpart=who, conversation=session_key(item))
-        # The bot is not a member of the owner's DMs, so in one an acknowledgement could only go out in the
+        # The bot is not a member of the owner's DMs or group DMs, so in one an acknowledgement could only go out in the
         # owner's own name — that is the owner's to send, never Solo's.
-        if out.get("ack") and ctype != "im":
+        if out.get("ack") and ctype not in ("im", "mpim"):
             try:
                 if not self.bot:
                     raise RuntimeError("no bot token")
@@ -2172,17 +2173,16 @@ class Daemon(Slack):
                     + (f"\n{msg['link']}" if msg.get("link") else ""))
         return True
 
-    def intake_key_lock(self, key: str) -> threading.Lock:
-        """One lock per conversation: two deliveries of one thread wait on each other, other threads do not."""
-        with self.intake_lock:
-            return self.intake_keys[key]
-
     def intake_linear_open(self, conf: dict) -> dict[str, str]:
         """Open issues on the project's Linear, for the reader to dedupe against. Empty without Linear."""
         if not conf.get("linear_project") or not linear.enabled():
             return {}
         try:
-            return {i["identifier"]: i["title"] for i in staff_intake.linear_open(conf["linear_project"])}
+            issues = {i["identifier"]: i["title"] for i in staff_intake.linear_open(conf["linear_project"])}
+            # The issue the factory opened for one of Solo's own tasks is that task: the reader names the
+            # task, which reports back, never its issue, which nobody follows from here.
+            own = {r.get("linear") for r in staff_intake.rows().values() if r.get("task_id")}
+            return {k: t for k, t in issues.items() if k not in own}
         except Exception as e:  # noqa: BLE001
             log.warning("intake: could not list Linear issues on %s: %s", conf["linear_project"], e)
             return {}
@@ -2259,7 +2259,7 @@ class Daemon(Slack):
                    "link": i.get("url")}
             others = {k: t for k, t in open_items.items() if k != ident}
             try:
-                with self.intake_key_lock(msg["key"]):
+                with self.intake_take_lock:
                     out = staff_intake.take(conf, msg, owner=self.me_name, extra_open=others)
             except Exception as e:  # noqa: BLE001
                 fails[ident] = fails.get(ident, 0) + 1
@@ -3013,7 +3013,11 @@ class Daemon(Slack):
         # A customer's channel, or a customer, gets a draft whatever the path: not only a message
         # intake read, but one it never saw (Solo's own channel, a thread intake does not watch).
         conf = staff_intake.load_conf() if intake is None or not intake.get("customer") else None
-        customer = (intake or {}).get("customer") or (staff_intake.customer_of(conf, channel, sender) if conf else None)
+        try:
+            customer = (intake or {}).get("customer") or (staff_intake.customer_of(conf, channel, sender) if conf else None)
+        except Exception as e:  # noqa: BLE001 — a broken intake.json must never stop a draft
+            log.warning("intake: could not tell whether %s is a customer (%s)", channel, e)
+            customer = None
         if customer:
             item["customer"] = customer
         state = {"owner": self.me_name, "owner_notes": voice.load_notes(), "owner_presence": "active" if self.presence_active() else "away",
