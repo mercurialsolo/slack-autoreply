@@ -1935,12 +1935,13 @@ def classify_run(result: dict | None, err: str = "", tools: list | None = None, 
 
     A run that wrote its decision did its job, whatever it said afterwards: classing it as failed
     would rerun a writer that may already have posted. And the failure phrases are only read from
-    a bare run (no result, an error, or no tools used): a real draft is free to say "not logged
-    in" or "unknown command" about the customer's problem without marking the writer down."""
+    a bare run (no result, an error, no tools used, or no decision left): a real draft is free to
+    say "not logged in" or "unknown command" about the customer's problem without marking the
+    writer down."""
     if decided:
         return None
     said = f"{(result or {}).get('result') or ''} {err or ''}"
-    if result is None or result.get("is_error") or not tools:
+    if result is None or result.get("is_error") or not tools or decided is False:
         if PLUGIN_MISSING_RE.search(said):
             return "plugin_missing"
         if LOGGED_OUT_RE.search(said):
@@ -2119,7 +2120,8 @@ def run_claude(item: dict, state: "State | None" = None, prompt: str | None = No
 def _run_claude_in_session(item: dict, state: "State", prompt: str | None, fresh: bool) -> tuple[list[str], dict | None, str]:
     session = (str(uuid.uuid4()), False) if fresh else pick_session(item, state)
     tools, result, err = _run_claude_once(item, session, prompt)
-    if result is None and session[1]:
+    if result is None and session[1] and not err.startswith("timeout") and not _decided(item):
+        # Not after a timeout, or once the writer has decided: that run may have acted.
         log.warning("resume of session %s failed (%s) — starting a fresh one", session[0][:8], err[:120])
         session = (str(uuid.uuid4()), False)
         tools, result, err = _run_claude_once(item, session, prompt)
@@ -3325,7 +3327,7 @@ class Daemon(Slack):
             # The pre-compose check, one heal per failure class, and the rerun live in `compose`.
             tools, result, err, cls = compose(item, self.state)
             retried = bool(item.pop("healed", False))
-            self.writer_verdict(result, err, cls, tools)
+            self.writer_verdict(result, err, cls, tools, _decided(item))
             session = item.get("session")
             item = load_item(item["id"])  # Claude's `act` wrote the decision
             item["session"] = session
@@ -3580,7 +3582,8 @@ class Daemon(Slack):
         finally:
             self._probe_lock.release()
 
-    def writer_verdict(self, result: dict | None, err: str, cls: str | None = None, tools: list | None = None) -> None:
+    def writer_verdict(self, result: dict | None, err: str, cls: str | None = None, tools: list | None = None,
+                       decided: bool | None = None) -> None:
         """A real run is the arbiter of writer health, in both directions.
 
         `claude auth status` cannot see a usage limit: on 23 Oct the node was logged in and every
@@ -3591,6 +3594,10 @@ class Daemon(Slack):
         h = self.state.read().get("health") or {}
         was_ok = h.get("ok", True)
         ok, why = writer_healthy(result, err, tools)
+        if decided:
+            # It wrote its decision, so it reached the model; an error after that (max turns, a
+            # non-zero exit) is not "Solo cannot draft" while that very draft goes out.
+            ok, why = True, ""
         if cls and WRITER_FAILURES.get(cls, {}).get("blocks"):
             ok = False
         cls = None if ok else (cls or classify_run(result, err, tools))

@@ -2148,13 +2148,19 @@ try:
     def _decide_then_fail(item, state=None, prompt=None, fresh=False):
         _rc_calls.append(fresh)
         S.save_item({**S.load_item(item["id"]), "decision": {"action": "reply", "text": "hi"}})
-        return ["Bash"], {**DOWN}, "exit 1: Not logged in"
+        return ["Bash"], {"type": "result", "is_error": True, "result": "boom"}, "exit 1: boom"
 
     _writer_case()
     S.run_claude = _decide_then_fail
     try:
         _t, _r, _e, _cls = S.compose(_compose_item(), d.state)
         check("a run that decided and then errored is not rerun", _cls is None and _rc_calls == [False], str(_rc_calls))
+        d.state.update(lambda x: x.update(health={"ok": True}))
+        _wn.clear(); d.writer_verdict({"type": "result", "is_error": True, "result": "error_max_turns"}, "exit 1", None, ["Bash"], True)
+        check("…and is not a 'cannot draft' alert either", not _wn and (d.state.read().get("health") or {}).get("ok"), str(_wn))
+        d.writer_verdict({"type": "result", "is_error": True, "result": "error_max_turns"}, "exit 1", None, ["Bash"], False)
+        check("…while the same error with no decision still is", len(_wn) == 1 and "cannot draft" in _wn[0], str(_wn))
+        d.state.update(lambda x: x.update(health={"ok": True})); _wn.clear()
         _rc_calls.clear()
         S.run_claude = lambda item, state=None, prompt=None, fresh=False: (_rc_calls.append(fresh), ([], None, "timeout"))[1]
         _t, _r, _e, _cls = S.compose(_compose_item(), d.state)
@@ -2162,6 +2168,27 @@ try:
               f"{_cls} {_rc_calls}")
     finally:
         S.run_claude = _real_rc
+
+    # nor does the resume fallback inside a run: a timed-out resume is not run again
+    _real_once = S._run_claude_once
+    _once: list = []
+    _ti = _compose_item()
+    d.state.update(lambda x: x["sessions"].update({S.session_key(_ti): {"id": "11111111-aaaa", "runs": 1, "last": S.now_iso()}}))
+    S._run_claude_once = lambda item, session, prompt=None: (_once.append(session[1]), ([], None, "timeout"))[1]
+    try:
+        S.run_claude(_ti, d.state)
+        check("a resumed run that timed out is not rerun in a fresh session", _once == [True], str(_once))
+        _once.clear()
+        S._run_claude_once = lambda item, session, prompt=None: (_once.append(session[1]), ([], None, "exit 1: No conversation found"))[1]
+        d.state.update(lambda x: x["sessions"].update({S.session_key(_ti): {"id": "11111111-aaaa", "runs": 1, "last": S.now_iso()}}))
+        S.run_claude(_ti, d.state)
+        check("…while a resume that failed outright still falls back to a fresh one", _once == [True, False], str(_once))
+    finally:
+        S._run_claude_once = _real_once
+    _missing_tool = {"type": "result", "subtype": "success", "is_error": False,
+                     "result": "/solo:slack-autoreply isn't available in this session"}
+    check("a run that tried a tool, decided nothing and says the plugin is missing is plugin_missing",
+          S.classify_run(_missing_tool, "", ["Skill"], False) == "plugin_missing")
 
     # an auth status that cannot be read does not stop every compose
     for _blank in (" ", "Logged in via claude.ai", "[]"):
