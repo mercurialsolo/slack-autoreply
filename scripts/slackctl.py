@@ -35,7 +35,7 @@ import time
 import uuid
 from collections import Counter, OrderedDict, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1997,7 +1997,9 @@ class Daemon(Slack):
         self.eng_routes = {uid: label for who, label in CFG["eng_routes"].items()
                            for uid in self.resolve_users([who])}
         self.eng_lock = threading.Lock()
-        self.intake_lock = threading.Lock()
+        self.intake_lock = threading.Lock()        # guards intake_keys
+        self.intake_keys: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
+        self.intake_poll_lock = threading.Lock()
         self.eng_launched: dict[int, float] = {}   # issue → when Solo last started a pickup for it
         self.pool = ThreadPoolExecutor(max_workers=8)
         self.sem = threading.Semaphore(CFG["dispatch_parallel"])
@@ -2098,7 +2100,7 @@ class Daemon(Slack):
     def on_intake(self, ev: dict) -> bool:
         """A message in a channel (or DM) intake.json watches: the reader decides whether it is a
         question, an SR or a dev request. True when intake took it, so nothing else acts on it;
-        False leaves it on the normal path — including when the reader fails, which is never a guess."""
+        False leaves it on the normal path — including when the reader or Slack fails, which is never a guess."""
         conf = staff_intake.load_conf()
         sender, channel, ctype = ev["user"], ev["channel"], ev.get("channel_type", "")
         if not conf or not staff_intake.watched(conf, channel, ctype):
@@ -2107,15 +2109,18 @@ class Daemon(Slack):
             return False
         ts, thread_ts = ev["ts"], ev.get("thread_ts")
         who = self.name_of(sender)
-        text = clean_text(ev.get("text", "") or "", self.name_of)
-        where = "a DM" if ctype == "im" else f"#{self.channel_name(channel)}"
         item_id = f"{channel}-{ts.replace('.', '_')}"
-        msg = {"source": "slack", "key": f"slack:{channel}:{thread_ts or ts}", "channel": channel, "sender": sender,
-               "sender_name": who, "text": text, "thread": self.transcript(channel, thread_ts, 12) if thread_ts else "",
-               "where": where, "link": self.permalink(channel, ts), "item": item_id}
+        key = f"slack:{channel}:{thread_ts or ts}"
+        where = "a DM" if ctype == "im" else "a channel"
         try:
-            with self.intake_lock:   # Slack redelivers; one thread must never become two tasks
-                out = staff_intake.take(conf, msg, owner=self.me_name, extra_open=self.intake_linear_open(conf))
+            text = clean_text(ev.get("text", "") or "", self.name_of)
+            where = "a DM" if ctype == "im" else f"#{self.channel_name(channel)}"
+            msg = {"source": "slack", "key": key, "channel": channel, "sender": sender, "sender_name": who, "text": text,
+                   "thread": self.transcript(channel, thread_ts, 12) if thread_ts else "",
+                   "where": where, "link": self.permalink(channel, ts), "item": item_id}
+            extra_open = self.intake_linear_open(conf)   # a network call: made before the lock, not under it
+            with self.intake_key_lock(key):   # Slack redelivers; one thread must never become two tasks
+                out = staff_intake.take(conf, msg, owner=self.me_name, extra_open=extra_open)
         except Exception as e:  # noqa: BLE001
             log.warning("intake: %s in %s not routed (%s) — left on the normal path", who, where, e)
             return False
@@ -2130,18 +2135,23 @@ class Daemon(Slack):
         if act == "instructed":
             return True
         task_id = out["task_id"]
+        tracked = task_id.startswith("t_")   # else an open Linear issue already has it: linked, no task to hear from
         # The request becomes an item, so the answer can come back through `say --re` into this thread.
         reply_thread_ts = thread_ts or (ts if ctype in ("channel", "group") else None)
         item = {"id": item_id, "created": now_iso(), "status": "done", "simulated": False, "channel": channel,
-                "channel_type": ctype, "channel_name": self.channel_name(channel) if ctype in ("channel", "group") else None,
+                "channel_type": ctype, "channel_name": where[1:] if ctype in ("channel", "group") else None,
                 "ts": ts, "thread_ts": thread_ts, "reply_thread_ts": reply_thread_ts, "sender": sender, "sender_name": who,
-                "sender_handle": self.handle_of(sender), "text": text, "permalink": msg["link"], "context": "",
-                "intake": {"class": v["class"], "task_id": task_id}, "outcome": {"status": "routed", "task": task_id},
+                "sender_handle": self.handle_of(sender), "text": msg["text"], "permalink": msg["link"], "context": "",
+                "intake": {"class": v["class"], "task_id": task_id},
+                "outcome": {"status": "routed" if tracked else "linked", "task": task_id},
                 **({"customer": customer} if customer else {})}
         save_item(item)
-        record_delegation(item=item_id, peer="factory", role="factory", task=v["title"], outcome="dispatched",
-                          task_id=task_id, counterpart=who, conversation=session_key(item))
-        if out.get("ack"):
+        if tracked:
+            record_delegation(item=item_id, peer="factory", role="factory", task=v["title"], outcome="dispatched",
+                              task_id=task_id, counterpart=who, conversation=session_key(item))
+        # The bot is not a member of the owner's DMs, so in one an acknowledgement could only go out in the
+        # owner's own name — that is the owner's to send, never Solo's.
+        if out.get("ack") and ctype != "im":
             try:
                 if not self.bot:
                     raise RuntimeError("no bot token")
@@ -2151,12 +2161,21 @@ class Daemon(Slack):
             return True
         what = {"sr": "service request", "dev": "dev request", "question": "question (research)"}[v["class"]]
         prio = f", P{out['priority']}" if out.get("priority") else ""
+        why_quiet = ("a customer hears from you" if customer else
+                     "it came in your DM, where only you can answer" if out.get("ack") else
+                     "they are not on the internal list, so they hear from you")
+        then = ("The update is drafted here for your ✅ once it is live." if tracked else
+                f"No factory task was made, so no update will be drafted — follow {task_id} for the fix.")
         self.notify(f"📥 *{who}*{' (' + customer + ')' if customer else ''} raised a {what} in {where} — "
-                    f"{'joined to' if act == 'duplicate' else 'queued as'} `{task_id}`{prio}: {v['title']}\n"
-                    f"_nothing was said to them: {'a customer' if customer else 'they are not on the internal list'} "
-                    f"hears from you. The update is drafted here for your ✅ once it is live._"
+                    f"{('joined to' if tracked else 'already tracked in') if act == 'duplicate' else 'queued as'} "
+                    f"`{task_id}`{prio}: {v['title']}\n_nothing was said to them: {why_quiet}. {then}_"
                     + (f"\n{msg['link']}" if msg.get("link") else ""))
         return True
+
+    def intake_key_lock(self, key: str) -> threading.Lock:
+        """One lock per conversation: two deliveries of one thread wait on each other, other threads do not."""
+        with self.intake_lock:
+            return self.intake_keys[key]
 
     def intake_linear_open(self, conf: dict) -> dict[str, str]:
         """Open issues on the project's Linear, for the reader to dedupe against. Empty without Linear."""
@@ -2169,7 +2188,18 @@ class Daemon(Slack):
             return {}
 
     def poll_intake(self) -> None:
-        """Every tick: new Linear issues on the project come in, and finished tasks are reported back."""
+        """Every tick: new Linear issues on the project come in, and finished tasks are reported back.
+        A `say` can outlast a tick, so a tick that finds the last one still running skips: two at once
+        would draft the same update twice."""
+        if not self.intake_poll_lock.acquire(blocking=False):
+            log.info("intake: the last poll is still running — skipped this tick")
+            return
+        try:
+            self._poll_intake()
+        finally:
+            self.intake_poll_lock.release()
+
+    def _poll_intake(self) -> None:
         conf = staff_intake.load_conf()
         if not conf:
             return
@@ -2180,25 +2210,41 @@ class Daemon(Slack):
             if step.get("say"):
                 if not row.get("item"):
                     staff_intake.mark(key, state=step["state"]); continue
-                p = subprocess.run([sys.executable, SCRIPT, "say", "--re", row["item"], "--from", "factory", step["say"]],
-                                   capture_output=True, text=True, timeout=900)
-                if p.returncode == 0:
+                try:
+                    p = subprocess.run([sys.executable, SCRIPT, "say", "--re", row["item"], "--from", "factory", step["say"]],
+                                       capture_output=True, text=True, timeout=900)
+                    rc, out = p.returncode, (p.stderr or p.stdout or "").strip()
+                except (subprocess.TimeoutExpired, OSError) as e:
+                    rc, out = -1, f"say did not finish: {e}"
+                if rc == 0:
                     staff_intake.mark(key, state="reported", reported=step["state"])
                     log.info("intake: drafted the update for %s (%s)", row["requester"], row["task_id"])
+                    continue
+                if "nothing was sent to anyone" in out:
+                    # `say` refused or could not compose, and already put the words in the owner's DM.
+                    # Asking again would only post them there again.
+                    staff_intake.mark(key, state="report_withheld", reported=step["state"])
+                    log.info("intake: the update for %s (%s) went to the owner instead: %s",
+                             row["requester"], row["task_id"], out[:200])
                     continue
                 tries = int(row.get("say_tries") or 0) + 1
                 staff_intake.mark(key, say_tries=tries, **({"state": "report_failed"} if tries >= 5 else {}))
                 if tries >= 5:
                     self.notify(f"⚠️ Could not draft the update for *{row['requester']}* on `{row['task_id']}` "
-                                f"({row['title']}): {(p.stderr or p.stdout).strip()[:200]}" + (f"\n{row['link']}" if row.get("link") else ""))
+                                f"({row['title']}): {out[:200]}" + (f"\n{row['link']}" if row.get("link") else ""))
                 continue
             if step.get("notify"):
                 self.notify("📥 " + step["notify"])
             staff_intake.mark(key, state=step["state"])
 
+    LINEAR_TRIES = 3
+
     def poll_intake_linear(self, conf: dict) -> None:
-        st = self.state.read()
-        since = (st.get("intake") or {}).get("linear_since") or now_iso()
+        st = self.state.read().get("intake") or {}
+        # Linear's createdAt is UTC ("2026-11-11T04:45:00.000Z") and is compared as text, so the
+        # watermark is written the same way — never the daemon's local clock.
+        since = st.get("linear_since") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        fails = dict(st.get("linear_fails") or {})
         try:
             issues = staff_intake.linear_open(conf["linear_project"])
         except Exception as e:  # noqa: BLE001
@@ -2206,22 +2252,35 @@ class Daemon(Slack):
         open_items = {i["identifier"]: i["title"] for i in issues}
         newest = since
         for i in sorted(staff_intake.linear_new(issues, since), key=lambda i: i["createdAt"]):
-            msg = {"source": "linear", "key": f"linear:{i['identifier']}", "linear": i["identifier"],
+            ident = i["identifier"]
+            msg = {"source": "linear", "key": f"linear:{ident}", "linear": ident,
                    "sender": (i.get("creator") or {}).get("id") or "linear", "sender_name": (i.get("creator") or {}).get("name") or "someone",
                    "text": f"{i['title']}\n\n{i.get('description') or ''}", "where": f"Linear {conf['linear_project']}",
                    "link": i.get("url")}
-            others = {k: t for k, t in open_items.items() if k != i["identifier"]}
+            others = {k: t for k, t in open_items.items() if k != ident}
             try:
-                with self.intake_lock:
+                with self.intake_key_lock(msg["key"]):
                     out = staff_intake.take(conf, msg, owner=self.me_name, extra_open=others)
             except Exception as e:  # noqa: BLE001
-                log.warning("intake: %s not routed (%s) — tried again next tick", i["identifier"], e); break
+                fails[ident] = fails.get(ident, 0) + 1
+                if fails[ident] < self.LINEAR_TRIES:
+                    log.warning("intake: %s not routed (%s) — tried again next tick", ident, e); break
+                # One issue the reader keeps failing on must not hold back every issue after it.
+                self.notify(f"⚠️ Linear {ident} could not be routed after {fails[ident]} tries ({str(e)[:150]}) — "
+                            f"skipped, it is yours to look at: {i['title']}\n{i.get('url') or ''}")
+                fails.pop(ident, None)
+                newest = max(newest, i["createdAt"])
+                continue
+            fails.pop(ident, None)
             newest = max(newest, i["createdAt"])
             if out["action"] in ("submitted", "duplicate"):
-                self.notify(f"📥 Linear {i['identifier']} ({out['verdict']['class']}) → `{out['task_id']}`: {out['verdict']['title']}")
+                self.notify(f"📥 Linear {ident} ({out['verdict']['class']}) → `{out['task_id']}`: {out['verdict']['title']}")
             elif out["action"] == "question":
-                self.notify(f"📥 Linear {i['identifier']} reads as a question — yours to answer: {i['title']}\n{i.get('url') or ''}")
-        self.state.update(lambda d: d.setdefault("intake", {}).__setitem__("linear_since", newest))
+                self.notify(f"📥 Linear {ident} reads as a question — yours to answer: {i['title']}\n{i.get('url') or ''}")
+
+        def keep(d: dict) -> None:
+            d.setdefault("intake", {}).update(linear_since=newest, linear_fails=fails)
+        self.state.update(keep)
 
     def on_eng_request(self, ev: dict) -> bool:
         """A message in ENG_CHANNEL: file it for the coding agent and say so in the thread.
@@ -2951,8 +3010,12 @@ class Daemon(Slack):
         }
         if intake is not None:
             item["intake"] = {"class": "question"}
-            if intake.get("customer"):
-                item["customer"] = intake["customer"]
+        # A customer's channel, or a customer, gets a draft whatever the path: not only a message
+        # intake read, but one it never saw (Solo's own channel, a thread intake does not watch).
+        conf = staff_intake.load_conf() if intake is None or not intake.get("customer") else None
+        customer = (intake or {}).get("customer") or (staff_intake.customer_of(conf, channel, sender) if conf else None)
+        if customer:
+            item["customer"] = customer
         state = {"owner": self.me_name, "owner_notes": voice.load_notes(), "owner_presence": "active" if self.presence_active() else "away",
                  "local_time": datetime.now().strftime("%A %H:%M"), "channel_type": ctype, "channel_name": item["channel_name"],
                  "sender": who, "sender_trusted_for_sharing": sender in self.share_trusted,

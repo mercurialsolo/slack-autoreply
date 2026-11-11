@@ -2577,6 +2577,7 @@ elif "export again" in msg:
     dup = re.search(r"  (t_[0-9a-f]+): Add CSV export", p)
     v("dev", kind="feature", title="Add CSV export", summary="Wants CSV export of shifts.", duplicate_of=dup.group(1) if dup else None)
 elif "CSV export" in msg: v("dev", kind="feature", title="Add CSV export", summary="Wants CSV export of shifts.")
+elif "seen in Linear" in msg: v("sr", kind="incident", title="Fix 500", summary="Seen again.", duplicate_of="ENG-777")
 elif "also on Firefox" in msg: v("sr", kind="incident", title="Fix 500", summary="Also seen on Firefox.")
 elif "rate limit per tenant" in msg: v("question", needs_code=True, title="What is the per-tenant rate limit?", summary="Asks the per-tenant API rate limit.")
 elif "where are the docs" in msg: v("question", title="Where are the docs?", summary="Asks for the docs link.")
@@ -2690,6 +2691,31 @@ check("intake: an unreadable verdict queues nothing and leaves it on the normal 
 _intake_msg(UINT, "COTHER01", "1710000060.000", "our login page 500s")
 check("intake: an unwatched channel is not routed", len(_submits()) == _n)
 
+# a customer is a draft on every path, not only the one intake read: here a DM intake does not watch
+_dm = _intake_msg(UCUST, "DCUSTJO1", "1710000061.000", "hey, are you around?", ctype="im")
+check("customer flag: a customer's message intake never saw is still a customer item", S.load_item(_dm).get("customer") == "Acme",
+      str(S.load_item(_dm)))
+
+# a report an open Linear issue already holds is linked, not followed — so its ack promises no update
+_lk = SI.take(SI.load_conf(), {"source": "slack", "key": f"slack:{SC}:1710000062.000", "channel": SC, "sender": UINT,
+                               "sender_name": "Dana", "text": "the 500 is seen in Linear too", "where": "#staffai"},
+              owner="Owner", extra_open={"ENG-777": "Fix 500"})
+check("intake: a duplicate of a Linear issue is linked, and its ack promises no update",
+      _lk["action"] == "duplicate" and _lk["task_id"] == "ENG-777" and "ENG-777" in _lk["ack"] and "update" not in _lk["ack"]
+      and SI.rows()[f"slack:{SC}:1710000062.000"]["state"] == "linked", str(_lk))
+
+# the reader keeps its own login through the scrub; every other secret is gone
+_env_keep = {k: os.environ.get(k) for k in ("CLAUDE_CODE_OAUTH_TOKEN", "SLACK_BOT_TOKEN", "ANTHROPIC_API_KEY", "DISPATCH_USE_API_KEY")}
+os.environ.update(CLAUDE_CODE_OAUTH_TOKEN="oat-x", SLACK_BOT_TOKEN="xoxb-x", ANTHROPIC_API_KEY="sk-x")
+os.environ.pop("DISPATCH_USE_API_KEY", None)
+_re = SI.reader_env()
+check("reader env: the Claude login survives, the Slack token and an unasked-for API key do not",
+      _re.get("CLAUDE_CODE_OAUTH_TOKEN") == "oat-x" and "SLACK_BOT_TOKEN" not in _re and "ANTHROPIC_API_KEY" not in _re)
+os.environ["DISPATCH_USE_API_KEY"] = "true"
+check("…and the API key does when DISPATCH_USE_API_KEY asks for it", SI.reader_env().get("ANTHROPIC_API_KEY") == "sk-x")
+for _k, _v in _env_keep.items():
+    os.environ.pop(_k, None) if _v is None else os.environ.__setitem__(_k, _v)
+
 # customer-draft gating: whatever Solo would say in a customer conversation is a draft, even if the ledger trusts it
 _ci = {"id": "cust-1", "channel": SCUST, "channel_type": "channel", "channel_name": "acme", "ts": "1710000070.000",
        "reply_thread_ts": "1710000070.000", "sender": UCUST, "sender_name": "Jo", "text": "is it fixed?", "customer": "Acme"}
@@ -2734,6 +2760,40 @@ try:
 finally:
     S.subprocess.run = _real_run
 
+# the loop back's `say` is a subprocess that can hang, fail, or refuse — none of which may crash the tick or repeat a post
+_intake_msg(UINT, SC, "1710000031.000", "and the rate limit per tenant on the private API?")
+_rq = f"slack:{SC}:1710000031.000"
+_RESULTS.write_text(json.dumps({SI.rows()[_rq]["task_id"]: {"state": "done", "status_text": "DONE\n\nThe same, 100 a minute."}}))
+_calls = []
+def _say_run(behave):
+    def run(argv, **k):
+        if "say" not in argv:
+            return _real_run(argv, **k)
+        _calls.append(argv)
+        return behave()
+    return run
+def _hang():
+    raise subprocess.TimeoutExpired("say", 900)
+try:
+    di.intake_poll_lock.acquire()
+    S.subprocess.run = _say_run(lambda: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    di.poll_intake()
+    check("loop back: a tick that finds the last poll still running skips it", not _calls)
+    di.intake_poll_lock.release()
+    S.subprocess.run = _say_run(_hang)
+    di.poll_intake()
+    check("…a say that hangs is a failed try, not a crashed tick", len(_calls) == 1 and SI.rows()[_rq].get("say_tries") == 1
+          and SI.rows()[_rq]["state"] == "open", str(SI.rows()[_rq]))
+    S.subprocess.run = _say_run(lambda: SimpleNamespace(returncode=1, stdout="", stderr="not placed: it reads as sensitive (4.0/5)\n"
+                                                        "   it is in your Solo DM instead — nothing was sent to anyone"))
+    di.poll_intake(); di.poll_intake()
+    check("…a say that refused (and told the owner) is not asked again", len(_calls) == 2
+          and SI.rows()[_rq]["state"] == "report_withheld", str(SI.rows()[_rq]))
+finally:
+    S.subprocess.run = _real_run
+    if di.intake_poll_lock.locked():
+        di.intake_poll_lock.release()
+
 # Linear: a new issue on the project comes in; one the factory opened for Solo's own task does not
 _issues = [{"identifier": "ENG-950", "title": "Login page 500s for a customer", "description": "our login page 500s",
             "url": "https://linear.app/x/ENG-950", "createdAt": "2099-01-01T00:00:00Z", "creator": {"id": "lin-u1", "name": "Dana"}},
@@ -2752,6 +2812,18 @@ try:
           len(_s) == _n + 1 and _s[-1][_s[-1].index("--linear") + 1] == "ENG-950", str(_s[-1:]))
     di.poll_intake()
     check("…once", len(_submits()) == _n + 1)
+    check("…the watermark is Linear's own UTC form", di.state.read()["intake"]["linear_since"].endswith("Z"),
+          di.state.read()["intake"]["linear_since"])
+    # an issue the reader keeps failing on holds the queue for a few ticks, then is handed to the owner and skipped
+    _issues[:] = [{"identifier": "ENG-960", "title": "BROKEN on the reports page", "description": "", "url": "https://linear.app/x/ENG-960",
+                   "createdAt": "2099-01-02T00:00:00Z", "creator": {"id": "lin-u1", "name": "Dana"}},
+                  {"identifier": "ENG-961", "title": "could we get a CSV export of reports", "description": "", "url": "https://linear.app/x/ENG-961",
+                   "createdAt": "2099-01-02T00:00:01Z", "creator": {"id": "lin-u1", "name": "Dana"}}]
+    _n = len(_submits()); di.poll_intake(); di.poll_intake()
+    check("linear: a failing issue is retried, and the ones after it wait", len(_submits()) == _n)
+    di.poll_intake()
+    check("…until it has failed enough, when it goes to the owner and the next is taken",
+          len(_submits()) == _n + 1 and any("ENG-960" in m and "skipped" in m for m in _dms()), str(_dms()[-2:]))
 finally:
     L.gql = _real_gql2
     os.environ.pop("LINEAR_API_KEY", None)

@@ -184,8 +184,14 @@ def fence() -> str:
     return "=" * 8 + f" UNTRUSTED DATA {os.urandom(8).hex()} " + "=" * 8
 
 
+# The reader's own login survives the scrub, the way the writer's does (slackctl.claude_command): a
+# host that signs Claude in through the environment would otherwise leave every reading failed.
+READER_AUTH = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
+
+
 def reader_env() -> dict:
-    return {k: v for k, v in os.environ.items() if not SECRET_ENV_RE.search(k)}
+    keep = READER_AUTH + (("ANTHROPIC_API_KEY",) if config.env_bool("DISPATCH_USE_API_KEY", False) else ())
+    return {k: v for k, v in os.environ.items() if k in keep or not SECRET_ENV_RE.search(k)}
 
 
 PII_RE = [
@@ -398,8 +404,10 @@ def take(conf: dict, msg: dict, *, owner: str, extra_open: dict[str, str] | None
             record(**row, task_id=dup, duplicate=True)
         else:   # an open issue elsewhere (Linear) already has it: link, no task
             record(**{**row, "state": "linked"}, issue=dup, duplicate=True)
-        return {"action": "duplicate", "task_id": dup, **base,
-                "ack": f"This is already being worked on ({dup}) — I'll update this thread when it's fixed." if ackable else None}
+        # Only a factory task reports back (due_updates); a linked issue is not followed, so it promises nothing.
+        line = (f"This is already being worked on ({dup}) — I'll update this thread when it's fixed." if dup.startswith("t_")
+                else f"This is already tracked in {dup} — follow it there for the fix.")
+        return {"action": "duplicate", "task_id": dup, **base, "ack": line if ackable else None}
     priority, work = priority_for(v, customer)
     brief = brief_for(conf, v, requester=msg["sender_name"], standing=standing, customer=customer, link=msg.get("link"),
                       key=msg["key"], linear=msg.get("linear"))
