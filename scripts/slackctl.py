@@ -2160,7 +2160,7 @@ def _run_claude_in_session(item: dict, state: "State", prompt: str | None, fresh
     if writer_healthy(result, err, tools)[0]:
         # What the probe's idle gate reads: a real run just proved the writer works, so there is
         # nothing for a probe to find out.
-        state.update(lambda d: d.update(health={**(d.get("health") or {}), "ok": True, "why": "",
+        state.update(lambda d: d.update(health={**(d.get("health") or {}), "ok": True, "why": "", "cls": None,
                                                  "last_ok": now_iso()}))
     return tools, result, err
 
@@ -3325,9 +3325,10 @@ class Daemon(Slack):
             item["status"] = "handling"
             save_item(item)
             # The pre-compose check, one heal per failure class, and the rerun live in `compose`.
+            was_ok = (self.state.read().get("health") or {}).get("ok", True)
             tools, result, err, cls = compose(item, self.state)
             retried = bool(item.pop("healed", False))
-            self.writer_verdict(result, err, cls, tools, _decided(item))
+            self.writer_verdict(result, err, cls, tools, _decided(item), was_ok=was_ok)
             session = item.get("session")
             item = load_item(item["id"])  # Claude's `act` wrote the decision
             item["session"] = session
@@ -3562,10 +3563,11 @@ class Daemon(Slack):
                 ok, why = writer_healthy(result, err)
                 cls = None if ok else classify_run(result, err)
                 self.credential_watch(result)
-            elif ok and (h.get("ok", True) or h.get("source") == "run"):
-                # Logged in, plugin there, paid probe not due. Nothing changed — or a real run
-                # marked the writer down for a reason these checks cannot see (a usage limit), and
-                # only a real run clears that: see writer_verdict.
+            elif ok and (h.get("ok", True) or WRITER_FAILURES.get(h.get("cls") or "", {}).get("blocks") is False):
+                # Logged in, plugin there, paid probe not due. Nothing changed — or the writer is
+                # down for a reason these checks cannot see (a usage limit), whether a run or the
+                # paid probe found it, and only a model call clears that. A down state these checks
+                # can see (logged out, plugin missing) is cleared here once they pass.
                 return
             was_ok = h.get("ok", True)
             self.state.update(lambda d: d.update(health={
@@ -3583,7 +3585,7 @@ class Daemon(Slack):
             self._probe_lock.release()
 
     def writer_verdict(self, result: dict | None, err: str, cls: str | None = None, tools: list | None = None,
-                       decided: bool | None = None) -> None:
+                       decided: bool | None = None, was_ok: bool | None = None) -> None:
         """A real run is the arbiter of writer health, in both directions.
 
         `claude auth status` cannot see a usage limit: on 23 Oct the node was logged in and every
@@ -3592,7 +3594,9 @@ class Daemon(Slack):
         a down state and says so; a run the model refused marks it down and says why, once."""
         self.credential_watch(result)
         h = self.state.read().get("health") or {}
-        was_ok = h.get("ok", True)
+        # run_claude stamps a working run healthy as it ends, so the caller passes what health
+        # said before the run; read afterwards, a recovery would look like nothing changed.
+        was_ok = h.get("ok", True) if was_ok is None else was_ok
         ok, why = writer_healthy(result, err, tools)
         if decided:
             # It wrote its decision, so it reached the model; an error after that (max turns, a

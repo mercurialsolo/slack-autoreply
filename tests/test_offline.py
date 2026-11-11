@@ -930,9 +930,19 @@ check("…and the item says why it failed, not 'success'", "weekly limit" in (S.
       str(S.load_item("LIM-1.000").get("outcome")))
 _said_down = [m for m in S.NOTIFIED if "cannot draft" in m] if hasattr(S, "NOTIFIED") else None
 _lim.unlink(); os.environ.pop("FAKE_LIMIT", None)
-_ok_item = {**_lim_item, "id": "LIM-2.000", "ts": "3.000"}; S.save_item(_ok_item); d.handle_with_claude(dict(_ok_item))
+_ok_item = {**_lim_item, "id": "LIM-2.000", "ts": "3.000"}; S.save_item(_ok_item)
+_back_notes: list = []
+_real_notify_lim = S.Daemon.notify
+S.Daemon.notify = lambda self, text: _back_notes.append(text)
+try:
+    d.handle_with_claude(dict(_ok_item))
+finally:
+    S.Daemon.notify = _real_notify_lim
 _h2 = d.state.read().get("health") or {}
 check("the next run that reaches the model clears it", _h2.get("ok") is True and not _h2.get("why"), str(_h2))
+check("…and says so once, though the run marked itself healthy before the verdict read it",
+      sum("can draft again" in n for n in _back_notes) == 1, str(_back_notes))
+check("…and drops the old failure class with it", not _h2.get("cls"), str(_h2))
 check("…in a fresh session, not the one with the unanswered prompt",
       S.load_item("LIM-2.000")["session"]["resumed"] is False and D in d.state.read()["sessions"])
 check("a conversation has a lock file every process can see", S.config.p("locks").is_dir() and any(S.config.p("locks").glob("*.lock")))
@@ -2030,6 +2040,17 @@ check("a logged-out node is caught by the free check, with the paid probe off",
 check("and catching it that way costs no model call at all", not _lo_calls)
 _up_notes, _, _ = _probe(UP, health={"ok": False, "why": "Not logged in"}, mins=0)
 check("logging back in is noticed for free too", len(_up_notes) == 1 and "can draft again" in _up_notes[0])
+# A usage limit is invisible to the free checks. Whoever found it — the paid probe or a real run —
+# the free check passing is no news, so it must not announce a recovery that has not happened.
+for _src in ("tick", "run"):
+    _lim_notes, _lim_h, _ = _probe(UP, health={"ok": False, "why": "weekly limit", "cls": "nonzero_exit", "source": _src}, mins=0)
+    check(f"a usage limit found by a {_src} is not cleared by the free check", not _lim_notes and _lim_h.get("ok") is False,
+          f"{_lim_notes} {_lim_h}")
+# Logged out is what the free check can see, so it clears it, even when a real run found it.
+_lo_run_notes, _lo_run_h, _ = _probe(UP, health={"ok": False, "why": "Not logged in", "cls": "logged_out", "source": "run"}, mins=0)
+check("logging back in after a run found it logged out is noticed for free too",
+      len(_lo_run_notes) == 1 and "can draft again" in _lo_run_notes[0] and _lo_run_h.get("ok") is True
+      and not _lo_run_h.get("cls"), f"{_lo_run_notes} {_lo_run_h}")
 _quiet, _, _ = _probe(UP, health={"ok": True}, mins=0)
 check("and a healthy node stays quiet every five minutes forever", not _quiet)
 
