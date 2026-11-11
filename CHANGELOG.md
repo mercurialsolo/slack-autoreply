@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased — 2026-11-10
+## Unreleased
+
+**A project's questions, SRs and dev requests go to the factory**
+- `~/.slack-autoreply/intake.json` names a factory repo, the channels to watch (a customer channel
+  names its customer), whether DMs count, the internal people, the customers, and optionally a
+  Linear project. A reasoning model reads each message with its thread: question, SR, dev request
+  or nothing (`scripts/staff_intake.py`).
+- SRs and dev requests become `factory submit --repo …` (customer-facing SR P1, else P2), one task
+  per thread, deduped against open tasks and Linear issues; questions are answered by Solo, or by a
+  `--kind research` task when the code must be read. Briefs link the thread and carry a PII-free
+  summary, never the message.
+- Anything to a customer is a draft, an ack auto-sends only to internal people, and a merged PR
+  brings a drafted update for the requester in the same thread.
+
+## Unreleased — owner notes
 
 **Every note to the owner reads to the owner's rule**
 - The owner, 10 Nov, after a budget ask full of task ids and counters and a release note of bullets
@@ -16,6 +30,7 @@
   command is in the thread"), bare URLs as `<url|label>`. `--point` and `--link` are respected and
   still rendered to the rule. Grouped notes read as sentences.
 - The solo and slack-autoreply skills carry the rule as style know-how.
+
 
 ## 1.4.0 — 2026-11-04
 
