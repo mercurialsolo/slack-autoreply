@@ -14,6 +14,15 @@
 - Anything to a customer is a draft, an ack auto-sends only to internal people, and a merged PR
   brings a drafted update for the requester in the same thread.
 
+**A release tag reaches the node by itself**
+- `deploy/release-pull.sh` on the node: newest `solo--v*` tag → `make test` in a scratch worktree →
+  `install.sh` → restart → wait for `listening as` and check it is still up 20s later. Failing tests
+  never move the checkout; a daemon that does not come back is rolled back to the commit it replaced.
+  Either way the tag is held until a newer one. A hand `--tag` of an older release pins the node
+  (`--unpin` resumes). One JSON decision line per run in `~/.slack-autoreply/decisions.jsonl`.
+- `deploy/install-release-timer.sh` runs it every 10 minutes (launchd / systemd --user timer).
+- README: where Solo runs and how a release reaches it. `make test` runs `tests/test_release_pull.py`.
+
 ## 1.4.0 — 2026-11-04
 
 **Review fixes before merge**
