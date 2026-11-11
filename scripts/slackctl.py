@@ -1301,10 +1301,7 @@ def deliver_to_owner(slack: Slack, item: dict, text: str) -> tuple[str, list[str
     sender = item.get("origin", "agent").removeprefix("agent:")
     body = restore_mentions(text, slack.mention_id).replace(BEAT, "\n")
     spec = item.get("note") or {}
-    shaped = None if spec.get("headline") else note_shape.shape(body)  # a model's judgment; None falls back
-    note = owner_note.from_text(body, sender, status=spec.get("status"), headline=spec.get("headline"),
-                                points=spec.get("points"), details=spec.get("details"),
-                                options=spec.get("options"), link=spec.get("link") or "", shaped=shaped)
+    note = note_shape.build(body, sender, spec, buttons=owner_buttons())  # the rules, then a model; never a broken note
     r = owner_note.render(note, buttons=owner_buttons())
     item["note_rendered"] = owner_note.to_dict(note)
     if item.get("files"):
@@ -1339,12 +1336,12 @@ def deliver_to_owner(slack: Slack, item: dict, text: str) -> tuple[str, list[str
             ts = group["ts"]
             notes = [owner_note.from_dict(n) for n in group["notes"]]
             slack.console_update(ts, owner_note.render_group(notes, sender))
-            if len(notes) == 2:
-                # The first note's bullets just left the message for its one-line entry: put it,
-                # whole, in the thread before the second, so "each one's detail is in the thread" holds.
-                slack.console_post(owner_note.render(notes[0], buttons=False)["text"], thread_ts=ts)
-            # the new note in full, under the message that now lists it
-            slack.console_post("\n".join(x for x in (r["text"], r["details"]) if x), thread_ts=ts)
+            # Each note once: the message names it, the thread holds what the name does not say.
+            # The first note's sentences just left the message (its details are in the thread already).
+            for entry in ([owner_note.group_thread(notes[0], details=False)] if len(notes) == 2 else []) + [
+                    owner_note.group_thread(note)]:
+                if entry:
+                    slack.console_post(entry, thread_ts=ts)
             slack._ping(r["text"])  # noqa: SLF001 - an edit does not notify
             return ts, []
         ts = slack.notify(r["text"])

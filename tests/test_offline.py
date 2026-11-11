@@ -1616,14 +1616,14 @@ check("the second, inside five minutes, joins it: one message, edited, not a sec
 check("…which leads with the worst of the two and lists each",
       _g_upd[0][2].startswith("⏸️ *2 updates* from release-lane") and "✅ *Helsinki* shipped" in _g_upd[0][2] and "• " not in _g_upd[0][2]
       and "⏸️ *Hillsboro* frozen at *v0.537.0*" in _g_upd[0][2], _g_upd)
-check("…the first note, whole, goes in its thread once it is folded to one line",
-      _g_posts[1][2] == _g_posts[0][3] and _g_posts[1][1].startswith("✅ *Helsinki* shipped *v0.552.0*"), _g_posts)
-check("…and the new note in full goes in its thread", _g_posts[2][2] == _g_posts[0][3] and "Hillsboro" in _g_posts[2][1], _g_posts)
+_n_g2 = len(_con.posted); S.cmd_say(_say_args("Canary on Hillsboro is red", to="@barada", frm="release-lane", details="Canary on Hillsboro is red\nrollback ran at 14:02")); _g2 = _con.posted[_n_g2:]
+check("…no thread copy of a note the message says in full; a third note's thread entry is its details only (owner 11-11)", len(_g_posts) == 1 and len(_g2) == 1 and _g2[0][2] == _g_posts[0][3]
+      and _g2[0][1].startswith("🔎 *Details*") and "rollback ran" in _g2[0][1] and _g2[0][1].count("Canary on Hillsboro") == 1, _g2)
 S.cmd_say(_say_args("Helsinki shipped v0.553.0", to="@barada", frm="another-agent"))
-check("another agent's note is not folded into it", _con.posted[-1][2] is None and len(_con.updates) == _u_g + 1)
+check("another agent's note is not folded into it", _con.posted[-1][2] is None and len(_con.updates) == _u_g + 2)
 _st = d.state.read(); _st["owner_group"]["at"] = time.time() - 400; S.STATE_FILE.write_text(json.dumps(_st))
 S.cmd_say(_say_args("Helsinki shipped v0.554.0", to="@barada", frm="another-agent"))
-check("after five minutes a note starts a new message", _con.posted[-1][2] is None and len(_con.updates) == _u_g + 1)
+check("after five minutes a note starts a new message", _con.posted[-1][2] is None and len(_con.updates) == _u_g + 2)
 
 # Until Interactivity is on in the Slack app a press only shows a warning icon, so buttons wait for
 # OWNER_BUTTONS=1 and the choices are named in words, with the answer page.

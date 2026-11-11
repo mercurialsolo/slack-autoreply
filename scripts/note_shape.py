@@ -113,15 +113,53 @@ def parse(answer: str, source: str) -> dict | None:
             "ask": str(d.get("ask") or "").strip(), "links": links}
 
 
-def shape(text: str, call=None) -> dict | None:
+def shape(text: str, call=None, force: bool = False) -> dict | None:
     """{status, headline, summary, ask, links} for a note, or None when the rules alone should read it.
 
-    `call(prompt) -> str` is the model; tests pass their own. Never raises."""
+    `call(prompt) -> str` is the model; tests pass their own. `force` asks even for a short or
+    structured note — the rules already failed it. Never raises."""
     try:
         if call is None:
-            if not wanted(text):
+            if mode() == "off" or not (force or wanted(text)):
                 return None
             call = _call_api if mode() == "api" else _call_cli
         return parse(call(PROMPT.format(rule=note_rules.RULE, text=text.strip())), text)
     except Exception:  # noqa: BLE001 - the shaper is a courtesy; the fallback always reads the note
         return None
+
+
+def build(body: str, sender: str, spec: dict | None = None, call=None, buttons: bool = True) -> owner_note.Note:
+    """The note for an agent's message, held to the rule: the rules first (with a model's reading
+    when the text wants judgment), then — when the rules could only leave a hole, a raw link, a
+    cut headline or two icons — a model words it from the agent's text, and the rendered note is
+    checked again. Whatever is still against the rule is dropped (`owner_note.scrub`); the agent's
+    words stay whole in Details. A note that breaks the rule is never posted (owner, 2026-11-11)."""
+    spec = spec or {}
+    kw = dict(status=spec.get("status"), details=spec.get("details"), options=spec.get("options"),
+              link=spec.get("link") or "")
+    context = "\n".join([spec.get("headline") or ""] + list(spec.get("points") or []) + [body]).strip()
+    whole = spec.get("details") if spec.get("details") is not None else body
+    if spec.get("headline"):
+        # The sender's own parts. A digest's ("Factory update: 1 decision for you", points of links
+        # and paths) still wants judgment: a model words it when one can; else the parts, by the rules.
+        shaped = shape(context, call=call) if wanted(context) or call else None
+        note = owner_note.from_text(body, sender, shaped=shaped, **{**kw, "details": whole}) if shaped else None
+        if note is None or _broken(note, buttons):
+            note = owner_note.from_text(body, sender, headline=spec["headline"], points=spec.get("points"), **kw)
+    else:
+        note = owner_note.from_text(body, sender, shaped=shape(body, call=call), **kw)
+    if not _broken(note, buttons):
+        return note
+    again = shape(context, call=call, force=True)
+    if again:
+        redo = owner_note.from_text(body, sender, shaped=again, **{**kw, "details": whole})
+        if not _broken(redo, buttons):
+            return redo
+        note = redo
+    return owner_note.scrub(note)
+
+
+def _broken(note: owner_note.Note, buttons: bool) -> bool:
+    if note.reshape or not note.headline:
+        return True
+    return bool(note_rules.violations(owner_note.render(note, buttons=buttons)["text"]))
