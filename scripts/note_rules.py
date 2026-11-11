@@ -212,7 +212,8 @@ HOLE_RE = re.compile(
 # The holes a finished note can be judged by alone: ordinary English never has these ("log in on",
 # "with or without" do occur, so the wider HOLE_RE is only read as a change a scrub made, in clean()).
 CUT_RE = re.compile(r"\S[ \t]{2,}\S|(?:^|\s)=\S|\S=(?:\s|$)|\b(?:via|into)\s+(?:and|or|in|on|at|via|into|from|to|by|of)\b"
-                    r"|\b(?:via|into)\s*(?:[,;.!]|$)|\b(?:yes|no)\s+to\s+(?:yes|no)\b|\b(?:via|at|into|by)\s*\(", re.I)
+                    r"|\b(?:via|into)\s*(?:[,;.!]|$)|\b(?:at|with|from)\s*[.;!,](?!\w)|\b(?:at|from|by)\s+(?:and|or)\b"
+                    r"|\b(?:yes|no)\s+to\s+(?:yes|no)\b|\b(?:via|at|into|by)\s*\(", re.I)
 RAW_LINK_RE = re.compile(r"&lt;https?://|<https?://[^>|]*\|[^>]*$", re.M)
 
 

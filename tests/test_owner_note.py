@@ -338,9 +338,21 @@ check("scrub replaces a holed headline with a plain one", not R.holes(_s.headlin
 
 _n = N.from_text("Failed: deploy to prod", "ops")
 check("a 'Failed:' label still reads failed after the label goes", _n.status == "failed" and "Failed:" not in _n.headline, repr(_n))
-check("two choices that read the same keep their own words on the buttons",
-      N.choice_words(["Option 1 via scripts/a.sh", "Option 2 via scripts/b.sh"]) != ["Option 1", "Option 1"]
-      and len(set(N.choice_words(["run scripts/a.sh", "run scripts/b.sh"]))) == 2)
+_w = N.choice_words(["Option 1 via scripts/a.sh", "Option 2 via scripts/b.sh"]) + N.choice_words(["run scripts/a.sh", "run scripts/b.sh"])
+check("two choices that read the same are told apart by number, never by the path",
+      len(set(_w[:2])) == 2 and len(set(_w[2:])) == 2 and not any("/" in w for w in _w), _w)
+_h = "Failed: Helsinki nightly migration on the database host: the configured lock timeout ran out before the vacuum finished tonight"
+check("a long 'Failed:' headline that is split still reads failed", N.from_text(_h, "ops", headline=_h).status == "failed")
+check("a 'Blocked:' label reads held", N.from_text("Blocked: waiting on the vendor", "ops").status == "held")
+check("a hole a model leaves at the end of a sentence is caught", R.violations("✅ Restart it with.") == ["a hole"])
+_s = N.scrub(N.Note(status="ask", headline="Ship it?", sender="ops", options=["Yes via `deploy.sh a`", "Yes via `deploy.sh b`"],
+                    reshape=True), buttons=False)
+check("scrub checks the note as it is posted, buttons off too", not R.violations(N.render(_s, buttons=False)["text"]),
+      N.render(_s, buttons=False)["text"])
+_calls = []
+_once = lambda p: (_calls.append(p), _vm(p))[1]
+note_shape.build(_q, "owner-digest", VAULT_SPEC, call=_once)
+check("note_shape asks a model the same prompt once", len(_calls) == len(set(_calls)), len(_calls))
 check("plain English is not a hole", not R.violations("✅ Log in on Helsinki and restart it."), R.violations("✅ Log in on Helsinki and restart it."))
 _a = N.Note(status="ask", headline="Board #9?", summary="It waits on you.", sender="ops", options=["Board it", "Park it"])
 _e = N.group_thread(_a, named=False)

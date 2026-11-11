@@ -138,13 +138,13 @@ def build(body: str, sender: str, spec: dict | None = None, call=None, buttons: 
     kw = dict(status=spec.get("status"), details=spec.get("details"), options=spec.get("options"),
               link=spec.get("link") or "")
     context = "\n".join([spec.get("headline") or ""] + list(spec.get("points") or []) + [body]).strip()
-    asked = set()  # the prompts a model already answered: the same one again costs time, not a better note
+    asked = {}  # what a model already said to a prompt: the same prompt again costs time, not a better note
 
     def ask(text, force=False):
-        out = shape(text, call=call, force=force) if text not in asked else None
-        if out:
-            asked.add(text)
-        return out
+        key = (text or "").strip()
+        if not asked.get(key):
+            asked[key] = shape(text, call=call, force=force)
+        return asked[key]
 
     if spec.get("headline"):
         # The sender's own parts. A digest's ("Factory update: 1 decision for you", points of links
@@ -163,7 +163,7 @@ def build(body: str, sender: str, spec: dict | None = None, call=None, buttons: 
         if not _broken(redo, buttons):
             return redo
         note = redo
-    return owner_note.scrub(note)
+    return owner_note.scrub(note, buttons)
 
 
 def _broken(note: owner_note.Note, buttons: bool) -> bool:
