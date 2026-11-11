@@ -224,6 +224,7 @@ LIST_ITEM_RE = re.compile(r"^\s*(?:[-•*◦]|\d+[.)])\s+")
 THEME_RE = re.compile(r"^\s*\**([^:*]{2,40}?)\**\s*:\s+\S")
 SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z*❓🔴⚠⏸🚀✅\"'])")
 CMD_NOTE = "The command is in the thread."
+REPLY_LINE_RE = re.compile(r"^\W*(?:please\s+)?(?:reply|respond|answer)\b[^?]{0,30}\b(?:yes|no|ok|approve|go)\b[^?]*$", re.I)
 
 
 def clean(piece: str) -> tuple[str, list, bool]:
@@ -340,6 +341,9 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
         whole = details if details is not None else intent
     else:
         cleaned = [x for x in (c(p) for p in _pieces(intent)) if x]
+        # "Reply yes or no" is the old way to ask; the question before it is the ask, never the headline
+        if any(x.endswith("?") for x in cleaned):
+            cleaned = [x for x in cleaned if not REPLY_LINE_RE.match(x)] or cleaned
         if not cleaned:
             st = norm_status(status) or ("ask" if options else "info")
             # Only counters, no words around them ("Canary green: 5/5"): the counter is the news.

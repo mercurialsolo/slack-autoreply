@@ -229,6 +229,12 @@ check("a command taken out of the body is in the thread, even with --details", "
       and "kubectl" not in N.render(_n)["text"], repr(_n))
 _n = N.from_text("Canary green: 5/5", "release")
 check("a status line that is only a counter keeps its counter", "5/5" in _n.headline, repr(_n))
+_n = N.from_text("Budget ask: grant more to t_8d468171? https://h/ask/abc", "factory")
+check("a task id that ends a question reads 'the task', not a dangling 'to?'", "grant more to the task?" in N.render(_n)["text"]
+      and "t_8d" not in N.render(_n)["text"], N.render(_n)["text"])
+_n = N.from_text("Should I ship v1.5 now (t_8d468171)? Reply yes or no", "release")
+check("'Reply yes or no' after a question is dropped, the question stays the headline",
+      "Reply" not in N.render(_n)["text"] and "ship" in _n.headline, repr(_n))
 os.environ.pop("ANTHROPIC_API_KEY", None)
 os.environ["NOTE_SHAPER"] = "auto"
 check("auto with no key uses the CLI", note_shape.mode() == "claude")

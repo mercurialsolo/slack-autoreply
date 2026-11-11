@@ -118,6 +118,8 @@ def strip_machine(text: str) -> tuple[str, bool]:
     t = re.sub(r"\s*\(([^()]*)\)", _drop_paren, t)
     t = re.sub(r"\s*\(\s*" + TASK_ID + r"\s*\)", "", t)
     t = re.sub(r"(?:\b(?:the\s+)?task\s+)?" + TASK_ID + r"(?=\s+[a-z])", "the task", t, flags=re.I)
+    # after a preposition it is still the object of the sentence ("grant more to t_…?"): "the task"
+    t = re.sub(r"\b(to|for|on|of|about|with|from|in)\s+(?:the\s+)?(?:task\s+)?" + TASK_ID, r"\1 the task", t, flags=re.I)
     t = TASK_ID_RE.sub("", t)
 
     def cmd(_m):
