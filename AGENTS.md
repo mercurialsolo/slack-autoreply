@@ -55,7 +55,7 @@ then `deploy/install-service.sh` again so the service unit points at the plugin 
 the old directory. Until the service is re-installed, keep `SKILL_COMMAND=/slack-autoreply` in
 `.env` so the running daemon still finds its skill.
 
-Verify: `python3 tests/test_offline.py` → last line `379 checks passed`. This needs no tokens.
+Verify: `python3 tests/test_offline.py` → last line `450 checks passed`. This needs no tokens.
 If it fails, the environment is wrong (Python version, deps); report the failing check verbatim.
 
 ## Phase 2 — Slack app (owner does the clicks; you hand them the manifest)

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+**A project's questions, SRs and dev requests go to the factory**
+- `~/.slack-autoreply/intake.json` names a factory repo, the channels to watch (a customer channel
+  names its customer), whether DMs count, the internal people, the customers, and optionally a
+  Linear project. A reasoning model reads each message with its thread: question, SR, dev request
+  or nothing (`scripts/staff_intake.py`).
+- SRs and dev requests become `factory submit --repo …` (customer-facing SR P1, else P2), one task
+  per thread, deduped against open tasks and Linear issues; questions are answered by Solo, or by a
+  `--kind research` task when the code must be read. Briefs link the thread and carry a PII-free
+  summary, never the message.
+- Anything to a customer is a draft, an ack auto-sends only to internal people, and a merged PR
+  brings a drafted update for the requester in the same thread.
+
 **A release tag reaches the node by itself**
 - `deploy/release-pull.sh` on the node: newest `solo--v*` tag → `make test` in a scratch worktree →
   `install.sh` → restart → wait for `listening as` and check it is still up 20s later. Failing tests
