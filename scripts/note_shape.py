@@ -163,7 +163,7 @@ def build(body: str, sender: str, spec: dict | None = None, call=None, buttons: 
         if not _broken(redo, buttons):
             return redo
         note = redo
-    return owner_note.scrub(note, buttons)
+    return owner_note.scrub(note, buttons, body)
 
 
 def _broken(note: owner_note.Note, buttons: bool) -> bool:

@@ -341,6 +341,10 @@ check("a 'Failed:' label still reads failed after the label goes", _n.status == 
 _w = N.choice_words(["Option 1 via scripts/a.sh", "Option 2 via scripts/b.sh"]) + N.choice_words(["run scripts/a.sh", "run scripts/b.sh"])
 check("two choices that read the same are told apart by number, never by the path",
       len(set(_w[:2])) == 2 and len(set(_w[2:])) == 2 and not any("/" in w for w in _w), _w)
+_w = N.choice_words(["Rollback to 1", "Rollback to 2"])
+check("a number that is part of a choice stays in its button words", _w == ["Rollback to 1", "Rollback to 2"], _w)
+_n = N.scrub(N.Note(status="ask", headline="Restart `x`", summary="", ask="", sender="ops"), True, "Should I restart the queue worker now or wait?")
+check("a part the rules drop is kept in the details, never lost", "restart the queue worker" in _n.details, repr(_n))
 _h = "Failed: Helsinki nightly migration on the database host: the configured lock timeout ran out before the vacuum finished tonight"
 check("a long 'Failed:' headline that is split still reads failed", N.from_text(_h, "ops", headline=_h).status == "failed")
 check("a 'Blocked:' label reads held", N.from_text("Blocked: waiting on the vendor", "ops").status == "held")

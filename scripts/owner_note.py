@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 
 import note_rules
@@ -265,14 +266,19 @@ def clean(piece: str) -> tuple[str, list, bool, bool]:
 DANGLING_RE = re.compile(r"[\s,;:]+(?:via|in|on|at|with|into|to|from|by|of|using|and|or)$", re.I)
 
 
-def option_words(option: str) -> str:
+def option_words(option: str, keep_number: bool = False) -> str:
     """A choice as the words for the ask line: its plain meaning without the command or path
     ("yes, then I board it via dev/pr-merge.sh 2708" reads "yes, then I board it"). The button keeps
-    the choice exactly as the agent wrote it."""
+    the choice exactly as the agent wrote it. A number that is part of the choice ("Rollback to 2")
+    stays: only what a removed command or path left behind is cut."""
     t = note_rules.tidy(humanize(note_rules.strip_machine(note_rules.take_links(option)[0])[0]))
-    t = note_rules.tidy(PATH_RE.sub("", re.sub(r"\S*/\S+", "", t)))
-    while DANGLING_RE.search(t) or re.search(r"\s\d+$", t):  # what the command left: "via", its argument
-        t = re.sub(r"\s+\d+$", "", DANGLING_RE.sub("", t)).strip()
+    u = note_rules.tidy(PATH_RE.sub("", re.sub(r"\S*/\S+", "", t)))
+    removed = u != t or note_rules.tidy(option) != t
+    t = u
+    while removed and (DANGLING_RE.search(t) or (not keep_number and re.search(r"\s\d+$", t))):
+        t = DANGLING_RE.sub("", t).strip()
+        if not keep_number:
+            t = re.sub(r"\s+\d+$", "", t)
     t = t.strip(" ,;:")
     if note_rules.holes(t):
         t = re.split(r",\s*", t, 1)[0]
@@ -281,11 +287,15 @@ def option_words(option: str) -> str:
 
 def choice_words(options: list[str]) -> list[str]:
     """The choices as words for the ask line and the buttons. If the plain words would make two
-    choices read the same ("Option 1", "Option 2" both "Option"), they are told apart by number —
-    never by the command or path the plain words left out."""
+    choices read the same, the agent's own number is kept ("Option 1", "Option 2"); only if they
+    still read the same are they numbered by position."""
+    def dup(ws):
+        low = [w.lower() for w in ws]
+        return [low.count(w) > 1 for w in low]
     words = [option_words(o) for o in options]
-    low = [w.lower() for w in words]
-    return [f"{w} {i + 1}" if low.count(w.lower()) > 1 else w for i, w in enumerate(words)]
+    kept = [option_words(o, True) for o in options]
+    words = [k if d else w for w, k, d in zip(words, kept, dup(words))]
+    return [f"{w} {i + 1}" if d else w for i, (w, d) in enumerate(zip(words, dup(words)))]
 
 
 def _and(words: list[str], conj: str = "and") -> str:
@@ -430,7 +440,7 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
         summary = (summary + " " + CMD_NOTE).strip()
     note = Note(st, head, summary, note_rules.sentence(asks) if asks else "", note_rules.merge_links(given, taken),
                 whole, options, sender, reshape=holed or not head or len(head) > HEADLINE_MAX)
-    if details is None and set(_norm(note.details)) <= set(_norm(" ".join([head, summary, asks]))):
+    if details is None and not (Counter(_norm(note.details)) - Counter(_norm(" ".join([head, summary, asks])))):
         note.details = ""  # the body already says all of it: no thread
     return note
 
@@ -534,12 +544,13 @@ def group_thread(note: Note, details: bool = True, named: bool = True) -> str:
     return "\n".join(parts)
 
 
-def scrub(note: Note, buttons: bool = True) -> Note:
+def scrub(note: Note, buttons: bool = True, body: str = "") -> Note:
     """The last resort when neither the rules nor a model gave a note that keeps the rule: each
     part that breaks it is dropped (the agent's words are whole in Details), and a headline that
     breaks it gives way to the first part that does not."""
     def ok(t):
         return bool(t) and not note_rules.violations(t) and len(t) <= HEADLINE_MAX * 2
+    before = (note.headline, note.summary, note.ask, list(note.options))
     keep = [x for x in (note.headline, note.summary, note.ask) if ok(x)]
     head = note.headline if ok(note.headline) else (keep.pop(0) if keep else _FALLBACK.get(note.status, "An update."))
     note.summary = note.summary if ok(note.summary) and note.summary != head else ""
@@ -549,6 +560,8 @@ def scrub(note: Note, buttons: bool = True) -> Note:
         note.summary, note.ask = "", ""
     if note_rules.violations(render(note, buttons)["text"]):  # the choices' words do: Details has them
         note.options, note.links = [], []
+    if body and (note.headline, note.summary, note.ask, note.options) != before and body.strip() not in (note.details or ""):
+        note.details = (note.details + "\n" if note.details else "") + body.strip()  # a dropped part is never lost
     return note
 
 
