@@ -70,7 +70,12 @@ class FakeClient:
     def conversations_info(self, channel): return {"channel": {"name": "growth", "user": {D: U, D2: U2}.get(channel)}}
     def chat_getPermalink(self, channel, message_ts): return {"permalink": f"https://slack/{channel}/{message_ts}"}
     def users_getPresence(self, user): return {"presence": "away"}
-    def users_list(self, **k): return {"members": [{"id": U, "name": "priya", "profile": {"display_name": "Priya"}, "real_name": "Priya"}], "response_metadata": {}}
+    def users_list(self, **k): return {"members": [{"id": U, "name": "priya", "profile": {"display_name": "Priya"}, "real_name": "Priya"},
+                                                   {"id": "UME", "name": "barada", "profile": {"display_name": "Barada"}, "real_name": "Barada"}], "response_metadata": {}}
+    def users_lookupByEmail(self, email):
+        self.email_lookups = getattr(self, "email_lookups", 0) + 1
+        if email == "priya@example.com": return {"user": {"id": U, "name": "priya"}}
+        raise RuntimeError("The request to the Slack API failed.\nThe server responded with: {'ok': False, 'error': 'users_not_found'}")
     def conversations_list(self, **k): return {"channels": [{"id": C, "name": "growth"}], "response_metadata": {}}
     def conversations_history(self, channel, **k):
         msgs = self.history.get(channel, [])
@@ -78,8 +83,10 @@ class FakeClient:
         if k.get("oldest"): msgs = [m for m in msgs if float(m["ts"]) > float(k["oldest"])]
         return {"messages": list(reversed(msgs))[: k.get("limit", 50)], "response_metadata": {}}
     def conversations_replies(self, channel, ts, **k): return {"messages": getattr(self, "replies", {}).get(ts, []), "response_metadata": {}}
-    def chat_postMessage(self, channel, text, thread_ts=None):
-        self.counter += 1; ts = f"{2000000000 + self.counter}.000000"; self.posted.append((channel, text, thread_ts, ts)); return {"ts": ts}
+    def chat_postMessage(self, channel, text, thread_ts=None, blocks=None):
+        self.counter += 1; ts = f"{2000000000 + self.counter}.000000"; self.posted.append((channel, text, thread_ts, ts))
+        if blocks: self.blocks = getattr(self, "blocks", {}); self.blocks[ts] = blocks
+        return {"ts": ts}
     def files_upload_v2(self, **k):
         if getattr(self, "upload_error", None):
             raise RuntimeError(self.upload_error)
@@ -88,7 +95,9 @@ class FakeClient:
         return {"files": [{"id": f"F{self.counter}", "name": f["filename"],
                            "shares": {"public": {k["channel"]: [{"ts": ts}]}}} for f in k["file_uploads"]]}
     def reactions_add(self, channel, timestamp, name): self.reactions.append((channel, timestamp, name)); return {}
-    def chat_update(self, channel, ts, text): self.updates.append((channel, ts, text)); return {}
+    def chat_update(self, channel, ts, text, blocks=None):
+        self.updates.append((channel, ts, text)); self.update_blocks = getattr(self, "update_blocks", {}); self.update_blocks[ts] = blocks
+        return {}
     def search_messages(self, query, **k):
         return {"messages": {"matches": [{"ts": "1699000000.000", "user": U, "text": "the series A deck v3 is final", "channel": {"id": D, "is_im": True}, "permalink": "https://slack/x"}], "paging": {"pages": 1}}}
 
@@ -133,6 +142,9 @@ resp = {"model": "jev-1", "answers": {"route": {"choice": "reply", "confidence":
 pol = triage.Policy(0.6, 4)
 t = pol.apply(triage.Triage("reply", 0.81, triage._score_1_to_n(triage._lookup(resp, "sensitivity"), 5), triage._score_1_to_n(triage._lookup(resp, "urgency"), 5), 0.72, 0.9, "t"))
 check("jev score normalised", abs(t.sensitivity - 1.4) < 1e-6 and t.route == "reply")
+check("jev is asked whether the owner's eyes are needed now, and the read is carried and shown",
+      "needs_attention" in triage.questions("me") and "one-time code" in triage.questions("me")["needs_attention"]["instructions"]
+      and "attn 0.85" in triage.Triage("reply", 0.9, 1, 1, 0, 0, "jev:t", needs_attention=0.85).summary())
 check("policy: sensitivity forces escalate", pol.apply(triage.Triage("reply", 0.9, 4.2, 1, 0, 0, "t")).route == "escalate")
 check("policy: low confidence reply→hold", pol.apply(triage.Triage("reply", 0.3, 2, 2, 0, 0, "t")).route == "hold")
 _unsure = pol.apply(triage.Triage("ignore", 0.3, 2, 2, 0, 0, "t"))
@@ -857,6 +869,16 @@ out = ctl("note", U, "prefers short answers"); check("note cli (offline id)", ou
 out = ctl("review-data", "--days", "1"); check("review-data cli", "Recent corrections" in out.stdout and "dossiers" in out.stdout)
 out = ctl("doctor"); check("doctor exits 1 with clear FAILs when unconfigured", out.returncode == 1 and "SLACK_USER_TOKEN" in out.stdout)
 
+# manifest.yaml and doctor agree on scopes: everything doctor requires is granted by the manifest,
+# and the two optional scopes doctor only warns about are there too.
+_man = (ROOT / "manifest.yaml").read_text()
+_user_block = _man.split("    user:\n", 1)[1]
+import re as _re0  # noqa: E402
+_man_scopes = set(_re0.findall(r"^      - (\S+)", _user_block, _re0.M))
+import doctor as _doctor  # noqa: E402
+check("manifest grants every scope doctor requires", _doctor.REQUIRED_SCOPES <= _man_scopes, sorted(_doctor.REQUIRED_SCOPES - _man_scopes))
+check("manifest grants the optional scopes doctor warns about", {"files:write", "users:read.email"} <= _man_scopes)
+
 # ------------------------------------------------- a run that never reached slackctl
 # The first dispatch after the plugin was installed came back in one second as "success" with no
 # tools and no decision, while the next one worked. That is the skill not running, not the writer
@@ -891,6 +913,12 @@ _lim_item = {"id": "LIM-1.000", "channel": D, "channel_type": "im", "sender": U,
 S.save_item(_lim_item); d.handle_with_claude(dict(_lim_item))
 _h = d.state.read().get("health") or {}
 check("a refused run marks the writer down with the model's own words", _h.get("ok") is False and "weekly limit" in _h.get("why", ""), str(_h))
+# The refused prompt sits in that transcript unanswered. Resumed, the writer treats it as still
+# open: on 27 Oct it caught up on four stale compose prompts in one run, recorded decisions no
+# process was waiting for, and reported all four delivered. A session the writer never answered
+# in is dropped, so the next run in that conversation starts from nothing.
+check("a refused run leaves no session to resume", D not in (d.state.read().get("sessions") or {}),
+      str((d.state.read().get("sessions") or {}).get(D)))
 check("…and the item says why it failed, not 'success'", "weekly limit" in (S.load_item("LIM-1.000").get("outcome") or {}).get("why", ""),
       str(S.load_item("LIM-1.000").get("outcome")))
 _said_down = [m for m in S.NOTIFIED if "cannot draft" in m] if hasattr(S, "NOTIFIED") else None
@@ -898,6 +926,9 @@ _lim.unlink(); os.environ.pop("FAKE_LIMIT", None)
 _ok_item = {**_lim_item, "id": "LIM-2.000", "ts": "3.000"}; S.save_item(_ok_item); d.handle_with_claude(dict(_ok_item))
 _h2 = d.state.read().get("health") or {}
 check("the next run that reaches the model clears it", _h2.get("ok") is True and not _h2.get("why"), str(_h2))
+check("…in a fresh session, not the one with the unanswered prompt",
+      S.load_item("LIM-2.000")["session"]["resumed"] is False and D in d.state.read()["sessions"])
+check("a conversation has a lock file every process can see", S.config.p("locks").is_dir() and any(S.config.p("locks").glob("*.lock")))
 
 # ------------------------------------------------------------------- pause
 # Pause lives in state.json, not .env, so a running daemon honours it without a restart.
@@ -958,6 +989,45 @@ def _agent_origin_never_auto_sends():
     return pol_ and pol_["effective"] == "draft" and "agent:scout" in pol_["reason"]
 
 check("an agent-requested message always waits for the owner", _agent_origin_never_auto_sends())
+
+# …unless the message is TO the owner. Their own DM has nobody else in it, so every gate above is
+# protecting an empty room; on 2026-10-24 they said "To DM me - you don't have to ask again." It is
+# delivered to the console as a message from the agent, not drafted as the owner talking to themselves.
+def _say_to_owner(text, **extra):
+    it = {"id": f"say-own{d.client.counter}", "channel": "DSELF", "channel_type": "im", "sender": "UME",
+          "sender_name": "Barada", "text": "[agentvm-mini wants to tell Barada]: P1 merged", "created": S.now_iso(),
+          "status": "queued", "reply_thread_ts": None, "ts": "1001.000", "outbound": True,
+          "origin": "agent:agentvm-mini", "context": "(outbound)", "triage": None, "intent": "P1 merged", **extra}
+    S.save_item(it)
+    pend, before, ups = dict(d.state.read()["pending"]), len(fc.posted), len(getattr(fc, "uploads", []))
+    out = S.execute_decision(d, it, {"action": "reply", "text": text}, d.ledger, d.followups, set(), state=d.state)
+    return S.load_item(it["id"]), out, fc.posted[before:], getattr(fc, "uploads", [])[ups:], pend
+
+_own, _own_out, _own_posts, _own_ups, _own_pend = _say_to_owner(f"P1 merged{S.BEAT}need a Google OAuth client from you")
+check("a message to the owner is delivered, not drafted", _own["policy"]["effective"] == "auto" and _own["outcome"]["status"] == "sent", _own_out)
+check("it lands in the console as one message, headed by what it needs, signed by the agent that asked",
+      len(_own_posts) == 1 and _own_posts[0][0] == d.console and _own_posts[0][1].startswith("❓ need a Google OAuth client from you")
+      and "_from agentvm-mini_" in _own_posts[0][1], _own_posts)
+check("with nothing to react to", "react" not in _own_posts[0][1])
+check("the two-beat marker became two lines, not two messages", S.BEAT not in _own_posts[0][1] and "• ✅ P1 merged" in _own_posts[0][1])
+check("nothing was left pending for a ✅", d.state.read()["pending"] == _own_pend)
+
+_own_file = Path(S.config.STATE_DIR) / "outbox" / "clip.mp4"; _own_file.parent.mkdir(parents=True, exist_ok=True); _own_file.write_bytes(b"mp4")
+_ownf, _ownf_out, _ownf_posts, _ownf_ups, _ = _say_to_owner("the onboarding clip", files=[{"path": str(_own_file), "name": "clip.mp4", "size": 3}])
+check("a file for the owner goes straight to them too — the human it needed is the one it reaches",
+      _ownf["outcome"]["status"] == "sent" and _ownf["outcome"].get("files") and len(_ownf_ups) == 1 and _ownf_ups[0]["channel"] == d.console, _ownf_out)
+check("…uploaded with the words, not posted beside them", _ownf_posts == [] and _ownf_ups[0]["initial_comment"].startswith("📨 the onboarding clip")
+      and "_from agentvm-mini_" in _ownf_ups[0]["initial_comment"], _ownf_ups)
+
+fc.upload_error = "missing_scope"
+_ownx, _ownx_out, _ownx_posts, _, _ownx_pend = _say_to_owner("the onboarding clip", files=[{"path": str(_own_file), "name": "clip.mp4", "size": 3}])
+fc.upload_error = None
+check("a delivery that fails falls back to a draft the owner can fix and ✅",
+      _ownx["outcome"]["status"] == "drafted" and _ownx["policy"]["effective"] == "draft"
+      and "could not deliver" in _ownx["policy"]["reason"] and "missing_scope" in _ownx["policy"]["reason"]
+      and len(d.state.read()["pending"]) == len(_ownx_pend) + 1, _ownx_out)
+check("the draft says why it is a draft", any("could not deliver it to you" in t for _c, t, _th, _ts in _ownx_posts))
+_own_file.unlink()
 
 # Routing must fail toward asking. Learned keywords alone put a Facebook-accounts report in
 # #engineering-team at 0.60 — above a 0.5 bar — so the bar is 0.70 and the owner's `For:` line
@@ -1086,6 +1156,35 @@ ans, _ = _console("too formal — keep it shorter with Sri")
 check("free text is kept as feedback for review", "noted" in ans.lower()
       and "shorter with Sri" in (S.config.p("console_feedback.jsonl").read_text()))
 
+# A reply in the thread of a note an agent sent through Solo is the owner answering that agent, not
+# feedback on how Solo writes — so it goes to the coordinator's inbox, and Solo answers in the
+# thread. Ported from the mini (31 Oct), where it had been patched live and a deploy would have
+# erased it.
+_coord_inbox = TMP / "coord" / "inbox.md"; _coord_inbox.parent.mkdir(parents=True, exist_ok=True)
+os.environ["AGENTVM_COORD_INBOX"] = str(_coord_inbox)
+def _console_ev(text, ts, thread_ts=None):
+    d.bot = FakeClient(); d.bot_dm = "DBOT"
+    ev = {"type": "message", "user": "UME", "channel": "DBOT", "channel_type": "im", "ts": ts, "text": text}
+    if thread_ts:
+        ev["thread_ts"] = thread_ts
+    d.on_event(ev)
+    return list(d.bot.posted)
+_tp = _console_ev("yes, go with the fallback lane", "1800000001.000100", thread_ts="1800000000.000100")
+check("a thread reply under an agent's note goes to the coordinator's inbox",
+      "go with the fallback lane" in _coord_inbox.read_text() and "1800000000.000100" in _coord_inbox.read_text())
+check("…and Solo answers in that thread", len(_tp) == 1 and _tp[0][2] == "1800000000.000100" and "passed to" in _tp[0][1], _tp)
+check("…not as voice feedback", "fallback lane" not in S.config.p("console_feedback.jsonl").read_text())
+_tp2 = _console_ev("yes, go with the fallback lane", "1800000001.000100", thread_ts="1800000000.000100")
+check("a message Slack delivers twice is answered once", _tp2 == [] and _coord_inbox.read_text().count("fallback lane") == 1)
+os.environ["AGENTVM_COORD_INBOX"] = str(TMP / "nowhere" / "inbox.md")
+_tp3 = _console_ev("shorter, please", "1800000002.000100", thread_ts="1800000000.000100")
+check("with no coordinator inbox on this machine a thread reply is kept as feedback, in the thread",
+      "shorter, please" in S.config.p("console_feedback.jsonl").read_text() and "noted" in _tp3[-1][1]
+      and _tp3[-1][2] == "1800000000.000100", _tp3)
+_tp4 = _console_ev("status", "1800000003.000100")
+check("a top-level console message is still answered flat", _tp4[-1][2] is None and "MODE=" in _tp4[-1][1])
+os.environ.pop("AGENTVM_COORD_INBOX")
+
 # "approve everything" has to include the reaction, or the one unapproved thing is the one that
 # goes wrong. ignore stays automatic because it sends nothing at all.
 check("MODE=draft makes even an ack wait",
@@ -1137,7 +1236,8 @@ check("the owner is told the agent only reads", "read-only" in _shown)
 # question asked in a DM gets answered in a room. `--re` carries the request's id both ways.
 def _say_args(intent, **kw):
     return SimpleNamespace(intent=intent, target=kw.get("to"), from_=kw.get("frm", "scout"),
-                           why=kw.get("why"), thread_ts=None, re_item=kw.get("re"), files=kw.get("files"))
+                           why=kw.get("why"), thread_ts=None, re_item=kw.get("re"), files=kw.get("files"),
+                           **{k: kw.get(k) for k in ("status", "headline", "points", "details", "options", "link", "group")})
 
 
 def _refusal(**kw):
@@ -1260,6 +1360,8 @@ check("a withheld report is never recorded as reported back",
       not any(r.get("outcome") == "reported" for r in _refused_rows))
 check("the owner is handed the text itself, not just told one exists",
       any("549576801980" in t for t in _console))
+check("and the console says these are the agent's words, not a draft in the owner's voice",
+      any("own words, not a draft" in t for t in _console))
 check("and is told plainly that nobody else received it",
       any("nothing went to anyone" in t for t in _console))
 
@@ -1283,6 +1385,25 @@ check("@here is left inert rather than made to blast",
       S.restore_mentions("@here please", _look) == "@here please")
 check("an already-formed mention is untouched",
       S.restore_mentions("already <@U0SRI> tagged", _look) == "already <@U0SRI> tagged")
+
+# A person the writer knows only by email — from Linear, GitHub or a CRM — is tagged as @their@email.
+# A bare email is still text: "mail me at owner@example.com" never pings owner.
+_names["sri@staffai.so"] = "U0SRI"
+check("@email is restored to a mention of that person",
+      S.restore_mentions("@sri@staffai.so can you look", _look) == "<@U0SRI> can you look")
+check("an @email nobody owns stays as written",
+      S.restore_mentions("@ghost@staffai.so?", _look) == "@ghost@staffai.so?")
+check("@email at the end of a sentence keeps its punctuation",
+      S.restore_mentions("cc @sri@staffai.so.", _look) == "cc <@U0SRI>.")
+_sl = S.Slack()
+check("Slack.mention_id resolves an email through users.lookupByEmail",
+      _sl.mention_id("priya@example.com") == U and _sl.mention_id("PRIYA@example.com") == U)
+check("an unknown email resolves to nothing, quietly", _sl.mention_id("nobody@example.com") is None)
+check("email lookups are cached per address", _sl.client.email_lookups == 2)
+check("resolve_users takes an email", _sl.resolve_users(["priya@example.com"]) == {U})
+check("say/about target can be an email",
+      recall.resolve_target(_sl, "priya@example.com")[:2] == ("people", U))
+check("…and a leading @ on it is fine too", recall.resolve_target(_sl, "@priya@example.com")[:2] == ("people", U))
 
 # The guard above only catches an option shipped undocumented. It would not have caught this one
 # once the skill mentioned it — "the writer can find it and still never uses it" is not a thing a
@@ -1428,7 +1549,228 @@ _said = S.approve_draft(d, _fi2, d.ledger, d.followups, d.state, _fts2)
 check("put back, a second ✅ sends it", len(fc.uploads) == 1 and _fts2 not in d.state.read()["pending"])
 check("a draft that carries a file is always the owner's to approve, whatever MODE says",
       S.load_item(_fi2["id"])["policy"]["effective"] == "draft")
+
+# A note addressed to the owner is the agent's words, not a brief for a draft: nobody else reads
+# it, so there is no voice to put it in and nothing to trim. Through the writer it came out as one
+# beat — on 31 Oct a coordinator's note lost the sysctl command the owner needed and had to be
+# sent again — and every compose the weekly limit refused (29 and 31 Oct) dropped one. So it never
+# touches Claude: the words go to the console as they were given.
+_long_note = ("Mini release still failing, one step further: vsock works, now bubblewrap in devc fails with "
+              "'setting up uid map: Permission denied'.\nNeeds on the agentvm VM: colima ssh -p agentvm -- sudo "
+              "sysctl kernel.apparmor_restrict_unprivileged_userns=0 (resets on VM reboot). The fallback lane "
+              "holds until you say so; the PR is #1739 and CI is green on it, twice.")
+_n_con2, _pend2 = len(_con.posted), dict(d.state.read()["pending"])
+os.environ["CLAUDE_BIN"] = "/nonexistent-claude"; S.CFG["claude_bin"] = "/nonexistent-claude"
+try:
+    S.cmd_say(_say_args(_long_note, to="@barada", frm="factory-pr1739"))
+finally:
+    os.environ["CLAUDE_BIN"] = str(FAKE_CLAUDE); S.CFG["claude_bin"] = str(FAKE_CLAUDE)
+_vn = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.json"), key=lambda q: q.stat().st_mtime)][-1]
+_vn_posts = [q[1] for q in _con.posted[_n_con2:]]
+check("a note to the owner is delivered without the writer", _vn["status"] == "done" and _vn["outcome"]["status"] == "sent"
+      and _vn["decision"].get("verbatim") is True, str(_vn.get("outcome")))
+check("…headed by what the owner has to do, the command intact", len(_vn_posts) == 2 and _vn_posts[0].startswith("❓ Needs on the agentvm VM: colima ssh")
+      and "kernel.apparmor_restrict_unprivileged_userns=0" in _vn_posts[0], _vn_posts)
+check("…and the agent's own words, whole, in the Details reply in its thread", _long_note in _vn_posts[1] and _vn_posts[1].startswith("🔎 *Details*")
+      and [q[2] for q in _con.posted[_n_con2:]][1] == [q[3] for q in _con.posted[_n_con2:]][0], _vn_posts)
+check("…signed by who sent it", "_from factory-pr1739 · details in the thread_" in _vn_posts[0])
+check("…with nothing left pending", d.state.read()["pending"] == _pend2)
+check("…and no gate pretending to apply", _vn["policy"]["effective"] == "auto" and not _vn["decision"].get("used_context"))
+# to anyone else the writer still runs: the words are a brief, and the owner's ✅ stands between
+_n_fc2 = len(fc.posted)
+S.cmd_say(_say_args("the mini release is green again, #1739 merged", to="@priya", frm="factory-pr1739"))
+_vp = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.json"), key=lambda q: q.stat().st_mtime)][-1]
+check("a note to anyone else is still written by the writer and drafted",
+      not _vp["decision"].get("verbatim") and _vp["policy"]["effective"] == "draft" and not [q for q in fc.posted[_n_fc2:] if q[0] == D], str(_vp.get("decision")))
+
+# ------------------------------------------------ notes to the owner: grouped, and asks with buttons
+def _exits(fn):
+    try:
+        fn()
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 1
+    return 0
+
+
+def _capture(fn):
+    import contextlib, io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        fn()
+    return buf.getvalue()
+
+
+# Owner, 2026-11-04: "messages are not well formatted here for readability". A release lane sends a
+# burst — three boxes in a minute — and each one badged. Inside five minutes, notes from the same
+# agent become one message that is edited as they arrive, each one's detail in its thread.
+_n_g = len(_con.posted); _u_g = len(_con.updates)
+S.cmd_say(_say_args("Helsinki shipped v0.552.0, all checks green", to="@barada", frm="release-lane"))
+S.cmd_say(_say_args("Hillsboro frozen at v0.537.0 until you lift it", to="@barada", frm="release-lane"))
+_g_posts = _con.posted[_n_g:]; _g_upd = _con.updates[_u_g:]
+check("the first note is a message of its own", _g_posts[0][1].startswith("✅ *Helsinki* shipped *v0.552.0*") and _g_posts[0][2] is None, _g_posts)
+check("the second, inside five minutes, joins it: one message, edited, not a second badge",
+      len([q for q in _g_posts if q[2] is None]) == 1 and len(_g_upd) == 1 and _g_upd[0][1] == _g_posts[0][3], (_g_posts, _g_upd))
+check("…which leads with the worst of the two and lists each",
+      _g_upd[0][2].startswith("⏸️ *2 updates* from release-lane") and "• ✅ *Helsinki* shipped" in _g_upd[0][2]
+      and "• ⏸️ *Hillsboro* frozen at *v0.537.0*" in _g_upd[0][2], _g_upd)
+check("…the first note, whole, goes in its thread once it is folded to one line",
+      _g_posts[1][2] == _g_posts[0][3] and _g_posts[1][1].startswith("✅ *Helsinki* shipped *v0.552.0*"), _g_posts)
+check("…and the new note in full goes in its thread", _g_posts[2][2] == _g_posts[0][3] and "Hillsboro" in _g_posts[2][1], _g_posts)
+S.cmd_say(_say_args("Helsinki shipped v0.553.0", to="@barada", frm="another-agent"))
+check("another agent's note is not folded into it", _con.posted[-1][2] is None and len(_con.updates) == _u_g + 1)
+_st = d.state.read(); _st["owner_group"]["at"] = time.time() - 400; S.STATE_FILE.write_text(json.dumps(_st))
+S.cmd_say(_say_args("Helsinki shipped v0.554.0", to="@barada", frm="another-agent"))
+check("after five minutes a note starts a new message", _con.posted[-1][2] is None and len(_con.updates) == _u_g + 1)
+
+# Until Interactivity is on in the Slack app a press only shows a warning icon, so buttons wait for
+# OWNER_BUTTONS=1 and the choices are named in words, with the answer page.
+_n_a0 = len(_con.posted)
+S.cmd_say(_say_args("Merge #1739?", to="@barada", frm="release-lane", options=["Yes", "No"], link="https://factory.example/ask/t_8"))
+check("without OWNER_BUTTONS the choices are named, with the answer page, and no buttons",
+      "👉 *Yes* · *No* — <https://factory.example/ask/t_8|answer here>" in _con.posted[_n_a0][1]
+      and not getattr(_con, "blocks", {}).get(_con.posted[_n_a0][3]), _con.posted[_n_a0])
+# With no buttons, the owner's typed reply in the ask's thread is the answer (review of PR: it used to
+# be filed as voice feedback, and `answer` stayed "unanswered" for ever).
+_ask0 = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.json"), key=lambda q: q.stat().st_mtime)][-1]
+os.environ["AGENTVM_COORD_INBOX"] = str(TMP / "nowhere" / "inbox.md")
+_bot0 = (d.bot, d.bot_dm)
+_ta = _console_ev("Yes", "1800000100.000100", thread_ts=_con.posted[_n_a0][3])
+d.bot, d.bot_dm = _bot0
+check("a typed reply under an ask is its answer", S.load_item(_ask0["id"]).get("answer", {}).get("choice") == "Yes"
+      and _ta and _ta[-1][2] == _con.posted[_n_a0][3] and "answer " + _ask0["id"] in _ta[-1][1], _ta)
+check("…and `answer` prints it", _capture(lambda: S.cmd_answer(SimpleNamespace(item=_ask0["id"], wait=0))).strip() == "Yes")
+check("…not kept as voice feedback", not any(json.loads(x).get("said") == "Yes" for x in
+      S.config.p("console_feedback.jsonl").read_text().splitlines() if x.strip()))
+os.environ.pop("AGENTVM_COORD_INBOX", None)
+os.environ["OWNER_BUTTONS"] = "1"
+# An ask comes with buttons, never "reply yes/no" — and the press is the answer.
+_n_a = len(_con.posted)
+S.cmd_say(_say_args("v0.553.0 is green on Helsinki. Ship it to Hillsboro now, or wait for the freeze to lift?", to="@barada",
+                    frm="release-lane", options=["Ship now", "Wait"], link="https://factory.example/ask/t_9"))
+_ask = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.json"), key=lambda q: q.stat().st_mtime)][-1]
+_ask_msg = _con.posted[_n_a]; _ask_blocks = getattr(_con, "blocks", {}).get(_ask_msg[3]) or []
+_btns = [e for b in _ask_blocks if b["type"] == "actions" for e in b["elements"]]
+check("an ask is its own message, headed ❓, never grouped", _ask_msg[2] is None and _ask_msg[1].startswith("❓ Ship it to Hillsboro now"), _ask_msg)
+check("…with a button per choice and one to the answer page",
+      [e["text"]["text"] for e in _btns] == ["Ship now", "Wait", "Open the answer page"] and _btns[2]["url"] == "https://factory.example/ask/t_9", _btns)
+check("…and no free-text 'reply yes/no' instruction", "reply" not in _ask_msg[1].lower())
+check("unanswered, `answer` says so and exits 1", _exits(lambda: S.cmd_answer(SimpleNamespace(item=_ask["id"], wait=0))) == 1)
+_coord = TMP / "coord" / "inbox.md"; _coord.parent.mkdir(parents=True, exist_ok=True); os.environ["AGENTVM_COORD_INBOX"] = str(_coord)
+_press = lambda who, val: {"type": "block_actions", "user": {"id": who}, "container": {"message_ts": _ask_msg[3], "channel_id": d.console},
+                           "actions": [{"action_id": "solo_answer_1", "value": val}]}
+d.on_button(_press("USOMEONE", "Ship now"))
+check("a press by anyone but the owner is not an answer", not S.load_item(_ask["id"]).get("answer"))
+_n_b = len(_con.posted); _u_b = len(_con.updates)
+d.on_button(_press("UME", "Wait"))
+check("the owner's press is kept on the note", S.load_item(_ask["id"]).get("answer", {}).get("choice") == "Wait")
+check("…passed to the coordinator, as a typed thread reply would be", _coord.exists() and _coord.read_text().strip().endswith(": Wait"))
+check("…the buttons give way to the choice", _con.updates[_u_b:] and _con.updates[_u_b][1] == _ask_msg[3] and "✔️ Wait" in _con.updates[_u_b][2]
+      and not any(b["type"] == "actions" for b in (_con.update_blocks.get(_ask_msg[3]) or []))
+      and any("Wait" in str(b) for b in (_con.update_blocks.get(_ask_msg[3]) or [])), _con.update_blocks.get(_ask_msg[3]))
+check("…and Solo says so in the thread", _con.posted[_n_b:] and _con.posted[_n_b][2] == _ask_msg[3] and "*Wait*" in _con.posted[_n_b][1])
+d.on_button(_press("UME", "Ship now"))
+check("a second press does not change the answer", S.load_item(_ask["id"])["answer"]["choice"] == "Wait")
+_ans_out = _capture(lambda: S.cmd_answer(SimpleNamespace(item=_ask["id"], wait=0)))
+check("`answer` prints the choice", _ans_out.strip() == "Wait", _ans_out)
+os.environ.pop("AGENTVM_COORD_INBOX", None); os.environ.pop("OWNER_BUTTONS", None)
+check("buttons are for the owner only: --option to anyone else is refused",
+      "buttons for the owner" in _refusal(to="@priya", options=["Yes", "No"]))
 S.Slack = _RealSlack
+
+# ------------------------------------------------ an urgent escalation reaches the desktop
+# Slack badges nothing for the owner's own drafts and email waits to be read. A time-sensitive ask
+# goes on screen through attention/attn.py, and comes off it the moment the owner ✅/❌s in Slack.
+_attn_log = TMP / "attn-calls.txt"
+_fake_attn = TMP / "fake-attn.py"
+_fake_attn.write_text(f"""import sys, json
+open({str(_attn_log)!r}, "a").write(" ".join(sys.argv[1:]) + "\\n")
+if sys.argv[1] == "ask": print(json.dumps({{"id": "ask-abcdef123456", "state": "open"}}))
+else: print("ask-abcdef123456 cancelled")
+""")
+_real_attn, _real_url = S.ATTN, S.CFG["attn_url"]
+S.ATTN, S.CFG["attn_url"] = _fake_attn, "http://127.0.0.1:1"
+def _esc_item(iid, text, urgency, triage_extra=None):
+    it = {"id": iid, "channel": D, "channel_type": "im", "sender": U, "sender_name": "Priya", "text": text, "ts": iid.split("-")[-1].replace("_", "."),
+          "created": S.now_iso(), "status": "queued", "reply_thread_ts": None, "context": "(none)",
+          "triage": {"route": "escalate", "sensitivity": 2.0, "urgency": urgency, "source": "jev:test", **(triage_extra or {})}}
+    S.save_item(it)
+    return iid
+_urg = _esc_item("ATTN-1.000", "need the OTP for the new seat right now", 4.6, {"needs_attention": 0.92})
+_urg_item = S.load_item(_urg)
+S.execute_decision(d, _urg_item, {"action": "escalate", "text": "Checking", "note": "asks for an OTP — yours"}, d.ledger, d.followups, set(), state=d.state)
+_urg_item = S.load_item(_urg)
+check("an escalation Jev reads as needing the owner now is put on their screen",
+      _urg_item["outcome"].get("attn") == "ask-abcdef123456" and "ask Needs you" in _attn_log.read_text() and "--priority p1" in _attn_log.read_text(),
+      _attn_log.read_text() if _attn_log.exists() else "no attn call")
+check("…with the writer's note as the body", "asks for an OTP" in _attn_log.read_text())
+S.approve_draft(d, _urg_item, d.ledger, d.followups, d.state, _urg_item["outcome"]["draft_ts"])
+check("✅ in Slack takes it off the screen", "cancel ask-abcdef123456" in _attn_log.read_text(), _attn_log.read_text())
+_calm = _esc_item("ATTN-2.000", "pls look at the numbers today, blocked on the report", 4.8, {"needs_attention": 0.2})
+_calm_item = S.load_item(_calm)
+_n_attn = _attn_log.read_text().count("\n")
+S.execute_decision(d, _calm_item, {"action": "escalate", "text": "Checking", "note": "x"}, d.ledger, d.followups, set(), state=d.state)
+check("urgent by the number but not by Jev's read stays in Slack", _attn_log.read_text().count("\n") == _n_attn and not S.load_item(_calm).get("outcome", {}).get("attn"))
+_old = _esc_item("ATTN-4.000", "triaged before the question existed", 4.6, {"source": "claude:haiku"})
+S.execute_decision(d, S.load_item(_old), {"action": "escalate", "text": "Checking", "note": "x"}, d.ledger, d.followups, set(), state=d.state)
+check("without Jev's read, the urgency number stands in", S.load_item(_old)["outcome"].get("attn") == "ask-abcdef123456")
+# The door agents use: Jev gates it the same way. A p2 banner interrupts nobody and is not gated.
+_real_of, _real_execv, _execd = S.attention_of, S.os.execv, []
+S.os.execv = lambda exe, argv: (_execd.append(argv), (_ for _ in ()).throw(SystemExit(0)))[1]
+def _door(score, *rest):
+    S.attention_of = lambda text: score
+    try:
+        S.cmd_attn(SimpleNamespace(title="Need the OTP", rest=list(rest)))
+    except SystemExit as e:
+        return str(e)
+    return ""
+_wait = _door(0.2, "--priority", "p0", "--body", "a report, really")
+check("an agent's p0 that Jev reads as able to wait is refused with the score", "can wait (0.20" in _wait and not _execd, _wait)
+_none = _door(None, "--priority", "p1")
+check("unscored stays off the screen", "could not score" in _none and not _execd, _none)
+_go = _door(0.9, "--priority", "p0", "--reply", "text")
+check("one Jev reads as needing the owner now goes through", _go == "0" and _execd and _execd[-1][2:4] == ["ask", "Need the OTP"], f"{_go} {_execd}")
+_banner = _door(0.0, "--priority", "p2")
+check("a p2 banner is not gated", _banner == "0" and len(_execd) == 2)
+S.attention_of, S.os.execv = _real_of, _real_execv
+S.ATTN, S.CFG["attn_url"] = _real_attn, _real_url
+_calm2 = _esc_item("ATTN-3.000", "urgent: code?", 5.0, {"needs_attention": 0.95})
+_c2 = S.load_item(_calm2)
+S.execute_decision(d, _c2, {"action": "escalate", "text": "Checking", "note": "x"}, d.ledger, d.followups, set(), state=d.state)
+check("no desktop configured → nothing attempted, nothing broken", not S.load_item(_calm2)["outcome"].get("attn") and S.load_item(_calm2)["outcome"]["status"] == "escalated_draft")
+
+# ------------------------------------------------ a say the writer could not compose
+# Four release notes went missing on 27 Oct: the account `say` runs under was out of quota, every
+# compose came back "You've hit your weekly limit", and each one ended in an exit code only the
+# coordinator saw. The owner found out by noticing the silence. The words still reach the console,
+# the item says it failed, and a decision written for it later — by a resumed session catching up
+# on the stale prompt — is refused rather than recorded.
+S.Slack = lambda: d
+_lim = TMP / "limit"; _lim.write_text("x"); os.environ["FAKE_LIMIT"] = str(_lim)
+_n_con, _n_fc = len(_con.posted), len(fc.posted)
+try:
+    _lim_err = _refusal(intent="v0.47.0 (ebd0a301) is live on the box; call_e2e smoke passed", to="@priya", frm="coordinator")
+finally:
+    _lim.unlink(); os.environ.pop("FAKE_LIMIT", None); S.Slack = _RealSlack
+_lim_say = [S.load_item(pth.stem) for pth in sorted(S.config.INBOX_DIR.glob("say-*.json"), key=lambda q: q.stat().st_mtime)][-1]
+check("the agent is told the writer's own reason", "weekly limit" in _lim_err and "nothing was sent" in _lim_err, _lim_err)
+check("the item records the failure, not a queue entry nobody will drain",
+      _lim_say["status"] == "failed" and "weekly limit" in _lim_say["outcome"]["why"], str(_lim_say.get("outcome")))
+_lim_posts = [q[1] for q in _con.posted[_n_con:]]
+check("the owner gets the agent's own words in the console", any("ebd0a301" in t and "could not write" in t for t in _lim_posts), str(_lim_posts)[:300])
+check("and is told nobody else received anything", any("nothing went to anyone" in t for t in _lim_posts))
+check("…and that the quoted text is the agent's words, not a draft", any("own words, not a draft" in t for t in _lim_posts))
+check("nothing reached the recipient", not [q for q in fc.posted[_n_fc:] if q[0] == D])
+os.environ["AUTOREPLY_DISPATCH"] = "1"
+try:
+    S.cmd_act(SimpleNamespace(item=_lim_say["id"], action="reply", text="live on the box", text_file=None, sources=None,
+                              note=None, urgency=None, emoji=None, thread=False, task=None, role=None))
+    _stale_act = ""
+except SystemExit as e:
+    _stale_act = str(e)
+finally:
+    os.environ.pop("AUTOREPLY_DISPATCH", None)
+check("a decision for an item that already failed is refused, not recorded",
+      "nobody is waiting" in _stale_act and not S.load_item(_lim_say["id"]).get("decision"), _stale_act)
 
 # Same guard on the other side of the interface. `say` is read by a coding agent following
 # skills/solo/SKILL.md, and an option that exists only in `--help` is an option no agent will ever
@@ -2142,6 +2484,77 @@ _line = _secrets(SOLO_INFISICAL="off")
 check("SOLO_INFISICAL=off keeps a machine on .env", "SOLO_INFISICAL=off" in _line and os.environ["SLACK_BOT_TOKEN"] == "xoxb-from-dotenv", _line)
 for _k in (*_C.SECRET_KEYS, _C.LOADED_MARK, "SOLO_INFISICAL", "INFISICAL_NODE_ENV", "INFISICAL_MINT_TOKEN", "INFISICAL_BIN"):
     os.environ.pop(_k, None)
+
+# ------------------------------------------------------------ SR investigations
+# `hand_over` waits for the writer to propose a `--task`, and the writer proposes only when triage
+# scores the ask as unanswerable. On 3 Nov Sri's three-point follow-up on SR-100 drew a bare
+# "Will do" and no agent. An SR for the owner is now handed over on arrival, one dispatch per
+# message, and the report comes back into the thread it was asked in.
+def _sr_stub():
+    sent = []
+    saved = (S.dispatch_task, S.Daemon.notify)
+    S.dispatch_task = lambda it, who, where: (sent.append(it["id"]), _sr_briefs.__setitem__(it["id"], it["decision"]["task"]),
+                                              S.record_delegation(item=it["id"], peer="p", outcome="dispatched",
+                                                                  conversation=S.session_key(it)), "handed to p: …")[3]
+    S.Daemon.notify = lambda self, t: None
+    return sent, saved
+
+
+def _sr_item(id_, channel, ctype, ts, text, thread_ts=None, mentioned=True):
+    return {"id": id_, "created": S.now_iso(), "status": "queued", "simulated": False,
+            "channel": channel, "channel_type": ctype, "channel_name": "eng" if ctype == "channel" else None,
+            "ts": ts, "thread_ts": thread_ts, "reply_thread_ts": thread_ts or (ts if ctype == "channel" else None),
+            "sender": U, "sender_name": "Priya", "sender_handle": "priya", "text": text,
+            "permalink": "https://slack/x", "context": "", "mentioned": mentioned, "answers_you": False, "triage": None}
+
+
+_sr_briefs: dict = {}
+_old_cfg = {k: S.CFG[k] for k in ("delegate_mode", "delegate_peer", "sr_investigate")}
+S.CFG.update(delegate_mode="auto", delegate_peer="p", sr_investigate=True)
+fc.replies = getattr(fc, "replies", {})
+fc.replies["1700000300.000"] = [
+    {"user": U, "ts": "1700000300.000", "text": "*SR-70* <@UME> reset-identity leaves the user with no_instance"},
+    {"user": U, "ts": "1700000301.000", "text": "1. the detail Sri posts a minute later"}]
+_sent, _saved = _sr_stub()
+try:
+    _fu = _sr_item(f"{E}-1700000310_000", E, "channel", "1700000310.000", "can you check item 2", thread_ts="1700000300.000")
+    check("a follow-up under a filed SR that @-mentions the owner is handed over on arrival",
+          d.sr_follow_up(_fu) is True and _sent == [_fu["id"]])
+    check("…once per message", d.sr_follow_up(_fu) is False and len(_sent) == 1)
+    check("…and the saved item sends the report back into that thread",
+          S.report_target(S.load_item(_fu["id"]))["reply_thread_ts"] == "1700000300.000")
+    check("…with the standing brief and the thread in it",
+          "find the cause" in _sr_briefs[_fu["id"]].lower() and "detail Sri posts" in _sr_briefs[_fu["id"]])
+    check("…and no decision on the saved item, so the writer's run and its retry guard are untouched",
+          "decision" not in S.load_item(_fu["id"]))
+    check("…and open_dispatch sees it, so the writer's own proposal does not ask the thread twice",
+          S.open_dispatch(_fu, 6) is not None)
+    check("a thread that is not a filed SR is left to the writer",
+          d.sr_follow_up(_sr_item(f"{E}-1700000320_000", E, "channel", "1700000320.000", "x", thread_ts="1700000999.000")) is False)
+    check("a follow-up that does not name the owner is left to the writer",
+          d.sr_follow_up(_sr_item(f"{E}-1700000330_000", E, "channel", "1700000330.000", "fyi", thread_ts="1700000300.000", mentioned=False)) is False)
+    _dm = _sr_item(f"{D}-1700000340_000", D, "im", "1700000340.000", "re SR-100: the summaries look wrong")
+    check("an SR-numbered DM is handed over too, and answers flat in the DM",
+          d.sr_follow_up(_dm) is True and _dm["id"] in _sent and S.report_target(S.load_item(_dm["id"]))["reply_thread_ts"] is None)
+    check("a plain DM is not", d.sr_follow_up(_sr_item(f"{D}-1700000350_000", D, "im", "1700000350.000", "lunch?")) is False)
+    d.sr_filed(E, "1700000300.000", U, "Priya")
+    _filed_id = f"{E}-1700000300_000"
+    check("the SR itself is handed over after the settle, with the thread's detail in the brief",
+          _filed_id in _sent and "detail Sri posts" in _sr_briefs[_filed_id])
+    S.CFG["delegate_mode"] = "shadow"
+    check("in shadow nothing is handed over by itself",
+          d.sr_follow_up(_sr_item(f"{E}-1700000360_000", E, "channel", "1700000360.000", "x", thread_ts="1700000300.000")) is False)
+    S.CFG.update(delegate_mode="auto", sr_investigate=False)
+    check("SR_INVESTIGATE=0 switches it off",
+          d.sr_follow_up(_sr_item(f"{E}-1700000370_000", E, "channel", "1700000370.000", "x", thread_ts="1700000300.000")) is False)
+finally:
+    S.dispatch_task, S.Daemon.notify = _saved
+    S.CFG.update(_old_cfg)
+
+# The golden examples of how a note to the owner reads run here too, so a deploy (which runs this
+# file) cannot ship a formatter that breaks them.
+_gold = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "test_owner_note.py")], capture_output=True, text=True)
+check("the owner-note golden examples pass", _gold.returncode == 0, (_gold.stdout + _gold.stderr)[-800:])
 
 # ----------------------------------------------------------- staff intake (staff_intake.py)
 # Fixture messages for each class, read by a fake reader; a fake factory records what was queued.

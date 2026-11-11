@@ -222,14 +222,22 @@ uploads it with the message in one call (the user token needs the `files:write` 
 `manifest.yaml` grants; `doctor` warns when it is missing). `solo say` copies a local file to the
 node first. The file has to stay put until the owner has approved.
 
+`@their@email` in any text tags the Slack account that email belongs to — for people an agent
+knows only from Linear, GitHub or a CRM. A bare email stays text. Needs the `users:read.email`
+user scope (in `manifest.yaml`; `doctor` warns when the installed app lacks it).
+
 The agent supplies the **intent**, never finished prose — Solo reads the recipient's dossier and the
 voice guide and writes it, then `compose` (SKILL.md) puts it through the same rules as any reply.
 
 Two properties that make this safe to hand to an autonomous agent:
 
-- **It can never auto-send.** The trust ledger graduates routes a *person* earned by being replied
-  to well; an agent has no such history and cannot accrue one, so an agent-requested message always
-  waits for your ✅ — even for a sender who has otherwise earned auto.
+- **It can never auto-send to anyone but you.** The trust ledger graduates routes a *person* earned
+  by being replied to well; an agent has no such history and cannot accrue one, so an agent-requested
+  message waits for your ✅ — even for a sender who has otherwise earned auto. A message addressed to
+  *you* (`--to @you`) is the one exception: it reaches nobody else, so it is delivered to your console
+  as a message from the agent, in the agent's own words and whole — it never goes through the
+  writer, so nothing is rewritten, trimmed, or lost to a writer that is out of quota. Reply in its
+  thread and your words go to the coordinator's inbox (`AGENTVM_COORD_INBOX`) when there is one.
 - **The boundaries do not move.** Credentials, dates, money, people, anything outside this
   workspace's work still escalate. An agent asking does not make a thing allowed; the limits are
   about what reaches the recipient, not who requested it.

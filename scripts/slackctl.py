@@ -19,6 +19,7 @@ All state lives in ~/.slack-autoreply (AUTOREPLY_HOME).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import html
 import json
@@ -41,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import config  # noqa: E402
 import linear  # noqa: E402
+import owner_note  # noqa: E402
 import recall  # noqa: E402
 import staff_intake  # noqa: E402
 import voice  # noqa: E402
@@ -80,7 +82,10 @@ def in_quiet_hours(spec: str, now: datetime | None = None) -> bool:
 # (@sri.k), so link_names would not have caught it either. This is the inverse of that rule.
 # The lookbehind keeps us out of emails (owner@example.com) and URLs (x.com/@sri); an apostrophe is
 # allowed inside the name so O'Brien resolves, and a trailing possessive is handed back unchanged.
-MENTION_RE = re.compile(r"(?<![A-Za-z0-9._%+\-/:])@([A-Za-z][A-Za-z0-9._'\u2019-]*[A-Za-z0-9]|[A-Za-z])")
+# "@sri@staffai.so" — a leading @ on an email — is a mention of the person that email belongs to
+# (users.lookupByEmail, scope users:read.email); a bare email stays text, as it should.
+MENTION_RE = re.compile(r"(?<![A-Za-z0-9._%+\-/:])@([A-Za-z][A-Za-z0-9._'\u2019-]*[A-Za-z0-9](?:@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})?|[A-Za-z])")
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-']+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
 MENTION_KEEP = {"here", "channel", "everyone"}   # leave these inert rather than make Solo able to blast
 
 
@@ -131,6 +136,10 @@ def slack_md(text: str, name_of) -> str:
 
 def quote(text: str) -> str:
     return "\n".join("> " + line for line in (text or "").splitlines())
+
+
+def looks_like_email(s: str) -> bool:
+    return bool(EMAIL_RE.fullmatch((s or "").strip()))
 
 
 def looks_like_user_id(s: str) -> bool:
@@ -246,6 +255,24 @@ words, and it guesses wrong. That drafts in {owner}'s voice and waits for their 
 the only way it reaches anyone. If you cannot answer it, say that instead of guessing."""
 
 
+# The standing brief for an SR addressed to the owner. The writer's `--task` is a question it
+# could not answer; this is the whole ask, handed over on arrival. It is still read-only — a fix
+# is a PR someone opens afterwards, and the report says where it would live.
+SR_TASK = """An SR (service request) addressed to {owner} from {who} in {where}. Find the CAUSE and
+answer it, the way {owner} would in that thread: one numbered point per point they raised, facts
+first, no promises of dates.
+
+For each point: what is actually happening and why (name the file, function, key, plan step or
+query behind it), what it means for them, and either the fix and where it lives or what you could
+not reproduce and what you checked. Measure where you can — prod read-only DB counts, Langfuse
+traces, run logs, the live template — and say when each fact is from. Leave internal ticket
+numbers, trace ids and seller contact details out of the answer and put them in --why.
+
+The SR thread so far, oldest first:
+{thread}
+{permalink}"""
+
+
 def record_delegation(**row) -> None:
     row["at"] = now_iso()
     row.setdefault("conversation", "")
@@ -264,8 +291,8 @@ def withhold_report(slack: "Slack", intent: str, frm: str, why: str, re_item: st
     where drafts already wait for a ✅.
     """
     slack.console_post(f"🤐 *A report from `{frm}` was not placed* — {why}\n"
-                       f"_nothing went to anyone. It is here for you to place, rewrite or drop._\n"
-                       f"{quote(intent[:1200])}")
+                       f"_nothing went to anyone. Below are {frm}'s own words, not a draft in your voice: "
+                       f"place it, rewrite it or drop it._\n{quote(intent[:1200])}")
     if re_item:
         record_delegation(item=re_item, role=frm, outcome="report_refused",
                           report=intent[:200], error=why[:200])
@@ -762,6 +789,10 @@ class Slack:
             e = e.lstrip("@")
             if looks_like_user_id(e):
                 ids.add(e)
+            elif looks_like_email(e):
+                uid = self.user_by_email(e)
+                if uid:
+                    ids.add(uid)
             else:
                 handles.add(e.lower())
         if handles:
@@ -849,8 +880,27 @@ class Slack:
                 return m
         return None
 
+    def user_by_email(self, email: str) -> str | None:
+        """The person a workspace email belongs to, or None. Needs the users:read.email user scope
+        (manifest.yaml has it; `doctor` warns when the installed app does not)."""
+        key = email.strip().lower()
+        cache = self.__dict__.setdefault("_emails", {})
+        if key not in cache:
+            try:
+                cache[key] = self.client.users_lookupByEmail(email=key)["user"]["id"]
+            except Exception as e:
+                why = error_text(e)
+                if why == "missing_scope":
+                    log.warning("users.lookupByEmail needs the users:read.email scope — reinstall the app (doctor says so)")
+                elif why != "users_not_found":
+                    log.warning("users.lookupByEmail %s: %s", key, why)
+                cache[key] = None
+        return cache[key]
+
     def mention_id(self, name: str) -> str | None:
-        """Display name, real name, handle or an unambiguous first name -> user id."""
+        """Display name, real name, handle, an unambiguous first name, or an email -> user id."""
+        if looks_like_email(name):
+            return self.user_by_email(name)
         if self._mentions is None:
             m, seen_first = {}, {}
             cursor = None
@@ -948,25 +998,32 @@ class Slack:
     def console(self) -> str:
         return self.bot_dm or self.self_dm
 
-    def console_post(self, text: str) -> str:
+    def console_post(self, text: str, *, blocks: list | None = None, thread_ts: str | None = None) -> str:
         """Post to the console, falling back to the self-DM if the bot is gone.
 
         A revoked or rotated bot token must cost you the notification, never the draft — so a
         failed bot post lands in the self-DM instead. Reactions are accepted in either
-        conversation precisely so a fallen-back draft can still be approved.
+        conversation precisely so a fallen-back draft can still be approved. `blocks` carries
+        buttons; `text` is still sent, as the notification and the fallback.
         """
+        extra = {k: v for k, v in (("blocks", blocks), ("thread_ts", thread_ts)) if v}
         if self.bot and self.bot_dm:
             try:
-                return self.bot.chat_postMessage(channel=self.bot_dm, text=text)["ts"]
+                return self.bot.chat_postMessage(channel=self.bot_dm, text=text, **extra)["ts"]
             except Exception as e:  # noqa: BLE001
                 log.warning("bot post failed (%s) — falling back to your self-DM, which will not notify", e)
-        return self.post(self.self_dm, text, split=False)
+        if blocks:
+            return self.client.chat_postMessage(channel=self.self_dm, text=restore_mentions(text, self.mention_id), **extra)["ts"]
+        return self.post(self.self_dm, text, thread_ts, split=False)
 
-    def console_update(self, ts: str, text: str) -> None:
+    def console_update(self, ts: str, text: str, *, blocks: list | None = None) -> None:
         """Edit a console message. A message posted by the bot can only be edited by the bot."""
+        extra = {"blocks": blocks} if blocks is not None else {}
         try:
             if self.bot and self.bot_dm:
-                self.bot.chat_update(channel=self.bot_dm, ts=ts, text=text)
+                self.bot.chat_update(channel=self.bot_dm, ts=ts, text=text, **extra)
+            elif extra:
+                self.client.chat_update(channel=self.self_dm, ts=ts, text=text, **extra)
             else:
                 self.update(self.self_dm, ts, text)
         except Exception as e:  # noqa: BLE001 - the outcome is already recorded; the edit is cosmetic
@@ -982,6 +1039,66 @@ class Slack:
                            capture_output=True, check=False)
         except Exception as e:  # noqa: BLE001 - a failed ping must never lose the draft
             log.warning("NOTIFY_CMD failed (%s) — the draft is still in your self-DM", e)
+
+
+# ------------------------------------------------------------------ the desktop
+
+ATTN = Path(__file__).resolve().parent.parent / "attention" / "attn.py"
+
+
+def attention_ask(title: str, body: str, priority: str, deadline: str, frm: str = "solo") -> str | None:
+    """Put something on the owner's screen, if a desktop is configured. Returns the ask id.
+
+    Slack is where the draft waits; this is what makes the owner look. It never blocks the
+    caller and never fails the thing it is announcing — the console post already happened.
+    """
+    if not CFG["attn_url"]:
+        return None
+    cmd = [sys.executable, str(ATTN), "ask", title, "--body", body, "--priority", priority,
+           "--deadline", deadline, "--from", frm]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=20, check=False)
+        if p.returncode == 0 and p.stdout.strip():
+            return json.loads(p.stdout.strip().splitlines()[-1]).get("id")
+        log.warning("attn ask failed (rc %s): %s", p.returncode, (p.stderr or p.stdout).strip()[-200:])
+    except Exception as e:  # noqa: BLE001 - the draft is already in the console
+        log.warning("attn ask failed: %s", e)
+    return None
+
+
+def attention_worthy(t: dict) -> bool:
+    """Jev's call, not the urgency number: does this need the owner's eyes now?
+
+    Urgency says how soon an answer is due; a message can be urgent and still wait to be read.
+    `needs_attention` is the question that asks about the owner's eyes — a code, a live call,
+    someone blocked until they decide. Only when Jev did not triage the message does urgency
+    stand in.
+    """
+    if t.get("needs_attention") is not None and str(t.get("source") or "").startswith("jev"):
+        return float(t["needs_attention"]) >= CFG["attn_needs"]
+    return float(t.get("urgency") or 0) >= CFG["attn_urgency"]
+
+
+def attention_of(text: str) -> float | None:
+    """Jev's read of whether something an agent wants on the owner's screen needs their eyes now.
+    None if it cannot score — and unscored never reaches the screen."""
+    try:
+        t = Triager(os.getenv("ME_NAME") or "the owner", Policy(), None, "").run(
+            {"latest_message": text, "recent_conversation": "(an agent wants this on the owner's screen)"})
+        return t.needs_attention if t.source.startswith("jev") else None
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not score attention (%s)", e)
+        return None
+
+
+def attention_cancel(ask_id: str | None) -> None:
+    """The owner acted in Slack (or the draft expired): take it off their screen."""
+    if not ask_id or not CFG["attn_url"]:
+        return
+    try:
+        subprocess.run([sys.executable, str(ATTN), "cancel", ask_id], capture_output=True, text=True, timeout=20, check=False)
+    except Exception as e:  # noqa: BLE001
+        log.warning("attn cancel %s failed: %s", ask_id, e)
 
 
 # ------------------------------------------------------------------ core
@@ -1154,6 +1271,90 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
     return "\n".join(out)
 
 
+def error_text(e: Exception) -> str:
+    """The useful part of a Slack error. SlackApiError puts `"error": "missing_scope"` on its second line."""
+    why = (getattr(getattr(e, "response", None), "data", None) or {}).get("error") if hasattr(e, "response") else None
+    return why or " ".join(str(e).split())[:200]
+
+
+def owner_buttons() -> bool:
+    """Buttons on an ask need Interactivity on in the Slack app (manifest: settings.interactivity).
+    Until the owner has switched it on and set OWNER_BUTTONS=1, the choices are named in words."""
+    return config.env("OWNER_BUTTONS").lower() in ("1", "on", "yes", "true")
+
+
+def deliver_to_owner(slack: Slack, item: dict, text: str) -> tuple[str, list[str]]:
+    """Hand an agent's message to the owner — posted in the console as delivered, not as a draft.
+
+    The console rather than the self-DM, for the reason the console exists: a message the owner
+    posts to themselves never badges, the bot's does, and NOTIFY_CMD pings. It reads as a message
+    from the agent, via Solo — not as the owner talking to themselves.
+
+    Shaped by `owner_note` (owner, 2026-11-04: "use icons, emojis and language that is more human
+    readable"): a headline with a status icon, at most three plain bullets, and the agent's words,
+    whole, in a "Details" reply in the thread — so the shape never costs the owner a command they
+    needed (31 Oct). A choice comes with buttons. Notes from the same agent (or `--group`) inside
+    five minutes become one message, edited as they arrive, each one's detail in its thread.
+    """
+    sender = item.get("origin", "agent").removeprefix("agent:")
+    body = restore_mentions(text, slack.mention_id).replace(BEAT, "\n")
+    spec = item.get("note") or {}
+    note = owner_note.from_text(body, sender, status=spec.get("status"), headline=spec.get("headline"),
+                                points=spec.get("points"), details=spec.get("details"),
+                                options=spec.get("options"), link=spec.get("link") or "")
+    r = owner_note.render(note, buttons=owner_buttons())
+    item["note_rendered"] = owner_note.to_dict(note)
+    if item.get("files"):
+        ts, file_ids = slack.post_files(slack.console, r["text"], item["files"], None)
+        slack._ping(r["text"])  # noqa: SLF001 - same module; post_files does not ping, notify does
+        if r["details"] and ts:
+            slack.console_post(r["details"], thread_ts=ts)
+        return ts, file_ids
+    if note.options:
+        # An ask stands alone: its buttons are the point, and a group would bury them.
+        ts = slack.console_post(r["text"], blocks=r["blocks"])
+        slack._ping(r["text"])  # noqa: SLF001
+        def remember(d):
+            asks = d.setdefault("asks", {})
+            asks[ts] = {"item": item["id"], "at": now_iso()}
+            for old in sorted(asks, key=lambda k: asks[k].get("at", ""))[:-200]:
+                asks.pop(old, None)
+        State().update(remember)
+    else:
+        key = item.get("group") or sender
+        now = time.time()
+
+        def claim(d):
+            g = d.get("owner_group") or {}
+            if g.get("key") == key and now - float(g.get("at") or 0) < owner_note.GROUP_WINDOW_S and g.get("ts"):
+                g["notes"] = (g.get("notes") or []) + [owner_note.to_dict(note)]
+                d["owner_group"] = g
+                return dict(g)
+            return None
+        group = State().update(claim)
+        if group:
+            ts = group["ts"]
+            notes = [owner_note.from_dict(n) for n in group["notes"]]
+            slack.console_update(ts, owner_note.render_group(notes, sender))
+            if len(notes) == 2:
+                # The first note's bullets just left the message for its one-line entry: put it,
+                # whole, in the thread before the second, so "each one's detail is in the thread" holds.
+                slack.console_post(owner_note.render(notes[0], buttons=False)["text"], thread_ts=ts)
+            # the new note in full, under the message that now lists it
+            slack.console_post("\n".join(x for x in (r["text"], r["details"]) if x), thread_ts=ts)
+            slack._ping(r["text"])  # noqa: SLF001 - an edit does not notify
+            return ts, []
+        ts = slack.notify(r["text"])
+        State().update(lambda d: d.__setitem__("owner_group", {"key": key, "ts": ts, "at": now,
+                                                                "notes": [owner_note.to_dict(note)]}))
+    if r["details"] and ts:
+        try:
+            slack.console_post(r["details"], thread_ts=ts)
+        except Exception as e:  # noqa: BLE001 - the headline arrived; the detail is a courtesy
+            log.warning("could not post the details for %s: %s", item["id"], e)
+    return ts, []
+
+
 def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, followups: Followups,
                      share_trusted: set[str], observed_tools: list[str] | None = None, state: State | None = None) -> str:
     """Carry out Claude's decision under policy. Returns a one-line summary."""
@@ -1233,6 +1434,14 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
         else:
             slack.notify(note)
             item["outcome"] = {"status": "escalated"}
+        if t and attention_worthy(t):
+            # Jev says this needs the owner's eyes now, not just an answer today. The sender of
+            # the message did not get a say, and neither did the writer.
+            ask_id = attention_ask(f"Needs you — {who} in {describe_where(item)}",
+                                   (decision.get("note") or item["text"][:300]) + "\n\n✅ / ❌ the draft in your Solo DM",
+                                   "p1", CFG["attn_deadline"])
+            if ask_id:
+                item["outcome"]["attn"] = ask_id
         item["policy"] = {"effective": "draft", "reason": "escalate"}
         save_item(item)
         audit(item=item["id"], counterpart=who, status="escalated", reply=text, trigger=item["text"][:120])
@@ -1247,7 +1456,8 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
     gate = used_context and not (sender in share_trusted or ledger.share_ok(sender))
     if item.get("origin", "").startswith("agent:"):
         # The ledger graduates routes a PERSON earned by replying well to them. An agent asking
-        # Solo to speak has no such history and cannot accrue one, so it never auto-sends.
+        # Solo to speak has no such history and cannot accrue one, so it never auto-sends — to
+        # anyone but the owner (next block).
         mode, why, gate = "draft", f"requested by {item['origin']} — always yours to approve", False
     if item.get("customer"):
         # A word to a customer is the owner's to send. No ledger history earns an exception.
@@ -1256,14 +1466,39 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
         # Belt and braces: only `say` can attach a file today, and `say` is always agent-origin.
         # If that ever changes, a file still never leaves without a human looking at its name.
         mode, why, gate = "draft", f"carries a file — always yours to approve", False
+    to_owner = slack is not None and channel in (slack.self_dm, slack.bot_dm)
+    if to_owner:
+        # Every gate above protects somebody else's inbox. The owner's own DM has nobody else in
+        # it, so a draft there asked the owner to approve a message to themselves — and they said
+        # so, on 2026-10-24: "To DM me - you don't have to ask again." A file to them is the same:
+        # the human who was meant to look at it is the one it lands on.
+        mode, why, gate = "auto", "to you — nobody else reads it", False
     item["policy"] = {"effective": "draft" if gate else mode, "reason": ("share gate: " + why) if gate else why, "used_context": used_context}
     fu = None
-    if action == "hold":
+    if action == "hold" and not to_owner:
         t = item.get("triage") or {}
         phrase, due = hold_deadline(float(decision.get("urgency") or t.get("urgency") or 3))
         fu = dict(channel=channel, thread_ts=thread_ts, counterpart=sender, counterpart_name=who, summary=item["text"],
                   phrase=phrase, due=due, permalink=item.get("permalink"))
         item["followup"] = {**fu, "due": due.isoformat(timespec="minutes")}
+
+    if mode == "auto" and to_owner:
+        try:
+            ts, file_ids = deliver_to_owner(slack, item, text)
+        except Exception as e:  # noqa: BLE001 - the words must still reach the owner, as a draft if not as a message
+            why = f"could not deliver it to you ({error_text(e)}) — so it waits here for your ✅"
+            log.warning("delivery to the owner for %s failed: %s", item["id"], e)
+            mode = "draft"
+            item["policy"] = {"effective": "draft", "reason": why, "used_context": used_context}
+        else:
+            item["outcome"] = {"status": "sent", "ts": ts, "channel": slack.console, "at": now_iso()}
+            if file_ids:
+                item["outcome"]["files"] = file_ids
+            save_item(item)
+            # Not registered under state["sent"]: that map watches messages posted AS the owner
+            # for their edits and deletions, and this one is posted to them.
+            audit(item=item["id"], counterpart=who, status=f"sent_{action}", reply=text, sources=decision.get("sources"), mode=why)
+            return f"delivered to you ({action}): {text[:100]}"
 
     if mode == "auto" and not gate:
         ts = slack.post(channel, text, thread_ts)
@@ -1313,10 +1548,8 @@ def approve_draft(slack: Slack, item: dict, ledger: Ledger, followups: Followups
         try:
             ts, file_ids = slack.post_files(item["channel"], d["text"], files, item.get("reply_thread_ts"))
         except Exception as e:  # noqa: BLE001 - the owner needs the reason, whatever it is
-            # SlackApiError puts the useful part ("error": "missing_scope") on its second line.
             full = str(e)
-            why = (getattr(getattr(e, "response", None), "data", None) or {}).get("error") if hasattr(e, "response") else None
-            why = why or " ".join(full.split())[:200]
+            why = error_text(e)
             hint = ("add the `files:write` user scope under OAuth & Permissions, reinstall the app, and re-run doctor"
                     + " — then take your ✅ off and add it again"
                     if "missing_scope" in full else "fix the cause, then take your ✅ off and add it again — or ❌ to drop")
@@ -1329,6 +1562,7 @@ def approve_draft(slack: Slack, item: dict, ledger: Ledger, followups: Followups
         fu = dict(item["followup"])
         fu["due"] = datetime.fromisoformat(fu["due"])
         followups.add(**fu)
+    attention_cancel(item.get("outcome", {}).get("attn"))
     item["outcome"] = {**item.get("outcome", {}), "status": "sent_from_draft", "ts": ts, "approved": now_iso()}
     if file_ids:
         item["outcome"]["files"] = file_ids
@@ -1347,6 +1581,7 @@ def approve_draft(slack: Slack, item: dict, ledger: Ledger, followups: Followups
 
 
 def drop_draft(slack: Slack, item: dict, ledger: Ledger, state: State, draft_ts: str) -> str:
+    attention_cancel(item.get("outcome", {}).get("attn"))
     item["outcome"] = {**item.get("outcome", {}), "status": "dropped", "dropped": now_iso()}
     save_item(item)
     state.update(lambda d_: d_["pending"].pop(draft_ts, None))
@@ -1600,20 +1835,54 @@ def writer_healthy(result: dict | None, err: str = "") -> tuple[bool, str]:
     return True, ""
 
 
+@contextlib.contextmanager
+def conversation_lock(item: dict):
+    """One writer run per conversation at a time, across processes.
+
+    The daemon serialises its own runs per channel in memory, but every `say` is a new process,
+    and all of them share the owner's DM session with the daemon and with each other. On 27 Oct
+    two `say`s resumed that one session five seconds apart: the second loaded the transcript while
+    the first was mid-tool-call, and both carried on from a transcript that now read "[Tool call
+    interrupted]". A file lock per conversation is what every process can see.
+    """
+    locks = config.p("locks")
+    locks.mkdir(parents=True, exist_ok=True)
+    with open(locks / (re.sub(r"[^A-Za-z0-9._-]", "-", session_key(item)) + ".lock"), "a+", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def run_claude(item: dict, state: "State | None" = None, prompt: str | None = None, fresh: bool = False) -> tuple[list[str], dict | None, str]:
     """Run Claude Code on an item in that conversation's session. Returns (tools used, result object, stderr tail).
 
     `fresh` ignores the conversation's session and starts a new one: the retry path, where
     resuming would replay a transcript in which the writer already declined to act."""
     state = state or State()
+    with conversation_lock(item):
+        return _run_claude_in_session(item, state, prompt, fresh)
+
+
+def _run_claude_in_session(item: dict, state: "State", prompt: str | None, fresh: bool) -> tuple[list[str], dict | None, str]:
     session = (str(uuid.uuid4()), False) if fresh else pick_session(item, state)
     tools, result, err = _run_claude_once(item, session, prompt)
     if result is None and session[1]:
         log.warning("resume of session %s failed (%s) — starting a fresh one", session[0][:8], err[:120])
         session = (str(uuid.uuid4()), False)
-        tools, result, err = _run_claude_once(item, session)
-    if result is not None:
-        key, sid = session_key(item), session[0]
+        tools, result, err = _run_claude_once(item, session, prompt)
+    key = session_key(item)
+    answered = item_path(item["id"]).exists() and bool(load_item(item["id"]).get("decision"))
+    if not answered:
+        # The prompt is in that transcript with nothing after it — a usage limit answers in one
+        # line and uses no tools. Resumed, the writer reads the unanswered prompt as still open:
+        # on 27 Oct it caught up on four of them in one go, wrote decisions nobody was waiting
+        # for, and told the owner it had delivered all four. Nothing is kept of such a run.
+        if state.update(lambda d: d["sessions"].pop(key, None) is not None):
+            log.warning("session %s for %s dropped: the writer never answered in it", session[0][:8], key)
+    if result is not None and answered:
+        sid = session[0]
         total = result.get("total_cost_usd")
 
         def rec(d):
@@ -2012,6 +2281,13 @@ class Daemon(Slack):
             record_eng_request(channel=channel, ts=ts, sender=sender, status="filed", issue=number, url=url, label=label,
                                test=test, assignee=owner, **lin)
         log.info("eng: filed #%s%s for %s", number, f" and {lin['linear']}" if lin else "", self.name_of(owner))
+        if owner == self.me:
+            # The coding agent above gets the issue; the owner also owes an answer in the thread.
+            # Same settle as the pickup, so the detail Sri posts under the title is in the brief.
+            t = threading.Timer(CFG["eng_settle_minutes"] * 60 + 5,
+                                lambda: self._submit(self.sr_filed, channel, ts, sender, who))
+            t.daemon = True
+            t.start()
         reply = self.eng_reply(number, url, lin, label, self.name_of(owner) if people is not None else None)
         if label and label == self.local_label():
             # push: start the agent here once the thread has had time to fill in; the tick
@@ -2471,18 +2747,100 @@ class Daemon(Slack):
 
     # ------------------------------------------------------------ console
 
+    def on_button(self, payload: dict) -> None:
+        """The owner pressed a button on an ask (`say --option`). The choice is the answer.
+
+        It travels the way a typed thread reply does — to the coordinator's inbox when there is one
+        — and is kept on the item, where `answer <say-id>` reads it. The buttons then give way to
+        what was chosen, so the same question cannot be answered twice. Only the owner's press counts.
+        """
+        if payload.get("type") != "block_actions":
+            return
+        user = (payload.get("user") or {}).get("id")
+        cont = payload.get("container") or {}
+        ts, channel = cont.get("message_ts"), cont.get("channel_id")
+        for act in payload.get("actions") or []:
+            aid = act.get("action_id") or ""
+            if not aid.startswith("solo_answer_") or aid == "solo_answer_link":
+                continue
+            if user != self.me:
+                log.warning("button %s pressed by %s, not the owner — ignored", aid, user)
+                return
+            choice = (act.get("value") or "").strip()
+            ask = (self.state.read().get("asks") or {}).get(ts) or {}
+            item_id = ask.get("item")
+            if not item_id or not item_path(item_id).exists():
+                log.warning("button on %s: no ask on record for it", ts)
+                return
+            item = load_item(item_id)
+            if item.get("answer"):
+                return  # double delivery, or a second press before the edit landed
+            item["answer"] = {"choice": choice, "at": now_iso(), "by": user}
+            save_item(item)
+            note = owner_note.from_dict(item.get("note_rendered") or {})
+            head = owner_note.render(note)
+            blocks = owner_note.answered_blocks(head["blocks"], choice, "you", datetime.now().strftime("%H:%M"))
+            self.console_update(ts, f"{head['text']}\n✔️ {choice}", blocks=blocks)
+            if inbox := coordinator_inbox():
+                with open(inbox, "a", encoding="utf-8") as f:
+                    f.write(f"- {now_iso()} owner (Slack button on the note at {ts}, {item_id} from "
+                            f"{item.get('origin', '').removeprefix('agent:')}): {choice}\n")
+                said = f"got it — *{choice}*, passed to the coordinator"
+            else:
+                said = f"got it — *{choice}*. `{item.get('origin', '').removeprefix('agent:')}` reads it with `answer {item_id}`"
+            log.info("owner answered %s: %s", item_id, choice)
+            try:
+                self.console_post(said, thread_ts=ts)
+            except Exception as e:  # noqa: BLE001 - the answer is recorded; the receipt is a courtesy
+                log.warning("could not confirm the answer in the thread: %s", e)
+            return
+
     CONSOLE_HELP = ("`pause` / `pause 2h` / `resume` · `status` · `mode learn|draft|auto`\n"
                     "anything else is kept as feedback on how I write, and folded in at the next review")
 
     def on_console_message(self, ev: dict) -> None:
-        """The owner typed to Solo in its DM. Commands first, everything else is feedback."""
+        """The owner typed to Solo in its DM. Commands first, everything else is feedback.
+
+        A reply *in the thread* of a note an agent sent through Solo is neither: it is the owner
+        answering that agent. It goes to the coordinator's inbox when there is one on this
+        machine, and Solo answers in the thread, where the owner is looking.
+        """
         said = clean_text(ev.get("text", ""), self.name_of).strip()
         if not said:
             return
+        # Slack can deliver one message twice: answer it once.
+        seen = self.__dict__.setdefault("_console_seen", set())
+        if ev.get("ts") in seen:
+            return
+        if len(seen) > 1000:
+            seen.clear()
+        seen.add(ev.get("ts"))
+        thread = ev.get("thread_ts")
+        in_thread = bool(thread) and thread != ev.get("ts")
         low = said.lower()
         reply = None
         try:
-            if low in ("help", "?", "commands"):
+            ask = ((self.state.read().get("asks") or {}).get(thread) or {}) if in_thread else {}
+            if ask.get("item") and item_path(ask["item"]).exists() and not load_item(ask["item"]).get("answer"):
+                # A typed reply under an ask is its answer — the only way to give one while the
+                # buttons wait for Interactivity, and as good as a press once they are on.
+                item = load_item(ask["item"])
+                item["answer"] = {"choice": said, "at": now_iso(), "by": self.me, "typed": True}
+                save_item(item)
+                origin = item.get("origin", "").removeprefix("agent:")
+                if inbox := coordinator_inbox():
+                    with open(inbox, "a", encoding="utf-8") as f:
+                        f.write(f"- {now_iso()} owner (Slack thread reply to the ask at {thread}, {item['id']} from {origin}): {said}\n")
+                    reply = f"got it — *{said[:80]}*, passed to the coordinator"
+                else:
+                    reply = f"got it — *{said[:80]}*. `{origin}` reads it with `answer {item['id']}`"
+                log.info("owner answered %s in the thread: %s", item["id"], said[:100])
+            elif in_thread and (inbox := coordinator_inbox()):
+                with open(inbox, "a", encoding="utf-8") as f:
+                    f.write(f"- {now_iso()} owner (Slack thread reply to the note at {thread}): {said}\n")
+                log.info("console thread reply passed to the coordinator: %s", said[:100])
+                reply = "got it — passed to the coordinator"
+            elif low in ("help", "?", "commands"):
                 reply = self.CONSOLE_HELP
             elif low.startswith("pause"):
                 rest = said[5:].strip()
@@ -2528,7 +2886,7 @@ class Daemon(Slack):
             reply = f"that failed: {e}"
         if reply:
             try:
-                self.bot.chat_postMessage(channel=self.bot_dm, text=reply)
+                self.bot.chat_postMessage(channel=self.bot_dm, text=reply, **({"thread_ts": thread} if thread else {}))
             except Exception as e:  # noqa: BLE001
                 log.warning("could not answer in the console (%s)", e)
 
@@ -2605,6 +2963,9 @@ class Daemon(Slack):
         item["triage"] = None if t.source == "default" else t.__dict__ | {"raw": None}
         save_item(item)
         log.info("%s in %s: %s → %s", who, ctype, clean[:80], t.summary() if item["triage"] else "no triage")
+        # An SR for the owner is handed to the agent now, whatever the writer decides below; the
+        # writer's hold or ack in the thread still goes through as a draft.
+        self.sr_follow_up(item)
         if item["triage"] and t.route == "ignore" and mentioned:
             # Someone typed your name. Four of the six messages Solo routed to silence and you then
             # answered yourself were mentions, and this is the half triage decides on its own — a
@@ -2681,6 +3042,81 @@ class Daemon(Slack):
             marg = (result or {}).get("marginal_cost_usd")
             log.info("%s%s", summary, f" · ${marg:.3f} (session ${cost:.2f})" if marg else "")
 
+    # ------------------------------------------------------------ SR investigations
+
+    def sr_investigate(self, item: dict, who: str, transcript: str) -> bool:
+        """Hand an SR addressed to the owner to the agent as an investigation, on arrival.
+
+        `hand_over` waits for the writer to propose a `--task`, and the writer proposes only when
+        triage scores the ask as something it cannot answer. An SR is always that: it names a
+        cause to find in systems the writer cannot see. On 3 Nov Sri's three-point follow-up on
+        SR-100 drew a bare "Will do" and no agent. So the SR path does not wait to be asked.
+
+        One dispatch per message, keyed by the item id rather than the conversation: an SR thread
+        carries several distinct asks over a day, and `open_dispatch`'s per-thread window exists
+        to collapse repeats of ONE question. The writer's own proposal on the same message still
+        runs through `hand_over`, where `open_dispatch` sees this row and does not ask twice.
+
+        The item is saved (without a decision) so `say --re <id>` can find the conversation to
+        answer into; the agent's report lands in the SR thread (or the DM) as a draft for the
+        owner's ✅, the same gate as every other report. True when something was handed over.
+        """
+        if not CFG["sr_investigate"] or CFG["delegate_mode"] != "auto" or not CFG["delegate_peer"]:
+            return False
+        if item.get("simulated") or item["id"] in dispatched_item_ids():
+            return False
+        where = describe_where(item)
+        # The saved item carries NO decision: on the inbound path the writer still runs on this
+        # message, and `handle_with_claude` reads an existing decision as the writer having
+        # acted (its retry guard, then `execute_decision`), so a placeholder here would be
+        # executed as an empty hold. The task travels on a copy, into the delegations row.
+        if not item_path(item["id"]).exists():
+            save_item(item)
+        brief = {**item, "decision": {"action": "hold", "text": "", "task": SR_TASK.format(
+            owner=self.me_name, who=who, where=where, thread=(transcript or item.get("text", ""))[:6000],
+            permalink=item.get("permalink") or "")}}
+        msg = dispatch_task(brief, who, where)
+        log.info("sr: %s", msg)
+        if msg.startswith("handed to"):
+            self.notify(f"🤖 *SR from {who} in {where}* — asked `{CFG['delegate_role'] or 'the agent'}` to find "
+                        f"the cause. Its answer comes back in that thread as a draft for your ✅."
+                        + (f"\n{item['permalink']}" if item.get("permalink") else ""))
+            return True
+        self.notify(f"⚠️ Could not hand {who}'s SR to an agent: {msg}")
+        return False
+
+    def sr_filed(self, channel: str, ts: str, sender: str, who: str) -> None:
+        """The settle timer fired for an SR filed for the owner: read the thread as it stands now
+        (the detail usually lands a minute after the title) and hand it over."""
+        msgs = self.eng_thread(channel, ts)
+        if not msgs:
+            return
+        transcript = "\n".join(f"{self.name_of(m.get('user'))}: {clean_text(m.get('text', ''), self.name_of)}" for m in msgs)
+        item = {"id": f"{channel}-{ts.replace('.', '_')}", "created": now_iso(), "status": "queued", "simulated": False,
+                "channel": channel, "channel_type": "channel", "channel_name": self.channel_name(channel),
+                "ts": ts, "thread_ts": None, "reply_thread_ts": ts,
+                "sender": sender, "sender_name": who, "sender_handle": self.handle_of(sender),
+                "text": clean_text(msgs[0].get("text", ""), self.name_of), "permalink": self.permalink(channel, ts),
+                "context": transcript, "mentioned": True, "answers_you": False, "triage": None}
+        self.sr_investigate(item, who, transcript)
+
+    def sr_follow_up(self, item: dict) -> bool:
+        """A message that is an SR ask for the owner, arriving through the normal inbound path: a
+        follow-up under a filed SR that @-mentions them, or an SR-numbered message in a DM."""
+        channel, thread_ts, ctype = item["channel"], item.get("thread_ts"), item.get("channel_type")
+        is_sr = False
+        if self.eng_channel and channel == self.eng_channel and thread_ts and item.get("mentioned"):
+            is_sr = eng_request(channel=channel, ts=thread_ts) is not None
+        elif ctype == "im" and CFG["sr_dm_match"]:
+            is_sr = re.search(CFG["sr_dm_match"], item.get("text", "")) is not None
+        if not is_sr:
+            return False
+        try:
+            transcript = self.transcript(channel, thread_ts, 40) if thread_ts else item.get("context", "")
+        except Exception:  # noqa: BLE001
+            transcript = item.get("context", "")
+        return self.sr_investigate(item, item.get("sender_name", "someone"), transcript)
+
     def hand_over(self, item: dict, decision: dict) -> None:
         """Under DELEGATE_MODE=auto, send the proposal the writer made instead of waiting for 🤖.
 
@@ -2731,6 +3167,7 @@ class Daemon(Slack):
                 self.state.update(lambda d: d["pending"].pop(draft_ts, None)); continue
             at = (item.get("outcome") or {}).get("at")
             if at and now - datetime.fromisoformat(at) >= timedelta(hours=CFG["draft_expire_hours"]):
+                attention_cancel(item["outcome"].get("attn"))
                 item["outcome"]["status"] = "expired"
                 save_item(item)
                 self.state.update(lambda d: d["pending"].pop(draft_ts, None))
@@ -2845,6 +3282,11 @@ class Daemon(Slack):
         sm = SocketModeClient(app_token=app_token, web_client=self.client)
 
         def listener(client, req):
+            if req.type == "interactive":
+                # A button on an ask. Acknowledged first: Slack shows the owner an error after 3 s.
+                client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
+                self._submit(self.on_button, req.payload or {})
+                return
             if req.type != "events_api":
                 return
             client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
@@ -3058,9 +3500,15 @@ def cmd_say(a):
     finished prose, because an agent writing its own message is how a workspace ends up with five
     different voices wearing one name.
 
-    Agent-originated messages always draft for the owner's ✅, whatever the trust ledger says. The
-    ledger graduates routes that a *person* asked for; nothing here was asked for by a person, so
-    there is no track record that could earn an automatic send.
+    Agent-originated messages draft for the owner's ✅, whatever the trust ledger says. The ledger
+    graduates routes that a *person* asked for; nothing here was asked for by a person, so there is
+    no track record that could earn an automatic send. The one exception is a message TO the
+    owner: it reaches nobody else, so it is delivered to their console instead of drafted there —
+    and in the agent's own words, without the writer. There is no voice to put it in (the owner
+    is the reader, not the author) and nothing to trim: through the writer a note came out as one
+    beat, and a coordinator's note lost the command the owner needed (31 Oct). It also means a
+    note to the owner cannot be lost to a writer that is out of quota, which is how the release
+    notes of 27 Oct and the refusals of 29 and 31 Oct went missing.
     """
     config.ensure_dirs()
     re_item = getattr(a, "re_item", None)
@@ -3092,7 +3540,8 @@ def cmd_say(a):
     elif a.target:
         kind, tid, name = recall.resolve_target(s, a.target)
         channel = s.client.conversations_open(users=tid)["channel"]["id"] if kind == "people" else tid
-        routed = f"you named {name}"
+        routed = ("to the owner — delivered to their console, nothing to approve" if kind == "people" and tid == s.me
+                  else f"you named {name}")
     else:
         # Agents report what they did; where it belongs is Solo's problem, not theirs. They have
         # no view of the channel map and should not grow one — that is how a reporting agent ends
@@ -3119,6 +3568,13 @@ def cmd_say(a):
         kind, tid, channel = "channels", cid, cid
         name = cat[cid].split(".", 1)[0].strip().lstrip("#")
         routed = f"Solo placed it in #{name} ({conf:.2f})"
+    to_owner_note = channel in (s.self_dm, s.bot_dm)
+    if getattr(a, "options", None) and not to_owner_note:
+        sys.exit("--option makes buttons for the owner to answer; pass --to the owner (@me), or ask the person in words")
+    try:
+        owner_note.norm_status(getattr(a, "status", None))
+    except ValueError as e:
+        sys.exit(str(e))
     print(f"→ {routed}")
     item = {"id": f"say-{uuid.uuid4().hex[:8]}", "created": now_iso(), "status": "queued",
             "simulated": False, "outbound": True, "origin": f"agent:{a.from_}",
@@ -3133,6 +3589,13 @@ def cmd_say(a):
                        + (f" because: {a.why}" if a.why else "") + ")"}
     if files:
         item["files"] = files
+    spec = {k: v for k, v in (("status", getattr(a, "status", None)), ("headline", getattr(a, "headline", None)),
+                              ("points", getattr(a, "points", None)), ("details", getattr(a, "details", None)),
+                              ("options", getattr(a, "options", None)), ("link", getattr(a, "link", None))) if v}
+    if spec:
+        item["note"] = spec
+    if getattr(a, "group", None):
+        item["group"] = a.group
     if tgt:
         item.update(tgt)
         item["re"] = re_item
@@ -3142,20 +3605,42 @@ def cmd_say(a):
                            + (f"; {a.why}" if a.why else "") + ")")
     save_item(item)
     print(f"queued {item['id']} → {name} (asked by {a.from_})" + (f" with {describe_files(files)}" if files else ""))
+    if channel in (s.self_dm, s.bot_dm):
+        # Same test `execute_decision` applies: the owner's own DM. The words are the agent's,
+        # verbatim; `execute_decision` still records policy and outcome, and still falls back to
+        # a draft if the console cannot be reached.
+        item["decision"] = {"action": "reply", "text": a.intent, "verbatim": True}
+        save_item(item)
+        ledger, _ = load_services()
+        fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
+        print(execute_decision(s, item, item["decision"], ledger, fus, set(), state=State()))
+        return
     if CFG["dispatch"] != "claude":
         print(f"compose it with: claude -p '/solo:slack-autoreply compose {item_path(item['id'])}'")
         return
     tools, result, err = run_claude(item, State(), prompt=f"{config.SKILL_COMMAND} compose {item_path(item['id'])}")
     item = load_item(item["id"])
-    why_not = err or (result or {}).get("subtype") or "no decision"
     if not item.get("decision"):
+        why_not = run_said(result, err) if (result or err) else "no decision"
         # `reported back` has to mean the owner has something to approve. Recorded here, where
         # there is no draft, it would lie in exactly the case it exists to catch — and a compose
         # failure is not hypothetical: a weekly rate limit does precisely this.
+        item["status"], item["outcome"] = "failed", {"status": "failed", "why": why_not, "at": now_iso()}
+        item["run"] = {"tools": tools, "subtype": (result or {}).get("subtype"), "said": why_not}
+        save_item(item)
         if re_item:
             record_delegation(item=re_item, role=a.from_, outcome="report_failed",
                               say=item["id"], error=str(why_not)[:200])
-        sys.exit(f"Solo could not compose it: {why_not}")
+        # The words still reach the owner. Four release notes went missing on 27 Oct because the
+        # writer's account was out of quota for half an hour and every one of them ended here,
+        # in an exit code only the calling agent saw. The console is where the owner already
+        # reads what agents send; the agent's own wording is better than nothing at all.
+        dest = "you" if kind == "people" and tid == s.me else name
+        s.console_post(f"⚠️ *Solo could not write a message from `{a.from_}`* — {why_not[:200]}\n"
+                       f"_nothing went to anyone. It was meant for {dest}. Below are {a.from_}'s own words, "
+                       f"not a draft in your voice: place it, rewrite it or drop it._\n{quote(a.intent[:1200])}")
+        sys.exit(f"Solo could not compose it: {why_not}\n"
+                 f"   the message is in the owner's Solo DM in your own words instead — nothing was sent to anyone")
     ledger, _ = load_services()
     fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
     outcome = execute_decision(s, item, item["decision"], ledger, fus, set(), state=State())
@@ -3166,6 +3651,22 @@ def cmd_say(a):
                           report=a.intent[:200])
     print(outcome)
 
+
+
+def cmd_answer(a):
+    """Print the owner's choice on an ask (`say --option …`), or exit 1 while it is unanswered."""
+    if not item_path(a.item).exists():
+        sys.exit(f"no such note: {a.item}")
+    deadline = time.time() + max(0.0, a.wait)
+    while True:
+        ans = load_item(a.item).get("answer")
+        if ans:
+            print(ans.get("choice", ""))
+            return
+        if time.time() >= deadline:
+            print("unanswered", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(min(5.0, max(0.1, deadline - time.time())))
 
 
 def cmd_learn_channels(a):
@@ -3459,13 +3960,109 @@ def normalize_breaks(text: str) -> str:
     return text.replace("\\n", "\n")
 
 
+# --- agentvm instruct hook (brief-30 C slice c, owner yes 2026-10-27) ------------------------------
+# A Slack message that asks the meeting agent (agentvm's Solo, in or out of a call) to do something
+# is forwarded to its instruction inbox through agentvm's dev/control/slack_relay.py, with the Slack
+# sender's id: the box decides their standing (owner, invited, or refused). The answer comes back in
+# the same thread as a draft for the owner's check mark (origin agent:, which never auto-sends).
+# On by default; AGENTVM_SLACK_INSTRUCT=off in ~/.slack-autoreply/.env turns it off. No key: it goes over ssh.
+AGENTVM_RELAY_DEFAULT = str(Path.home() / ".slack-autoreply/agentvm/slack_relay.py")   # from agentvm main, dev/control
+AGENTVM_COORD_INBOX_DEFAULT = str(Path.home() / "agentvm-handoff/coord/inbox.md")     # the coordinator's inbox, one line per message
+
+
+def coordinator_inbox() -> Path | None:
+    """The coordinator's inbox on this machine, or None where there is no coordinator.
+
+    AGENTVM_COORD_INBOX overrides the default. The parent directory is the test: a machine
+    without the handoff tree has nobody reading the file, and a note appended there is lost.
+    """
+    path = Path(config.env("AGENTVM_COORD_INBOX") or AGENTVM_COORD_INBOX_DEFAULT).expanduser()
+    return path if path.parent.is_dir() else None
+AGENTVM_WAIT_S = 1800
+
+
+def agentvm_relay(*args: str, timeout: float = 60) -> subprocess.CompletedProcess:
+    # the agentvm CLI's own transport: ssh to the box as the owner, with this machine's keys (owner, 2026-10-27:
+    # "use the Solo cli and the keys needed with it"); never a key from a file
+    env = {k: v for k, v in os.environ.items() if k not in ("AGENTVM_URL", "AGENTVM_KEY")}
+    relay = config.env("AGENTVM_RELAY") or AGENTVM_RELAY_DEFAULT
+    return subprocess.run([sys.executable, relay, *args], capture_output=True, text=True, timeout=timeout, env=env)
+
+
+def slack_verified_email(uid: str) -> str:
+    """The user's profile email as Slack verified it (users.info, the users:read.email scope), or "" when unread."""
+    try:
+        return ((Slack().client.users_info(user=uid)["user"].get("profile") or {}).get("email") or "").strip().lower()
+    except Exception as e:  # noqa: BLE001 - the box then sees no address: a guest, refused, never a guessed standing
+        log.warning("agentvm: no verified email for %s (%s)", uid, e)
+        return ""
+
+
+def instruct_forward(item: dict, text: str, identity: str) -> str:
+    if config.env("AGENTVM_SLACK_INSTRUCT").lower() in ("off", "0", "no"):
+        sys.exit("instruct is switched off (AGENTVM_SLACK_INSTRUCT=off): use hold or escalate instead")
+    if item.get("simulated"):
+        return f"simulated: would forward to {identity}: {text[:80]}"
+    thread = item.get("reply_thread_ts") or item["ts"]
+    email = slack_verified_email(item["sender"])   # the box's trust level comes from it, never from a name
+    out = agentvm_relay("forward", "--identity", identity, "--user", item["sender"], "--name", item["sender_name"],
+                        *(["--email", email] if email else []),
+                        "--channel", item["channel"], "--ts", thread, "--text", text)
+    if out.returncode != 0:
+        sys.exit(f"agentvm refused it: {(out.stderr or out.stdout).strip()[:300]}\n   use hold or escalate instead")
+    task_id = json.loads(out.stdout)["task_id"]
+    item["agentvm"] = {"identity": identity, "task_id": task_id, "thread_ts": thread, "at": now_iso()}
+    item["status"] = "instructed"
+    save_item(item)
+    with open(config.p("agentvm-instruct.log"), "a", encoding="utf-8") as log_out:
+        subprocess.Popen([sys.executable, SCRIPT, "instruct-wait", item["id"]], stdin=subprocess.DEVNULL,
+                         stdout=log_out, stderr=subprocess.STDOUT, start_new_session=True)
+    return f"forwarded to {identity} as {task_id}; its answer comes back here as a draft for your ✅"
+
+
+def cmd_instruct_wait(a):
+    """Detached: wait for the agentvm item, then draft its answer in the thread for the owner's ✅."""
+    item = load_item(a.item)
+    av = item.get("agentvm") or {}
+    out = agentvm_relay("wait", av["task_id"], "--timeout", str(AGENTVM_WAIT_S), timeout=AGENTVM_WAIT_S + 60)
+    if out.returncode == 3:   # it waits on the owner's yes (never the Slack sender's): wait on for the end
+        log.info("agentvm %s waits on the owner: %s", av["task_id"], (out.stdout or "").strip()[:200])
+        out = agentvm_relay("wait", av["task_id"], "--through-owner", "--timeout", str(AGENTVM_WAIT_S),
+                            timeout=AGENTVM_WAIT_S + 60)
+    said = (out.stdout or "").strip()
+    if out.returncode == 0:
+        text = said or "Done."
+    elif out.returncode == 3:
+        text = said or "It needs a yes before it goes on."
+    elif out.returncode == 1:
+        text = f"Couldn't get that done: {said or 'it stopped'}"
+    else:
+        log.warning("agentvm wait for %s failed: %s", item["id"], (out.stderr or said)[:300])
+        text = "I couldn't reach the meeting agent to finish that; I'll follow up."
+    item["origin"] = f"agent:agentvm-{av.get('identity', 'solo')}"   # always a draft for the owner's check mark
+    item["reply_thread_ts"] = av.get("thread_ts") or item.get("reply_thread_ts")
+    decision = {"action": "reply", "text": text, "sources": ["agentvm"], "used_context": True, "note": "",
+                "urgency": None, "task": "", "role": "", "emoji": "", "thread": False, "at": now_iso()}
+    ledger, _ = load_services()
+    s = Slack()
+    fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
+    print(execute_decision(s, item, decision, ledger, fus, s.resolve_users(CFG["share_trusted"]), state=State()))
+
+
 def cmd_act(a):
     item = load_item(a.item)
+    if os.getenv("AUTOREPLY_DISPATCH") == "1" and item.get("status") in ("done", "failed"):
+        # A prompt left over in a resumed transcript, not work to do. The process that was
+        # waiting on this item has already finished — sent it, or given up and said so — and a
+        # decision written now goes nowhere while the writer believes it was delivered.
+        why = (item.get("outcome") or {}).get("why") or (item.get("outcome") or {}).get("status") or item["status"]
+        sys.exit(f"{item['id']} is already {item['status']} ({str(why)[:120]}) — nobody is waiting for this decision.\n"
+                 "   It was left over in an earlier session, not handed to you now: say so, send nothing, and stop.")
     text = normalize_breaks(a.text or "").strip()
     if a.text_file:
         text = Path(a.text_file).read_text(encoding="utf-8").strip()
-    if a.action in ("hold", "reply") and not text:
-        sys.exit("--text is required for hold/reply")
+    if a.action in ("hold", "reply", "instruct") and not text:
+        sys.exit("--text is required for hold/reply/instruct")
     if a.action == "ignore" and item.get("mentioned"):
         # Measured: three times the writer took a `hold` that triage had chosen, turned it into
         # silence, and the owner answered the question themselves — every one a direct @mention
@@ -3481,6 +4078,9 @@ def cmd_act(a):
                 "task": getattr(a, "task", None) or "", "role": getattr(a, "role", None) or "",
                 "emoji": emoji, "thread": bool(a.thread), "at": now_iso()}
     item["decision"] = decision
+    if a.action == "instruct":   # agentvm instruct hook (brief-30)
+        print(instruct_forward(item, text, a.identity or config.env("AGENTVM_IDENTITY") or "zen-solo"))
+        return
     if os.getenv("AUTOREPLY_DISPATCH") == "1":
         item["status"] = "decided"
         save_item(item)
@@ -3493,6 +4093,35 @@ def cmd_act(a):
     s = Slack()
     fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
     print(execute_decision(s, item, decision, ledger, fus, s.resolve_users(CFG["share_trusted"]), state=State()))
+
+
+def cmd_attn(a):
+    """`slackctl attn "<title>" …` — put something on the owner's desktop, with Solo's settings.
+
+    A thin door to attention/attn.py so an agent on this machine needs no config of its own:
+    ATTN_URL and ATTN_TOKEN live in Solo's .env and nowhere else. Everything after the title is
+    attn's own grammar (--priority, --deadline, --reply, --choices, --wait, --from).
+    """
+    if not CFG["attn_url"]:
+        sys.exit("ATTN_URL is not set in ~/.slack-autoreply/.env — the owner's desktop is not configured (see attention/README.md)")
+    # `attn cancel <id>`, `attn status`, `attn doctor` pass straight through; anything else is a title.
+    verb = a.title if a.title in ("cancel", "status", "doctor") else None
+    if not verb:
+        # Only time-sensitive things draw attention (owner, 2026-10-27). The agent names the
+        # priority; Jev decides whether it is really about the owner's eyes right now. A p2
+        # banner interrupts nobody and is not gated. Unscored stays off the screen.
+        rest = list(a.rest)
+        priority = rest[rest.index("--priority") + 1] if "--priority" in rest and rest.index("--priority") + 1 < len(rest) else "p1"
+        if priority != "p2":
+            body = rest[rest.index("--body") + 1] if "--body" in rest and rest.index("--body") + 1 < len(rest) else ""
+            score = attention_of(f"{a.title}\n{body}".strip())
+            if score is None:
+                sys.exit("Jev could not score this, so it stays off the owner's screen — use `say`, or --priority p2 for a banner")
+            if score < CFG["attn_needs"]:
+                sys.exit(f"Jev reads this as something that can wait ({score:.2f} < {CFG['attn_needs']}) — it will not go on the "
+                         f"owner's screen. Report it with `say`, or --priority p2 for a banner that interrupts nobody.")
+            print(f"→ Jev: needs the owner now ({score:.2f})", file=sys.stderr)
+    os.execv(sys.executable, [sys.executable, str(ATTN), *([verb] if verb else ["ask", a.title]), *a.rest])
 
 
 def cmd_done(a):
@@ -3744,7 +4373,7 @@ def cmd_review_data(a):
 # `act`, which records a decision without executing it.
 # The writer proposes an investigation with `act --task`; it may not dispatch one, nor read the
 # record of what the owner has handed over.
-DISPATCH_FORBIDDEN = frozenset({"approve", "drop", "dispatch", "pause", "resume", "listen", "done",
+DISPATCH_FORBIDDEN = frozenset({"approve", "drop", "dispatch", "pause", "resume", "listen", "done", "attn",
                                 "build-voice", "delegations", "eng-report", "eng-replay", "eng-sync"})
 
 # A rehearsal scored against real history is only honest if the writer cannot read the future.
@@ -3777,7 +4406,8 @@ def main():
     p.add_argument("item", help="inbox item id, as `delegations` or `inbox` prints it")
     p.set_defaults(fn=cmd_dispatch)
     p = sub.add_parser("deadline"); p.add_argument("--urgency", type=float, required=True); p.set_defaults(fn=cmd_deadline)
-    p = sub.add_parser("act"); p.add_argument("item"); p.add_argument("--action", required=True, choices=["ignore", "ack", "hold", "reply", "escalate"])
+    p = sub.add_parser("act"); p.add_argument("item"); p.add_argument("--action", required=True, choices=["ignore", "ack", "hold", "reply", "escalate", "instruct"])
+    p.add_argument("--identity", help="instruct: the agentvm identity to hand it to (default AGENTVM_IDENTITY, else zen-solo)")
     p.add_argument("--text", help="message text; use \\n for new lines"); p.add_argument("--text-file"); p.add_argument("--sources", help="comma list of where you looked: fs,notion,drive,github,calendar,web …")
     p.add_argument("--note", help="why it needs them (escalate), or what you need from them before it sends (hold/reply)")
     p.add_argument("--task", help="propose a READ-ONLY investigation for an agent; the owner dispatches it with 🤖, never you")
@@ -3785,6 +4415,8 @@ def main():
     p.add_argument("--emoji", help="for ack: the reaction to leave, e.g. +1, tada, eyes. Default ACK_EMOJI")
     p.add_argument("--thread", action="store_true", help="reply in a thread on their message instead of in the channel/DM")
     p.set_defaults(fn=cmd_act)
+    p = sub.add_parser("instruct-wait", help="(internal) wait for an agentvm item and draft its answer")
+    p.add_argument("item"); p.set_defaults(fn=cmd_instruct_wait)
     p = sub.add_parser("say", help="another agent asks Solo to send something, in your voice")
     p.add_argument("intent", help="WHAT happened / what you want said — not finished prose; Solo writes it")
     p.add_argument("--to", dest="target", help="optional: @handle, #channel or ID. Omit it and Solo decides where it belongs")
@@ -3799,7 +4431,23 @@ def main():
                    help="you are answering a request the owner dispatched to you; the brief carries "
                         "the id. Sends the report back to the conversation that asked, instead of "
                         "Solo guessing a channel from your words")
+    g = p.add_argument_group("a note to the owner (shaped as headline, bullets, details)",
+                             "Optional: without them Solo reads the shape from your words. With them, it is exactly yours.")
+    g.add_argument("--status", help=f"one of {', '.join(owner_note.STATUSES)} (aliases: green, red, rollback, frozen, …) — picks the icon")
+    g.add_argument("--headline", help="one short line: what happened, in plain words (no shas, no metric names)")
+    g.add_argument("--point", dest="points", action="append", metavar="TEXT",
+                   help="a bullet, repeatable, at most 3: what happened, why, what next or what is needed")
+    g.add_argument("--details", help="the technical detail; goes in a thread reply (default: your intent, whole)")
+    g.add_argument("--option", dest="options", action="append", metavar="CHOICE",
+                   help="a button the owner can press (Yes / No / A / B), repeatable; the choice is passed to the "
+                        "coordinator and kept on the item — read it with `answer <say-id>`")
+    g.add_argument("--link", help="a dashboard or release-log URL, shown as a link (and a button on an ask)")
+    g.add_argument("--group", help="notes with the same key inside 5 minutes become one message (default: the --from agent)")
     p.set_defaults(fn=cmd_say)
+    p = sub.add_parser("answer", help="what the owner chose on a note with --option buttons")
+    p.add_argument("item", help="the say-… id printed by `say`")
+    p.add_argument("--wait", type=float, default=0, help="seconds to wait for an answer (default: do not wait)")
+    p.set_defaults(fn=cmd_answer)
     p = sub.add_parser("learn-channels", help="learn what each channel you are in is for")
     p.add_argument("--limit", type=int, default=60, help="messages to sample per channel")
     p.add_argument("--refresh", action="store_true", help="rewrite dossiers that already exist")
@@ -3809,6 +4457,8 @@ def main():
     p = sub.add_parser("ask", help="ask about Slack in plain language; read-only, answers on stdout")
     p.add_argument("question"); p.set_defaults(fn=cmd_ask)
     p = sub.add_parser("done"); p.add_argument("item"); p.add_argument("--status", default="skipped"); p.set_defaults(fn=cmd_done)
+    p = sub.add_parser("attn", help="interrupt the owner on their desktop (attn ask, with Solo's config)")
+    p.add_argument("title"); p.add_argument("rest", nargs=argparse.REMAINDER); p.set_defaults(fn=cmd_attn)
     sub.add_parser("followups").set_defaults(fn=cmd_followups)
     sub.add_parser("drafts").set_defaults(fn=cmd_drafts)
     p = sub.add_parser("approve"); p.add_argument("item"); p.set_defaults(fn=cmd_approve)

@@ -23,6 +23,10 @@ confidently it asks the owner rather than guessing.
 
 `--from` is you — your agent or task name. It appears on the draft so the owner knows who asked.
 
+When you must name a person and only have their email — the assignee on a Linear issue, a GitHub
+author — write it as `@their@email` inside the text (`@sri@staffai.so`) and Solo tags the right
+Slack account. `solo about sri@staffai.so` works the same way. A bare email stays text.
+
 One exception to "do not name a channel or a person": when you are **answering work the owner
 dispatched to you**, the brief you were given carries a `--re <id>`. Pass it exactly as written:
 
@@ -111,7 +115,10 @@ rather than from a person. Treat each one as a **peer request to evaluate**:
   of it.
 
 Report back with `solo say`, the same as any other finished work — the owner reads it in their own
-voice and it waits for their ✅. If the work came from a brief with a `--re` id, pass that id.
+voice and it waits for their ✅. A note addressed to the owner themselves (`--to` their handle or
+id) is different: it is delivered to their console in your own words, whole, as you wrote it —
+no rewrite, no trim — so say everything they need in it, commands included. If the work came
+from a brief with a `--re` id, pass that id.
 
 ## What makes a good report
 
@@ -151,8 +158,38 @@ does not make a thing allowed.
 ## What happens next
 
 Solo writes it in the owner's voice, places it, and **waits for the owner's ✅**. An
-agent-requested message can never send on its own, whatever trust exists for that recipient. So
-your report is a proposal, and the owner is the one who sends.
+agent-requested message can never send on its own to anyone else, whatever trust exists for that
+recipient. So your report is a proposal, and the owner is the one who sends.
+
+The exception is a message **to the owner** (`--to @owner`, or whatever their handle is): nobody
+else reads their own DM, so it is delivered straight to their console, headed with your name, with
+nothing to approve. Use it for status they asked you to send them; use a channel or `--re` for
+anything their team should see.
+
+### How a note to the owner reads
+
+Solo shapes it so the owner can read it on a phone: a **headline with a status icon**, at most
+**three plain bullets**, and your words, whole, in a **Details** reply in the message's thread.
+Icons: ✅ live and green · ⚠️ live with a warning · 🔴 rolled back or failed · ⏸️ held or frozen ·
+🚀 shipping · ❓ needs you. Notes from you inside five minutes become one message.
+
+Free text works, and Solo reads the shape from it (seconds not ms, no shas, no metric names, no
+log paths in the body). To say it exactly, give the shape yourself:
+
+```
+solo say "<full technical detail>" --to @owner --from release \
+  --status failed --headline "Helsinki rolled back v0.552 → stays on v0.551" \
+  --point "replies were 0.4 s slower on one test run" --point "next: re-run tonight, nothing needed from you" \
+  --link https://dashboard/releases/552
+```
+
+- `--status` ok | warn | failed | held | shipping | ask | info picks the icon (default: read from your words).
+- `--headline` one line, plain words. `--point` is repeatable, three at most: what happened, why, what next.
+- `--details` the technical detail for the thread (default: your intent, whole). `--link` a dashboard or log.
+- `--group <key>` groups notes that share the key, instead of by sender.
+- To ask the owner something, give the choices as buttons, never "reply yes/no":
+  `--option Yes --option No` (and `--link` to the answer page). Their press is passed to the
+  coordinator and kept on the note: `solo answer <say-id>` prints it (`--wait 600` to block).
 
 You get no delivery receipt. Do not wait for one, and do not re-send.
 
@@ -168,3 +205,29 @@ Solo's node over ssh — so it needs to run a command and open a network connect
 
 Either way, do not look for another route into Slack. There isn't one that keeps the owner's voice,
 and a message from anything but Solo is a message they did not send.
+
+
+## Where an answer goes
+
+An answer goes where the question was asked. When you are reporting on work that came from a
+message, use `--re <id>` from the brief, never `--to #channel`: `--re` puts the reply in that
+message's thread, in front of the person who asked; `--to #channel` starts a new top-level
+conversation that nobody asked for and breaks the thread for everyone reading it. `--to` is for
+something new that nobody asked.
+
+## When it cannot wait to be read
+
+Slack and the console wait for the owner to look. A one-time code a login is holding for, or a
+decision that blocks everything queued behind it, cannot wait — and only the owner's own screen
+interrupts them. That is `attn`, run through Solo's settings:
+
+```
+solo attn "TOTP for solo@staffai.so" --body "the mini's login is waiting" --priority p0 --deadline 90s --reply text --from login-bot --wait
+solo attn "Ship v0.48 to the box?" --priority p1 --deadline 20m --reply choice --choices ship,hold --wait
+```
+
+`--wait` prints `{"state": "answered", "answer": "…"}` and exits 0; declined is 3, expired 4,
+cancelled 5, and 6 means the desktop was unreachable and the summary went by email instead. Use
+`p0` only when something is blocked *now* and `p1` when a decision is due within the hour; a
+report is `solo say`, never an interruption. Cancel what you no longer need: `solo attn cancel <id>`;
+`solo attn status` lists what is waiting on the owner. Details: `attention/README.md`.
