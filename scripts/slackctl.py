@@ -1834,16 +1834,20 @@ def writer_logged_in() -> tuple[bool, str]:
     try:
         p = subprocess.run([CFG["claude_bin"], "auth", "status"], capture_output=True, text=True, timeout=30,
                            env=writer_env(), stdin=subprocess.DEVNULL)
-        info = json.loads((p.stdout or "").strip() or "{}")
-    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as e:
+        info = json.loads((p.stdout or "").strip() or "null")
+    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as e:
         # Unreadable is not the same as logged out — say so rather than crying wolf.
         return True, f"could not read auth status ({type(e).__name__})"
-    if info.get("loggedIn") is False or info.get("authMethod") in (None, "none"):
+    if not isinstance(info, dict):
+        # Empty output, or an older CLI that prints something else: this check runs before every
+        # compose, so a guess here would stop every draft. Only an explicit "logged out" blocks.
+        return True, f"could not read auth status (exit {p.returncode}, no JSON)"
+    if info.get("loggedIn") is False or info.get("authMethod") == "none":
         return False, "Not logged in to Claude Code — run `claude /login` on this machine"
     return True, ""
 
 
-def writer_healthy(result: dict | None, err: str = "") -> tuple[bool, str]:
+def writer_healthy(result: dict | None, err: str = "", tools: list | None = None) -> tuple[bool, str]:
     """Did a writer run actually reach the model? Returns (ok, why not).
 
     Not the exit code. Today's logged-out failure came back *with* a result event — rc 1,
@@ -1857,7 +1861,7 @@ def writer_healthy(result: dict | None, err: str = "") -> tuple[bool, str]:
     if result.get("is_error"):
         why = result.get("result") or result.get("subtype") or result.get("terminal_reason") or "error"
         return False, " ".join(str(why).split())[:200]
-    if classify_run(result, err) in ("plugin_missing", "logged_out"):
+    if classify_run(result, err, tools) in ("plugin_missing", "logged_out"):
         # "/solo:slack-autoreply isn't available in this session" came back as a success: rc 0,
         # no is_error, and a writer that never ran.
         return False, " ".join(str(result.get("result") or "").split())[:200]
@@ -1927,12 +1931,20 @@ def classify_run(result: dict | None, err: str = "", tools: list | None = None, 
     """Which WRITER_FAILURES class a finished run fell into, or None if it did its job.
 
     `tools`/`decided` are what the run left behind; pass them when the caller knows, so a run that
-    returned success and did nothing is caught too."""
+    returned success and did nothing is caught too.
+
+    A run that wrote its decision did its job, whatever it said afterwards: classing it as failed
+    would rerun a writer that may already have posted. And the failure phrases are only read from
+    a bare run (no result, an error, or no tools used): a real draft is free to say "not logged
+    in" or "unknown command" about the customer's problem without marking the writer down."""
+    if decided:
+        return None
     said = f"{(result or {}).get('result') or ''} {err or ''}"
-    if PLUGIN_MISSING_RE.search(said):
-        return "plugin_missing"
-    if LOGGED_OUT_RE.search(said):
-        return "logged_out"
+    if result is None or result.get("is_error") or not tools:
+        if PLUGIN_MISSING_RE.search(said):
+            return "plugin_missing"
+        if LOGGED_OUT_RE.search(said):
+            return "logged_out"
     if result is None:
         return "nonzero_exit" if (err or "").startswith(("exit ", "timeout", "claude binary not found")) else "empty_result"
     if result.get("is_error"):
@@ -2067,7 +2079,8 @@ def compose(item: dict, state: "State | None" = None, prompt: str | None = None)
             return [], None, why, cls
     tools, result, err = run_claude(item, state, prompt)
     cls = classify_run(result, err, tools, _decided(item))
-    if cls and WRITER_FAILURES[cls]["heal"]:
+    if cls and WRITER_FAILURES[cls]["heal"] and not (err or "").startswith("timeout"):
+        # Not after a timeout: that run may still have acted, and a second one doubles the wait.
         # Seen once on the first dispatch after the plugin was installed: a one-second "success"
         # with no tools and no decision, while the next dispatch worked. Resuming would replay a
         # transcript in which nothing happened, so the rerun is a fresh session, and it is once.
@@ -2142,7 +2155,7 @@ def _run_claude_in_session(item: dict, state: "State", prompt: str | None, fresh
             result["marginal_cost_usd"] = (round(total - prev_total, 6)
                                            if prev_total is not None and total >= prev_total else total)
         item["session"] = {"id": sid, "resumed": session[1]}
-    if writer_healthy(result, err)[0]:
+    if writer_healthy(result, err, tools)[0]:
         # What the probe's idle gate reads: a real run just proved the writer works, so there is
         # nothing for a probe to find out.
         state.update(lambda d: d.update(health={**(d.get("health") or {}), "ok": True, "why": "",
@@ -3312,7 +3325,7 @@ class Daemon(Slack):
             # The pre-compose check, one heal per failure class, and the rerun live in `compose`.
             tools, result, err, cls = compose(item, self.state)
             retried = bool(item.pop("healed", False))
-            self.writer_verdict(result, err, cls)
+            self.writer_verdict(result, err, cls, tools)
             session = item.get("session")
             item = load_item(item["id"])  # Claude's `act` wrote the decision
             item["session"] = session
@@ -3567,7 +3580,7 @@ class Daemon(Slack):
         finally:
             self._probe_lock.release()
 
-    def writer_verdict(self, result: dict | None, err: str, cls: str | None = None) -> None:
+    def writer_verdict(self, result: dict | None, err: str, cls: str | None = None, tools: list | None = None) -> None:
         """A real run is the arbiter of writer health, in both directions.
 
         `claude auth status` cannot see a usage limit: on 23 Oct the node was logged in and every
@@ -3577,10 +3590,10 @@ class Daemon(Slack):
         self.credential_watch(result)
         h = self.state.read().get("health") or {}
         was_ok = h.get("ok", True)
-        ok, why = writer_healthy(result, err)
+        ok, why = writer_healthy(result, err, tools)
         if cls and WRITER_FAILURES.get(cls, {}).get("blocks"):
             ok = False
-        cls = None if ok else (cls or classify_run(result, err))
+        cls = None if ok else (cls or classify_run(result, err, tools))
         if ok == was_ok and (ok or not h.get("cls") or h.get("cls") == cls):
             return
         self.state.update(lambda d: d.update(health={**(d.get("health") or {}), "ok": ok, "why": why if not ok else "",

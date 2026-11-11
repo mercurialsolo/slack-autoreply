@@ -2132,6 +2132,46 @@ try:
     check("empty_result: no result and nothing said, or success with no tools and no decision",
           S.classify_run(None, "") == "empty_result" and S.classify_run(UP, "", [], False) == "empty_result")
     check("a run that decided is not a failure", S.classify_run(UP, "", ["Bash"], True) is None)
+    check("…even one that errored afterwards saying it is logged out: it may already have posted",
+          S.classify_run(DOWN, "", ["Bash"], True) is None)
+    _talky = {"type": "result", "subtype": "success", "is_error": False,
+              "result": "Drafted: if the CLI says unknown command or not logged in, run login again"}
+    check("a real draft that mentions 'unknown command' or 'not logged in' is not a writer failure",
+          S.classify_run(_talky, "", ["Bash"], None) is None and S.writer_healthy(_talky, "", ["Bash"])[0])
+    check("…but the same words from a run that used no tools still are",
+          S.classify_run(_talky, "", [], False) == "plugin_missing")
+
+    # compose never reruns a writer that decided, or one that timed out
+    _real_rc = S.run_claude
+    _rc_calls: list = []
+
+    def _decide_then_fail(item, state=None, prompt=None, fresh=False):
+        _rc_calls.append(fresh)
+        S.save_item({**S.load_item(item["id"]), "decision": {"action": "reply", "text": "hi"}})
+        return ["Bash"], {**DOWN}, "exit 1: Not logged in"
+
+    _writer_case()
+    S.run_claude = _decide_then_fail
+    try:
+        _t, _r, _e, _cls = S.compose(_compose_item(), d.state)
+        check("a run that decided and then errored is not rerun", _cls is None and _rc_calls == [False], str(_rc_calls))
+        _rc_calls.clear()
+        S.run_claude = lambda item, state=None, prompt=None, fresh=False: (_rc_calls.append(fresh), ([], None, "timeout"))[1]
+        _t, _r, _e, _cls = S.compose(_compose_item(), d.state)
+        check("a run that timed out is not rerun: it may still have acted", _cls == "nonzero_exit" and _rc_calls == [False],
+              f"{_cls} {_rc_calls}")
+    finally:
+        S.run_claude = _real_rc
+
+    # an auth status that cannot be read does not stop every compose
+    for _blank in (" ", "Logged in via claude.ai", "[]"):
+        _writer_case(auth=_blank)
+        check(f"auth status {_blank!r} is unreadable, not logged out", S.writer_logged_in()[0] and S.writer_preflight()[0] is None)
+    _writer_case(auth='{"loggedIn": true}')
+    check("a logged-in answer without an authMethod passes", S.writer_logged_in()[0])
+    _writer_case(auth='{"loggedIn": true, "authMethod": "none"}')
+    check("…while authMethod none still blocks", not S.writer_logged_in()[0])
+    _writer_case()
 
     # credential_expiring, read from the run's own result
     _soon = (datetime.now() + timedelta(hours=5)).timestamp()
