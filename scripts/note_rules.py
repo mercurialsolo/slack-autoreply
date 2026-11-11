@@ -44,7 +44,15 @@ COUNTER_RE = re.compile(r"(?:\b[a-z][a-z-]*\s+)?\b\d[\d,]*\s*/\s*\d[\d,]*\b")
 CHECKS_RE = re.compile(r"\b(?:checks?\s*:\s*)?(\d+)\s+passed,?\s+0\s+failed(?:,?\s+(?:and\s+)?0\s+warnings?)?", re.I)
 TRUNCATED_QUOTE_RE = re.compile(r"[\"“][^\"”\n]*(?:\.\.\.|…)[\"”]")
 ELLIPSIS_RE = re.compile(r"\s*(?:\.\.\.|…)")
-ICON_RE = re.compile(r"^\s*(?:✅|⚠️|⚠|🔴|⏸️|⏸|🚀|❓|📨)️?\s*")
+# Any leading pictograph (the factory starts its headlines with its own ✅ / 🔴 / ❓), once or twice:
+# the renderer adds exactly one icon of its own.
+EMOJI = "[\u2190-\u21ff\u2300-\u27bf\u2b00-\u2bff\U0001F000-\U0001FAFF]"
+ICON_RE = re.compile(r"^\s*(?:" + EMOJI + r"[\ufe0f\u200d]*\s*)+")
+# A status word the factory writes before its headline ("Done: …", "Needs your answer: …"): the icon
+# already says it. Taken off once, at the start only.
+STATUS_LABEL_RE = re.compile(r"^\s*(?:done|failed|failure|blocked|held|on hold|shipped|shipping|live|warning|"
+                             r"needs (?:your|an) (?:answer|call|decision|ok)|needs you|question|ask|fyi|info|cancelled|canceled|fix held)"
+                             r"(?: on [\w.-]+)?\s*[:\-–—]\s+", re.I)  # "Done on mini: …" (the factory's notify)
 # Labels a machine puts before a value ("Changelog: <url>", "Operator (budget): …"): the value is
 # what the owner reads.
 LABEL_RE = re.compile(r"^\s*(?:needs an answer(?: on [\w-]+)?|operator(?:\s*\([^)]*\))?|budget|burn(?: so far)?|"
@@ -76,19 +84,53 @@ def label_for(url: str, before: str = "") -> str:
     return "Open it"
 
 
+# A link label that is only a call to open it ("Answer here", "Details"): at the end of a sentence it
+# goes with its link; any other label is part of the sentence ("merge main into #2767 and land").
+CTA_LABEL_RE = re.compile(r"^(?:answer here|answer|here|link|details?|open(?: it)?|what changed|release page|"
+                          r"the (?:pr|issue|ci run|log)|dashboard|view|see|click here)$", re.I)
+PR_NUM_RE = re.compile(r"^#\d+$")
+SHA_LABEL_RE = re.compile(r"^[0-9a-f]{7,40}$")
+WORDS_FOR = {"Answer here": "the answer page", "Open it": "the link"}
+
+
+def _in_sentence(label: str, url: str, before: str, after: str) -> str:
+    """What a link leaves in its sentence: its label when the label carries meaning, "the PR" for a
+    bare URL in mid-sentence, nothing when it ends the sentence or is a sha. Never a hole."""
+    tail = not re.search(r"[A-Za-z0-9#]", re.split(r"(?<=[.!?])\s|\n", after, 1)[0])
+    if label and not URL_RE.fullmatch(label):
+        if SHA_LABEL_RE.match(label):
+            return "\x07"  # a sha: gone, with the "at" before it (see the caller)
+        if PR_NUM_RE.match(label):
+            return label if ("/pull/" not in url or re.search(r"\b(?:PRs?|pull request)\s*$", before, re.I)) else f"PR {label}"
+        if tail and CTA_LABEL_RE.match(label):
+            return ""
+        return label
+    if tail:
+        return ""
+    lb = label_for(url, before)
+    return WORDS_FOR.get(lb, lb[:1].lower() + lb[1:])
+
+
 def take_links(text: str) -> tuple[str, list[tuple[str, str]]]:
-    """Pull every link out of a sentence — `<url|label>` and bare URLs alike — with a label for each."""
+    """Pull every link out of a sentence — `<url|label>` and bare URLs alike — with a label for each.
+
+    The sentence keeps the link's words: a label in mid-sentence stays as text ("#2767" reads "PR
+    #2767"), a bare URL in mid-sentence reads "the PR" / "the issue"; only a link that ends its
+    sentence with nothing but "Answer here" is taken out whole. A sentence never keeps a hole."""
     links: list[tuple[str, str]] = []
 
     def slack(m):
-        links.append((m.group(1), (m.group(2) or "").strip() or label_for(m.group(1), text[:m.start()])))
-        return " "
+        label = (m.group(2) or "").strip()
+        links.append((m.group(1), label if label and not URL_RE.fullmatch(label) and not SHA_LABEL_RE.match(label)
+                      and not PR_NUM_RE.match(label) else label_for(m.group(1), text[:m.start()])))
+        return " " + _in_sentence(label, m.group(1), m.string[:m.start()], m.string[m.end():]) + " "
 
     def bare(m):
-        links.append((m.group(0), label_for(m.group(0), text[:m.start()])))
-        return " "
+        links.append((m.group(0), label_for(m.group(0), m.string[:m.start()])))
+        return " " + _in_sentence("", m.group(0), m.string[:m.start()], m.string[m.end():]) + " "
     text = SLACK_LINK_RE.sub(slack, text)
     text = URL_RE.sub(bare, text)
+    text = re.sub(r"(?:\s+(?:at|on|in|from)\b)?\s*\x07", " ", text)  # "Review #3558 at <sha>" reads "Review #3558"
     return text, links
 
 
@@ -159,6 +201,27 @@ def flat(text: str) -> str:
     return " ".join(sentence(ln) if i < len(lines) - 1 else ln for i, ln in enumerate(lines) if ln)
 
 
+# What a scrub leaves when it takes a word out of the middle of a sentence: "set =off in  on the call
+# box", "board it via  or no", "Reply yes to yes". A sentence with one is handed to the model whole.
+HOLE_RE = re.compile(
+    r"\S[ \t]{2,}\S|(?:^|\s)=\S|\S=(?:\s|$)"
+    r"|\b(?:via|into|at|from|with|by|of)\s+(?:and|or|in|on|at|via|into|from|to|with|by|of)\b"
+    r"|\b(?:in|on)\s+(?:in|on|at|via|into)\b|\bto\s+(?:and|or|at|via|into|from|by|of)\b"
+    r"|\b(?:via|at|with|by|into)\s*[,;.!]|\b(?:yes|no)\s+to\s+(?:yes|no)\b"
+    r"|\b(?:via|at|with|into)\s*$|\b(?:via|at|into|by)\s*\(", re.I)
+# The holes a finished note can be judged by alone: ordinary English never has these ("log in on",
+# "with or without" do occur, so the wider HOLE_RE is only read as a change a scrub made, in clean()).
+CUT_RE = re.compile(r"\S[ \t]{2,}\S|(?:^|\s)=\S|\S=(?:\s|$)|\b(?:via|into)\s+(?:and|or|in|on|at|via|into|from|to|by|of)\b"
+                    r"|\b(?:via|into)\s*(?:[,;.!]|$)|\b(?:at|with|from)\s*[.;!,](?!\w)|\b(?:at|from|by)\s+(?:and|or)\b"
+                    r"|\b(?:yes|no)\s+to\s+(?:yes|no)\b|\b(?:via|at|into|by)\s*\(", re.I)
+RAW_LINK_RE = re.compile(r"&lt;https?://|<https?://[^>|]*\|[^>]*$", re.M)
+
+
+def holes(text: str) -> bool:
+    """Does a sentence read as if words were cut out of it?"""
+    return bool(HOLE_RE.search(SLACK_LINK_RE.sub("link", text or "")))
+
+
 def violations(text: str) -> list[str]:
     """What in a rendered note breaks the rule — empty when it reads the way the owner asked."""
     body, _links = take_links(text)
@@ -175,4 +238,10 @@ def violations(text: str) -> list[str]:
         bad.append("more than two links")
     if COMMAND_RE.search(body):
         bad.append("a command")
+    if RAW_LINK_RE.search(text):
+        bad.append("a raw mrkdwn link")
+    if any(CUT_RE.search(SLACK_LINK_RE.sub("link", re.sub(r"^_.*_$", "", ln))) for ln in text.splitlines()):
+        bad.append("a hole")
+    if re.search(r"^\s*(?:" + EMOJI + r"[\ufe0f\u200d]*\s*){2,}", text):
+        bad.append("two icons")
     return bad

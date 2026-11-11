@@ -240,4 +240,127 @@ os.environ["NOTE_SHAPER"] = "auto"
 check("auto with no key uses the CLI", note_shape.mode() == "claude")
 check("the shaper's statuses are the renderer's", note_shape.STATUSES == N.STATUSES)
 
+# --- Solo 1.4.1: owner, 2026-11-11, on the 1.4.0 factory digests: "same here repeat emojis, repeated
+# headlines to sections, half cut off messages". Inputs are real factory text: the ASK task t_76fb256e
+# raised (as staff-factory reporter/owner_digest.say_args sends it) and the Done notify for t_ac7d0418
+# (staff-factory docs/commands.md notify template). Nothing below is a reply the code writes itself.
+os.environ["NOTE_SHAPER"] = "off"
+VAULT_LINK = "https://factory.staffai.workers.dev/#factory/ask/t_76fb256e"
+VAULT_ASK = ("ASK: [high] Owner: set AGENTVM_VAULT_PER_CUSTOMER=off in ~/.config/agentvm/env on the call box and on "
+             "hillsboro (or install customer 0000…0001's login) so #2708 can board? | yes, then I board it via "
+             "dev/pr-merge.sh 2708 | keep #2708 parked")
+_q, *_opts = VAULT_ASK.split("] ", 1)[1].split(" | ")
+_point = f"❓ {_q[:109].rstrip()}… → {VAULT_LINK}"  # owner_digest cut(q, 110): the factory's own cut
+VAULT_SPEC = {"status": "ask", "headline": "Factory update: 1 decision for you", "points": [_point],
+              "details": _point, "options": _opts, "link": VAULT_LINK}
+DONE_3558 = ("Done on mini: Review #3558 at 0b5bdc6 (agentvm). The train drop for #3558 was a CI infrastructure flake "
+             "(apt could not fetch `age`), not a code fault; the PR's own CI is green on its head. I labelled it "
+             "release-fix, recorded the delta review of the Google-host fix, and boarded it on the ci-release train "
+             "again. It now waits for the train to merge it. (t_ac7d0418)")
+
+
+def model(reply):
+    return lambda prompt: json.dumps(reply)
+
+
+def plain(r):
+    return r["text"]
+
+
+check("a scrub that leaves '=off in  on' is a hole", R.holes("set =off in  on the call box"), "")
+check("'via  or no' is a hole", R.holes("board it via  or no"), "")
+check("'at (' left by a removed sha is a hole", R.holes("Review #3558 at (agentvm)"), "")
+check("a plain sentence has no hole", not R.holes("Turn the vault switch off on the call box?"), "")
+check("violations name a hole", "a hole" in R.violations("Set =off in  on the box."), R.violations("Set =off in  on the box."))
+check("violations name a raw mrkdwn link left as text", "a raw mrkdwn link" in R.violations("Reply &lt;https://h/x|Answer here&gt;"),
+      R.violations("Reply &lt;https://h/x|Answer here&gt;"))
+_v = N.option_words("yes, then I board it via dev/pr-merge.sh 2708")
+check("a choice keeps its plain words, without the script path or a dangling 'via'", _v == "Yes, then I board it", _v)
+
+for _buttons in (True, False):
+    _n = note_shape.build(_q, "owner-digest", VAULT_SPEC, buttons=_buttons)
+    _r = N.render(_n, buttons=_buttons)
+    _t = plain(_r)
+    check(f"vault digest (buttons={_buttons}): one icon, no hole, no raw link, no '…' in the body",
+          not R.violations(_t) and "…" not in _t and "&lt;" not in _t and "=off in" not in _t, _t)
+    check(f"vault digest (buttons={_buttons}): the choices are words, the script path is not", "Keep #2708 parked" in _t
+          and "pr-merge" not in _t and "Yes, then I board it" in _t, _t)
+    check(f"vault digest (buttons={_buttons}): the details are in the thread once", _r["details"].count("AGENTVM_VAULT") == 1
+          and "AGENTVM_VAULT" not in _t, repr(_r["details"]))
+_r = N.render(note_shape.build(_q, "owner-digest", VAULT_SPEC))
+_labels = [e["text"]["text"] for e in _r["blocks"][1]["elements"]]
+check("vault digest buttons read as words; the button still answers with the agent's own choice",
+      _labels[:2] == ["Yes, then I board it", "Keep #2708 parked"]
+      and _r["blocks"][1]["elements"][0]["value"] == _opts[0], _labels)
+
+_vm = model({"status": "ask", "headline": "#2708 waits on one setting on the call box and Hillsboro",
+             "summary": "The per-customer vault switch has to be off there, or customer 1's login installed, before it can board.",
+             "ask": "Turn it off so I can board it, or keep it parked?", "links": [{"url": VAULT_LINK, "label": "Answer here"}]})
+_r = N.render(note_shape.build(_q, "owner-digest", VAULT_SPEC, call=_vm))
+check("vault digest with the model: its headline, its sentence, the choices as buttons, details once",
+      _r["text"] == ("❓ #2708 waits on one setting on the call box and Hillsboro\n"
+                     "The per-customer vault switch has to be off there, or customer 1's login installed, before it can board.\n"
+                     "👉 Turn it off so I can board it, or keep it parked?\n"
+                     "_from owner-digest · details in the thread_")
+      and _r["blocks"] and _r["details"].count("AGENTVM_VAULT") == 1, _r["text"])
+
+_r = N.render(note_shape.build(DONE_3558, "factory", {}))
+_t = plain(_r)
+check("Done #3558 without the model: one icon, no 'Done on mini:' label, no hole left by the sha",
+      _t.count("✅") == 1 and "Done on mini" not in _t and "at (" not in _t and "0b5bdc6" not in _t
+      and not R.violations(_t), _t)
+check("Done #3558: the PR number stays, the task id stays out of the body", "#3558" in _t and "t_ac7d0418" not in _t, _t)
+check("Done #3558: the details are in the thread once", _r["details"].count("apt could not fetch") == 1
+      and "apt could not fetch" not in _t, _r["details"])
+_dm = model({"status": "ok", "headline": "✅ Done: #3558 is back on the release train",
+             "summary": "The train dropped it for a CI hiccup, not a code fault; its own CI is green. It now waits for the train to merge it.",
+             "ask": "", "links": []})
+_r = N.render(note_shape.build(DONE_3558, "factory", {}, call=_dm))
+check("Done #3558 with the model: the model's icon and 'Done:' label are not doubled",
+      _r["text"] == ("✅ #3558 is back on the release train\n"
+                     "The train dropped it for a CI hiccup, not a code fault; its own CI is green. It now waits for the train to merge it.\n"
+                     "_from factory · details in the thread_"), _r["text"])
+
+_n = N.from_text("DONE: origin/main merged into <https://github.com/o/r/pull/2767|#2767> with the text brain kept; CI green", "factory")
+check("a pulled-out link keeps its label in the sentence", "#2767" in _n.headline, repr(_n))
+_n = N.from_text("Merged <https://github.com/o/r/pull/2767|https://github.com/o/r/pull/2767> after review", "factory")
+check("a link whose label is its URL reads 'the PR'", "the PR" in N.render(_n)["text"], N.render(_n)["text"])
+_r = N.render(N.from_text("Ship v2? <https://h/ask/x|Answer here>", "release"))
+check("an Answer-here link is a link, not escaped text", "&lt;" not in _r["text"] and "<https://h/ask/x|" in _r["text"], _r["text"])
+_n = N.Note(status="ok", headline="✅ ✅ Done: shipped", summary="It is live.", sender="release")
+_g = N.render_group([_n, _n], "release")
+check("a digest headline that already has an icon gets exactly one", "✅ ✅" not in _g and "Done:" not in _g, _g)
+_e = N.group_thread(N.Note(status="ok", headline="Canary green", summary="All five hosts pass.", details="host 1..5 ok", sender="ops"))
+check("a digest thread entry is the summary and details, never the headline again", "Canary green" not in _e
+      and "🔎 *Details*" in _e, _e)
+_s = N.scrub(N.Note(status="ask", headline="Set =off in  on the box?", sender="ops", reshape=True))
+check("scrub replaces a holed headline with a plain one", not R.holes(_s.headline) and _s.headline and not _s.reshape, repr(_s))
+
+_n = N.from_text("Failed: deploy to prod", "ops")
+check("a 'Failed:' label still reads failed after the label goes", _n.status == "failed" and "Failed:" not in _n.headline, repr(_n))
+_w = N.choice_words(["Option 1 via scripts/a.sh", "Option 2 via scripts/b.sh"]) + N.choice_words(["run scripts/a.sh", "run scripts/b.sh"])
+check("two choices that read the same are told apart by number, never by the path",
+      len(set(_w[:2])) == 2 and len(set(_w[2:])) == 2 and not any("/" in w for w in _w), _w)
+_w = N.choice_words(["Rollback to 1", "Rollback to 2"])
+check("a number that is part of a choice stays in its button words", _w == ["Rollback to 1", "Rollback to 2"], _w)
+_n = N.scrub(N.Note(status="ask", headline="Restart `x`", summary="", ask="", sender="ops"), True, "Should I restart the queue worker now or wait?")
+check("a part the rules drop is kept in the details, never lost", "restart the queue worker" in _n.details, repr(_n))
+_h = "Failed: Helsinki nightly migration on the database host: the configured lock timeout ran out before the vacuum finished tonight"
+check("a long 'Failed:' headline that is split still reads failed", N.from_text(_h, "ops", headline=_h).status == "failed")
+check("a 'Blocked:' label reads held", N.from_text("Blocked: waiting on the vendor", "ops").status == "held")
+check("a hole a model leaves at the end of a sentence is caught", R.violations("✅ Restart it with.") == ["a hole"])
+_s = N.scrub(N.Note(status="ask", headline="Ship it?", sender="ops", options=["Yes via `deploy.sh a`", "Yes via `deploy.sh b`"],
+                    reshape=True), buttons=False)
+check("scrub checks the note as it is posted, buttons off too", not R.violations(N.render(_s, buttons=False)["text"]),
+      N.render(_s, buttons=False)["text"])
+_calls = []
+_once = lambda p: (_calls.append(p), _vm(p))[1]
+note_shape.build(_q, "owner-digest", VAULT_SPEC, call=_once)
+check("note_shape asks a model the same prompt once", len(_calls) == len(set(_calls)), len(_calls))
+check("plain English is not a hole", not R.violations("✅ Log in on Helsinki and restart it."), R.violations("✅ Log in on Helsinki and restart it."))
+_a = N.Note(status="ask", headline="Board #9?", summary="It waits on you.", sender="ops", options=["Board it", "Park it"])
+_e = N.group_thread(_a, named=False)
+check("a digest note past the named ones keeps its headline in the thread", "Board #9?" in _e, _e)
+check("a digest thread entry keeps the ask", "Board it" in N.group_thread(_a) and "Park it" in N.group_thread(_a), N.group_thread(_a))
+
 print(f"\n{passed} checks passed")

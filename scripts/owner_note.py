@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 
 import note_rules
@@ -101,6 +102,18 @@ def status_of(text: str) -> str:
     return "info"
 
 
+LABEL_STATUS = (("needs", "ask"), ("question", "ask"), ("ask", "ask"), ("fail", "failed"), ("warn", "warn"),
+                ("blocked", "held"), ("held", "held"), ("on hold", "held"), ("fix held", "held"), ("cancel", "held"),
+                ("shipping", "shipping"), ("done", "ok"), ("shipped", "ok"), ("live", "ok"))
+
+
+def label_status(piece: str) -> str | None:
+    """What the status word lead_off takes off says ("Blocked: …" is held), or None when there is none."""
+    m = note_rules.STATUS_LABEL_RE.match(note_rules.ICON_RE.sub("", piece or ""))
+    word = m.group(0).lower().strip() if m else ""
+    return next((st for w, st in LABEL_STATUS if word.startswith(w)), None)
+
+
 def worst(statuses) -> str:
     got = [s for s in statuses if s]
     return min(got, key=STATUSES.index) if got else "info"
@@ -118,7 +131,7 @@ def _protect(text: str):
     def keep(m):
         kept.append(m.group(0))
         return f"\x00{len(kept) - 1}\x00"
-    return re.sub(r"```.*?```|`[^`\n]+`|<[^>\s]+>|\bhttps?://[^\s<>|]+[^\s<>|.,;:!?)]", keep, text, flags=re.S), kept
+    return re.sub(r"```.*?```|`[^`\n]+`|<[^>\s|]+(?:\|[^>\n]*)?>|\bhttps?://[^\s<>|]+[^\s<>|.,;:!?)]", keep, text, flags=re.S), kept
 
 
 def _restore(text: str, kept: list[str]) -> str:
@@ -210,6 +223,7 @@ class Note:
     details: str = ""          # whole and unedited; goes in the thread
     options: list[str] = field(default_factory=list)
     sender: str = ""
+    reshape: bool = False      # a rule could not clean a part without leaving a hole: a model should word it
 
     @property
     def link(self) -> str:
@@ -227,15 +241,61 @@ CMD_NOTE = "The command is in the thread."
 REPLY_LINE_RE = re.compile(r"^\W*(?:please\s+)?(?:reply|respond|answer)\b[^?]{0,30}\b(?:yes|no|ok|approve|go)\b[^?]*$", re.I)
 
 
-def clean(piece: str) -> tuple[str, list, bool]:
-    """One piece of a note, to the rule: (text, links taken out of it, whether a command went)."""
-    t, links = note_rules.take_links(piece or "")
+def lead_off(text: str) -> str:
+    """A headline without the icon and status word the sender put first ("✅ Done: …"): the
+    renderer adds the one icon, which already says it. Each is taken off once, at the start."""
+    return note_rules.STATUS_LABEL_RE.sub("", note_rules.ICON_RE.sub("", text or ""), count=1)
+
+
+def clean(piece: str) -> tuple[str, list, bool, bool]:
+    """One piece of a note, to the rule: (text, links taken out of it, whether a command went,
+    whether the scrub left a hole). A piece the scrub would leave with a hole ("set =off in  on the
+    call box") comes back empty: it is a model's to word (note_shape), the agent's words are in Details."""
+    t, links = note_rules.take_links(lead_off(piece))
     t = note_rules.LABEL_RE.sub("", t.strip())
+    was = note_rules.tidy(t)
     t, had_cmd = note_rules.strip_machine(t)
     t = note_rules.tidy(humanize(t))
     if note_rules.COUNTER_RE.search(piece or "") and len(re.findall(r"[A-Za-z]+", t)) <= 4:
         t = ""  # a line of counters with the numbers gone says nothing
-    return (t if re.search(r"[A-Za-z]", t) else ""), links, had_cmd
+    if t and note_rules.holes(t) and not note_rules.holes(was):
+        return "", links, had_cmd, True
+    return (t if re.search(r"[A-Za-z]", t) else ""), links, had_cmd, False
+
+
+DANGLING_RE = re.compile(r"[\s,;:]+(?:via|in|on|at|with|into|to|from|by|of|using|and|or)$", re.I)
+
+
+def option_words(option: str, keep_number: bool = False) -> str:
+    """A choice as the words for the ask line: its plain meaning without the command or path
+    ("yes, then I board it via dev/pr-merge.sh 2708" reads "yes, then I board it"). The button keeps
+    the choice exactly as the agent wrote it. A number that is part of the choice ("Rollback to 2")
+    stays: only what a removed command or path left behind is cut."""
+    t = note_rules.tidy(humanize(note_rules.strip_machine(note_rules.take_links(option)[0])[0]))
+    u = note_rules.tidy(PATH_RE.sub("", re.sub(r"\S*/\S+", "", t)))
+    removed = u != t or note_rules.tidy(option) != t
+    t = u
+    while removed and (DANGLING_RE.search(t) or (not keep_number and re.search(r"\s\d+$", t))):
+        t = DANGLING_RE.sub("", t).strip()
+        if not keep_number:
+            t = re.sub(r"\s+\d+$", "", t)
+    t = t.strip(" ,;:")
+    if note_rules.holes(t):
+        t = re.split(r",\s*", t, 1)[0]
+    return t or option.split(",")[0].strip()
+
+
+def choice_words(options: list[str]) -> list[str]:
+    """The choices as words for the ask line and the buttons. If the plain words would make two
+    choices read the same, the agent's own number is kept ("Option 1", "Option 2"); only if they
+    still read the same are they numbered by position."""
+    def dup(ws):
+        low = [w.lower() for w in ws]
+        return [low.count(w) > 1 for w in low]
+    words = [option_words(o) for o in options]
+    kept = [option_words(o, True) for o in options]
+    words = [k if d else w for w, k, d in zip(words, kept, dup(words))]
+    return [f"{w} {i + 1}" if d else w for i, (w, d) in enumerate(zip(words, dup(words)))]
 
 
 def _and(words: list[str], conj: str = "and") -> str:
@@ -310,11 +370,15 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
     given = [(link, note_rules.label_for(link, "answer" if options else ""))] if link else []
     had_cmd, taken = False, []
 
+    holed, labels = False, []  # the status words lead_off took off: "Failed: …" still says failed
+
     def c(piece):
-        nonlocal had_cmd
-        t, ls, h = clean(piece)
+        nonlocal had_cmd, holed
+        t, ls, h, hole = clean(piece)
+        labels.append(label_status(piece))
         taken.extend(ls)
         had_cmd |= h and "one command" in t
+        holed |= hole
         return t
 
     asks = ""
@@ -322,9 +386,11 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
         points = [p.strip() for p in (points or []) if p and p.strip()]
         head, more = _split_long(c(headline))
         body = [more] + [c(p) for p in points[:SUMMARY_MAX]]
-        st = norm_status(status) or ("ask" if options else worst([status_of(head)] + [status_of(b) for b in body if b]))
+        if not head:  # the headline could not be cleaned: the first plain point stands in for it
+            head, body = next(((b, body[:i] + body[i + 1:]) for i, b in enumerate(body) if b), ("", body))
+        st = norm_status(status) or ("ask" if options else worst([status_of(head)] + [status_of(b) for b in body if b] + labels))
         extra = points[SUMMARY_MAX:]
-        whole = details if details is not None else (intent if intent and intent != headline.strip() else "")
+        whole = details if details is not None else _beyond(intent, [headline] + points)
         if extra and not all(x in whole for x in extra):
             whole = "\n".join(x for x in [whole] + extra if x)  # the points the body had no room for
         if had_cmd:  # the body says the command is in the thread: make sure it is
@@ -333,7 +399,7 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
     elif shaped:
         head, more = _split_long(c(shaped.get("headline") or ""))
         body = [more, c(note_rules.flat(shaped.get("summary") or ""))]
-        asks = c(shaped.get("ask") or "")
+        asks = c(shaped.get("ask") or "")  # the model's question; the choices are the options'
         taken[:0] = [(u, lb) for u, lb in shaped.get("links") or []]
         st = norm_status(status) or ("ask" if options else norm_status(shaped.get("status")) or "info")
         if not head:
@@ -342,8 +408,12 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
     else:
         cleaned = [x for x in (c(p) for p in _pieces(intent)) if x]
         # "Reply yes or no" is the old way to ask; the question before it is the ask, never the headline
-        if any(x.endswith("?") for x in cleaned):
-            cleaned = [x for x in cleaned if not REPLY_LINE_RE.match(x)] or cleaned
+        if options or any(x.endswith("?") for x in cleaned):
+            cleaned = [x for x in cleaned if not REPLY_LINE_RE.match(x)] or ([] if options else cleaned)
+        if not cleaned and holed:  # all of it was a hole: the note is a model's to word
+            note = Note(norm_status(status) or ("ask" if options else "info"), "", links=note_rules.merge_links(given, taken),
+                        details=details if details is not None else intent, options=options, sender=sender, reshape=True)
+            return note
         if not cleaned:
             st = norm_status(status) or ("ask" if options else "info")
             # Only counters, no words around them ("Canary green: 5/5"): the counter is the news.
@@ -354,7 +424,7 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
         ask_i = max((i for i, x in enumerate(cleaned) if x.endswith("?")), default=None)
         asks = cleaned[ask_i] if ask_i is not None else ""
         rest = [x for i, x in enumerate(cleaned) if i != ask_i]
-        statuses = [status_of(x) for x in cleaned]
+        statuses = [status_of(x) for x in cleaned] + labels
         if rest:
             rs = [status_of(x) for x in rest]
             lead = rs.index(worst(rs))
@@ -369,10 +439,19 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
     if had_cmd and CMD_NOTE not in summary:
         summary = (summary + " " + CMD_NOTE).strip()
     note = Note(st, head, summary, note_rules.sentence(asks) if asks else "", note_rules.merge_links(given, taken),
-                whole, options, sender)
-    if details is None and _norm(" ".join([head, summary, asks])) == _norm(intent):
+                whole, options, sender, reshape=holed or not head or len(head) > HEADLINE_MAX)
+    if details is None and not (Counter(_norm(note.details)) - Counter(_norm(" ".join([head, summary, asks])))):
         note.details = ""  # the body already says all of it: no thread
     return note
+
+
+def _beyond(intent: str, said: list[str]) -> str:
+    """What the agent's text says that its headline and points do not: that, and only that, is
+    Details. The same words twice — the body, then the body again in the thread — is noise."""
+    said_words = set(_norm(" ".join(said)))
+    lines = [ln for ln in (intent or "").splitlines() if ln.strip()]
+    rest = [ln for ln in lines if not set(_norm(note_rules.take_links(ln)[0])) <= said_words]
+    return "\n".join(rest) if rest else ""
 
 
 def _label(label: str) -> str:
@@ -380,9 +459,12 @@ def _label(label: str) -> str:
 
 
 def ask_line(note: Note, buttons: bool = True) -> str:
-    q, answer = emphasize(note.ask), note.link
+    q, answer, words = emphasize(note.ask), note.link, choice_words(note.options[:24])
+    if note.options and buttons and not q and not note.headline.endswith("?"):
+        # no question in plain words: the choices, as words, are the question; the buttons answer it
+        q = _escape(note_rules.sentence(_and(words, "or")).rstrip(".") + "?")
     if note.options and not buttons:
-        choices = _and([f"*{_escape(o)}*" for o in note.options], "or")
+        choices = _and([f"*{_escape(w)}*" for w in words], "or")
         q = f"{q} {choices}".strip()
         return f"👉 {q} — " + (f"<{answer}|Answer here>" if answer else "answer in the thread")
     if q and answer and not (note.options and buttons):
@@ -398,7 +480,7 @@ def footer(note: Note, has_details: bool) -> str:
 
 
 def body_lines(note: Note, buttons: bool = True) -> list[str]:
-    lines = [f"{ICONS[note.status]} {emphasize(note.headline)}"]
+    lines = [f"{ICONS[note.status]} {emphasize(lead_off(note.headline))}"]
     if note.summary:
         lines.append(emphasize(note.summary))
     q = ask_line(note, buttons)
@@ -431,9 +513,9 @@ def render(note: Note, buttons: bool = True) -> dict:
     blocks = None
     if note.options and buttons:
         elements = [{"type": "button", "action_id": f"solo_answer_{i}",
-                     "text": {"type": "plain_text", "text": o[:75], "emoji": True}, "value": o[:2000],
+                     "text": {"type": "plain_text", "text": w[:75], "emoji": True}, "value": o[:2000],
                      **({"style": "primary"} if i == 0 and o.lower() in ("yes", "ok", "go", "approve") else {})}
-                    for i, o in enumerate(note.options[:24])]
+                    for i, (o, w) in enumerate(zip(note.options[:24], choice_words(note.options[:24])))]
         if note.link:
             elements.append({"type": "button", "action_id": "solo_answer_link", "url": note.link,
                              "text": {"type": "plain_text", "text": "Open the answer page", "emoji": True}})
@@ -451,6 +533,41 @@ def answered_blocks(blocks: list[dict] | None, choice: str, who: str, at: str) -
     return kept + [{"type": "context", "elements": [{"type": "mrkdwn", "text": f"✔️ *{choice}* — answered by {who} at {at}"}]}]
 
 
+def group_thread(note: Note, details: bool = True, named: bool = True) -> str:
+    """A grouped note's entry in the thread: what the one-line entry in the message does not say —
+    its sentences, its question, its links and its details — and its headline only when the message
+    did not name it (owner, 2026-11-11: "repeated headlines to sections"). `details=False` when its
+    details are already in the thread."""
+    parts = body_lines(note, buttons=False)[0 if not named else 1:]
+    if details and note.details:
+        parts.append("🔎 *Details*\n" + note.details)
+    return "\n".join(parts)
+
+
+def scrub(note: Note, buttons: bool = True, body: str = "") -> Note:
+    """The last resort when neither the rules nor a model gave a note that keeps the rule: each
+    part that breaks it is dropped (the agent's words are whole in Details), and a headline that
+    breaks it gives way to the first part that does not."""
+    def ok(t):
+        return bool(t) and not note_rules.violations(t) and len(t) <= HEADLINE_MAX * 2
+    before = (note.headline, note.summary, note.ask, list(note.options))
+    keep = [x for x in (note.headline, note.summary, note.ask) if ok(x)]
+    head = note.headline if ok(note.headline) else (keep.pop(0) if keep else _FALLBACK.get(note.status, "An update."))
+    note.summary = note.summary if ok(note.summary) and note.summary != head else ""
+    note.ask = note.ask if ok(note.ask) and note.ask != head else ""
+    note.headline, note.reshape = head, False
+    if note_rules.violations(render(note, buttons)["text"]):  # the ask line or a link still breaks it
+        note.summary, note.ask = "", ""
+    if note_rules.violations(render(note, buttons)["text"]):  # the choices' words do: Details has them
+        note.options, note.links = [], []
+    if body and (note.headline, note.summary, note.ask, note.options) != before and body.strip() not in (note.details or ""):
+        note.details = (note.details + "\n" if note.details else "") + body.strip()  # a dropped part is never lost
+    return note
+
+
+_FALLBACK = {"ask": "A decision is waiting for you.", "failed": "Something failed.", "warn": "Something needs a look.",
+             "held": "Something is on hold.", "shipping": "Something is on its way.", "ok": "Done.", "info": "An update."}
+
 GROUP_NAMED = 3
 
 
@@ -461,7 +578,7 @@ def render_group(notes: list[Note], sender: str = "") -> str:
         return render(notes[0])["text"]
     st = worst(n.status for n in notes)
     head = f"{ICONS[st]} *{len(notes)} updates*" + (f" from {sender}" if sender else "") + "."
-    said = [f"{ICONS[n.status]} {emphasize(note_rules.sentence(n.headline))}" for n in notes[:GROUP_NAMED]]
+    said = [f"{ICONS[n.status]} {emphasize(note_rules.sentence(lead_off(n.headline)))}" for n in notes[:GROUP_NAMED]]
     if len(notes) > GROUP_NAMED:
         said.append(f"And {len(notes) - GROUP_NAMED} more in the thread.")
     return " ".join([head] + said) + "\n_each one's detail is in the thread_"

@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased
+## 1.4.1 — 2026-11-11
+
+**Factory notes read once, whole, with one icon**
+- The owner, 11 Nov, on the 1.4.0 factory digests: "same here repeat emojis, repeated headlines to
+  sections, half cut off messages". A headline loses one leading icon and status label ("Done on
+  mini:", "✅ Done:") before it gets exactly one icon; it is never cut, and a headline that would be
+  long or broken goes to the model (`note_shape.build`) instead.
+- A link taken out of a sentence leaves its label there ("#2767"); a label that is only a URL reads
+  "the PR". PR numbers stay.
+- One copy: the message is the icon headline, two or three sentences, the 👉 ask with buttons, and
+  the footer. The thread holds the details once; a digest's thread entry is that note's details,
+  never its headline again, and a note the message already says in full gets no thread entry.
+  `<url|Answer here>` is no longer escaped to raw text.
+- Asks: settings, paths and env names are not scrubbed into holes ("=off in  on"); a scrub that would
+  leave one hands the note to the model. `note_rules.violations()` names "a hole" and "a raw mrkdwn
+  link"; the renderer re-shapes, or falls back to a plain line, instead of posting a violating note.
+  `--option` choices are the question and button labels in plain words (no script paths); a button
+  still answers with the agent's own words, which stay in Details.
+- Golden tests use real factory text: task t_76fb256e's ASK as the factory digest sends it, and a
+  Done notify (tests/test_owner_note.py).
+
+**Also in 1.4.1 (merged since 1.4.0)**
 
 **A project's questions, SRs and dev requests go to the factory**
 - `~/.slack-autoreply/intake.json` names a factory repo, the channels to watch (a customer channel
@@ -14,7 +35,6 @@
 - Anything to a customer is a draft, an ack auto-sends only to internal people, and a merged PR
   brings a drafted update for the requester in the same thread.
 
-## Unreleased — owner notes
 
 **Every note to the owner reads to the owner's rule**
 - The owner, 10 Nov, after a budget ask full of task ids and counters and a release note of bullets
