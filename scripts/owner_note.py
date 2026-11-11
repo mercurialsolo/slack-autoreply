@@ -101,6 +101,9 @@ def status_of(text: str) -> str:
     return "info"
 
 
+_status_of = status_of  # from_text reads a piece's status before its "Failed:" label goes
+
+
 def worst(statuses) -> str:
     got = [s for s in statuses if s]
     return min(got, key=STATUSES.index) if got else "info"
@@ -267,6 +270,13 @@ def option_words(option: str) -> str:
     return t or option.split(",")[0].strip()
 
 
+def choice_words(options: list[str]) -> list[str]:
+    """The choices as words for the ask line and the buttons. If the plain words would make two
+    choices read the same ("Option 1", "Option 2" both "Option"), each keeps the agent's words."""
+    words = [option_words(o) for o in options]
+    return words if len({w.lower() for w in words}) == len(words) else list(options)
+
+
 def _and(words: list[str], conj: str = "and") -> str:
     return words[0] if len(words) == 1 else ", ".join(words[:-1]) + f" {conj} " + words[-1]
 
@@ -339,15 +349,20 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
     given = [(link, note_rules.label_for(link, "answer" if options else ""))] if link else []
     had_cmd, taken = False, []
 
-    holed = False
+    holed, said = False, {}
 
     def c(piece):
         nonlocal had_cmd, holed
         t, ls, h, hole = clean(piece)
+        label = (piece or "")[:len(piece or "") - len(lead_off(piece))]  # "Failed: …" says failed, after "Failed:" goes
+        said[t] = worst([said.get(t), _status_of(label) if label.strip() else None])
         taken.extend(ls)
         had_cmd |= h and "one command" in t
         holed |= hole
         return t
+
+    def read_status(x):  # what the piece's label said before it went, or what is left says
+        return worst([said.get(x), _status_of(x)])
 
     asks = ""
     if headline:
@@ -356,7 +371,7 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
         body = [more] + [c(p) for p in points[:SUMMARY_MAX]]
         if not head:  # the headline could not be cleaned: the first plain point stands in for it
             head, body = next(((b, body[:i] + body[i + 1:]) for i, b in enumerate(body) if b), ("", body))
-        st = norm_status(status) or ("ask" if options else worst([status_of(head)] + [status_of(b) for b in body if b]))
+        st = norm_status(status) or ("ask" if options else worst([read_status(head)] + [read_status(b) for b in body if b]))
         extra = points[SUMMARY_MAX:]
         whole = details if details is not None else _beyond(intent, [headline] + points)
         if extra and not all(x in whole for x in extra):
@@ -367,7 +382,7 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
     elif shaped:
         head, more = _split_long(c(shaped.get("headline") or ""))
         body = [more, c(note_rules.flat(shaped.get("summary") or ""))]
-        asks = "" if options else c(shaped.get("ask") or "")  # with choices, the ask is the options'
+        asks = c(shaped.get("ask") or "")  # the model's question; the choices are the options'
         taken[:0] = [(u, lb) for u, lb in shaped.get("links") or []]
         st = norm_status(status) or ("ask" if options else norm_status(shaped.get("status")) or "info")
         if not head:
@@ -392,9 +407,9 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
         ask_i = max((i for i, x in enumerate(cleaned) if x.endswith("?")), default=None)
         asks = cleaned[ask_i] if ask_i is not None else ""
         rest = [x for i, x in enumerate(cleaned) if i != ask_i]
-        statuses = [status_of(x) for x in cleaned]
+        statuses = [read_status(x) for x in cleaned]
         if rest:
-            rs = [status_of(x) for x in rest]
+            rs = [read_status(x) for x in rest]
             lead = rs.index(worst(rs))
             head, others = rest[lead], rest[:lead] + rest[lead + 1:]
         else:
@@ -430,9 +445,9 @@ def ask_line(note: Note, buttons: bool = True) -> str:
     q, answer = emphasize(note.ask), note.link
     if note.options and buttons and not q and not note.headline.endswith("?"):
         # no question in plain words: the choices, as words, are the question; the buttons answer it
-        q = _escape(note_rules.sentence(_and([option_words(o) for o in note.options], "or")).rstrip(".") + "?")
+        q = _escape(note_rules.sentence(_and(choice_words(note.options), "or")).rstrip(".") + "?")
     if note.options and not buttons:
-        choices = _and([f"*{_escape(option_words(o))}*" for o in note.options], "or")
+        choices = _and([f"*{_escape(w)}*" for w in choice_words(note.options)], "or")
         q = f"{q} {choices}".strip()
         return f"👉 {q} — " + (f"<{answer}|Answer here>" if answer else "answer in the thread")
     if q and answer and not (note.options and buttons):
@@ -481,9 +496,9 @@ def render(note: Note, buttons: bool = True) -> dict:
     blocks = None
     if note.options and buttons:
         elements = [{"type": "button", "action_id": f"solo_answer_{i}",
-                     "text": {"type": "plain_text", "text": (option_words(o) or o)[:75], "emoji": True}, "value": o[:2000],
+                     "text": {"type": "plain_text", "text": w[:75], "emoji": True}, "value": o[:2000],
                      **({"style": "primary"} if i == 0 and o.lower() in ("yes", "ok", "go", "approve") else {})}
-                    for i, o in enumerate(note.options[:24])]
+                    for i, (o, w) in enumerate(zip(note.options[:24], choice_words(note.options[:24])))]
         if note.link:
             elements.append({"type": "button", "action_id": "solo_answer_link", "url": note.link,
                              "text": {"type": "plain_text", "text": "Open the answer page", "emoji": True}})
@@ -501,11 +516,12 @@ def answered_blocks(blocks: list[dict] | None, choice: str, who: str, at: str) -
     return kept + [{"type": "context", "elements": [{"type": "mrkdwn", "text": f"✔️ *{choice}* — answered by {who} at {at}"}]}]
 
 
-def group_thread(note: Note, details: bool = True) -> str:
+def group_thread(note: Note, details: bool = True, named: bool = True) -> str:
     """A grouped note's entry in the thread: what the one-line entry in the message does not say —
-    its sentences and its details — never its headline again (owner, 2026-11-11: "repeated
-    headlines to sections"). `details=False` when its details are already in the thread."""
-    parts = [_escape(note.summary)] if note.summary else []
+    its sentences, its question, its links and its details — and its headline only when the message
+    did not name it (owner, 2026-11-11: "repeated headlines to sections"). `details=False` when its
+    details are already in the thread."""
+    parts = body_lines(note, buttons=False)[0 if not named else 1:]
     if details and note.details:
         parts.append("🔎 *Details*\n" + note.details)
     return "\n".join(parts)
@@ -522,6 +538,8 @@ def scrub(note: Note) -> Note:
     note.summary = note.summary if ok(note.summary) and note.summary != head else ""
     note.ask = note.ask if ok(note.ask) and note.ask != head else ""
     note.headline, note.reshape = head, False
+    if note_rules.violations(render(note)["text"]):  # the ask line or a link still breaks it: the headline alone
+        note.summary, note.ask = "", ""
     return note
 
 

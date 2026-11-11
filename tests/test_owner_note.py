@@ -300,7 +300,7 @@ _r = N.render(note_shape.build(_q, "owner-digest", VAULT_SPEC, call=_vm))
 check("vault digest with the model: its headline, its sentence, the choices as buttons, details once",
       _r["text"] == ("❓ #2708 waits on one setting on the call box and Hillsboro\n"
                      "The per-customer vault switch has to be off there, or customer 1's login installed, before it can board.\n"
-                     "👉 Yes, then I board it or Keep #2708 parked?\n"
+                     "👉 Turn it off so I can board it, or keep it parked?\n"
                      "_from owner-digest · details in the thread_")
       and _r["blocks"] and _r["details"].count("AGENTVM_VAULT") == 1, _r["text"])
 
@@ -335,5 +335,16 @@ check("a digest thread entry is the summary and details, never the headline agai
       and "🔎 *Details*" in _e, _e)
 _s = N.scrub(N.Note(status="ask", headline="Set =off in  on the box?", sender="ops", reshape=True))
 check("scrub replaces a holed headline with a plain one", not R.holes(_s.headline) and _s.headline and not _s.reshape, repr(_s))
+
+_n = N.from_text("Failed: deploy to prod", "ops")
+check("a 'Failed:' label still reads failed after the label goes", _n.status == "failed" and "Failed:" not in _n.headline, repr(_n))
+check("two choices that read the same keep their own words on the buttons",
+      N.choice_words(["Option 1 via scripts/a.sh", "Option 2 via scripts/b.sh"]) != ["Option 1", "Option 1"]
+      and len(set(N.choice_words(["run scripts/a.sh", "run scripts/b.sh"]))) == 2)
+check("plain English is not a hole", not R.violations("✅ Log in on Helsinki and restart it."), R.violations("✅ Log in on Helsinki and restart it."))
+_a = N.Note(status="ask", headline="Board #9?", summary="It waits on you.", sender="ops", options=["Board it", "Park it"])
+_e = N.group_thread(_a, named=False)
+check("a digest note past the named ones keeps its headline in the thread", "Board #9?" in _e, _e)
+check("a digest thread entry keeps the ask", "Board it" in N.group_thread(_a) and "Park it" in N.group_thread(_a), N.group_thread(_a))
 
 print(f"\n{passed} checks passed")

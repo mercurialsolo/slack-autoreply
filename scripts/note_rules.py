@@ -209,6 +209,10 @@ HOLE_RE = re.compile(
     r"|\b(?:in|on)\s+(?:in|on|at|via|into)\b|\bto\s+(?:and|or|at|via|into|from|by|of)\b"
     r"|\b(?:via|at|with|by|into)\s*[,;.!]|\b(?:yes|no)\s+to\s+(?:yes|no)\b"
     r"|\b(?:via|at|with|into)\s*$|\b(?:via|at|into|by)\s*\(", re.I)
+# The holes a finished note can be judged by alone: ordinary English never has these ("log in on",
+# "with or without" do occur, so the wider HOLE_RE is only read as a change a scrub made, in clean()).
+CUT_RE = re.compile(r"\S[ \t]{2,}\S|(?:^|\s)=\S|\S=(?:\s|$)|\b(?:via|into)\s+(?:and|or|in|on|at|via|into|from|to|by|of)\b"
+                    r"|\b(?:via|into)\s*(?:[,;.!]|$)|\b(?:yes|no)\s+to\s+(?:yes|no)\b|\b(?:via|at|into|by)\s*\(", re.I)
 RAW_LINK_RE = re.compile(r"&lt;https?://|<https?://[^>|]*\|[^>]*$", re.M)
 
 
@@ -235,7 +239,7 @@ def violations(text: str) -> list[str]:
         bad.append("a command")
     if RAW_LINK_RE.search(text):
         bad.append("a raw mrkdwn link")
-    if any(holes(re.sub(r"^_.*_$", "", ln)) for ln in text.splitlines()):
+    if any(CUT_RE.search(SLACK_LINK_RE.sub("link", re.sub(r"^_.*_$", "", ln))) for ln in text.splitlines()):
         bad.append("a hole")
     if re.search(r"^\s*(?:" + EMOJI + r"[\ufe0f\u200d]*\s*){2,}", text):
         bad.append("two icons")

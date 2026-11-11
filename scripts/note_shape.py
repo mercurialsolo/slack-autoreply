@@ -138,21 +138,28 @@ def build(body: str, sender: str, spec: dict | None = None, call=None, buttons: 
     kw = dict(status=spec.get("status"), details=spec.get("details"), options=spec.get("options"),
               link=spec.get("link") or "")
     context = "\n".join([spec.get("headline") or ""] + list(spec.get("points") or []) + [body]).strip()
-    whole = spec.get("details") if spec.get("details") is not None else body
+    asked = set()  # the prompts a model already answered: the same one again costs time, not a better note
+
+    def ask(text, force=False):
+        out = shape(text, call=call, force=force) if text not in asked else None
+        if out:
+            asked.add(text)
+        return out
+
     if spec.get("headline"):
         # The sender's own parts. A digest's ("Factory update: 1 decision for you", points of links
         # and paths) still wants judgment: a model words it when one can; else the parts, by the rules.
-        shaped = shape(context, call=call) if wanted(context) or call else None
-        note = owner_note.from_text(body, sender, shaped=shaped, **{**kw, "details": whole}) if shaped else None
+        shaped = ask(context) if wanted(context) or call else None
+        note = owner_note.from_text(body, sender, shaped=shaped, **kw) if shaped else None
         if note is None or _broken(note, buttons):
             note = owner_note.from_text(body, sender, headline=spec["headline"], points=spec.get("points"), **kw)
     else:
-        note = owner_note.from_text(body, sender, shaped=shape(body, call=call), **kw)
+        note = owner_note.from_text(body, sender, shaped=ask(body), **kw)
     if not _broken(note, buttons):
         return note
-    again = shape(context, call=call, force=True)
+    again = ask(context, force=True)
     if again:
-        redo = owner_note.from_text(body, sender, shaped=again, **{**kw, "details": whole})
+        redo = owner_note.from_text(body, sender, shaped=again, **kw)
         if not _broken(redo, buttons):
             return redo
         note = redo

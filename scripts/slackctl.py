@@ -1339,7 +1339,7 @@ def deliver_to_owner(slack: Slack, item: dict, text: str) -> tuple[str, list[str
             # Each note once: the message names it, the thread holds what the name does not say.
             # The first note's sentences just left the message (its details are in the thread already).
             for entry in ([owner_note.group_thread(notes[0], details=False)] if len(notes) == 2 else []) + [
-                    owner_note.group_thread(note)]:
+                    owner_note.group_thread(note, named=len(notes) <= owner_note.GROUP_NAMED)]:
                 if entry:
                     slack.console_post(entry, thread_ts=ts)
             slack._ping(r["text"])  # noqa: SLF001 - an edit does not notify
