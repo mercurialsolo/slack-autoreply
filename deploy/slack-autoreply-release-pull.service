@@ -1,0 +1,15 @@
+# systemd user unit, started by slack-autoreply-release-pull.timer: move the node to the newest
+# release tag (deploy/release-pull.sh). install-release-timer.sh fills in __HOME__, __REPO__, __PATH__.
+[Unit]
+Description=slack-autoreply: deploy the newest solo--v release tag
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__REPO__
+ExecStart=/bin/bash __REPO__/deploy/release-pull.sh
+# 1 = refused (the old daemon still runs), 2 = rolled back: both are reported, neither is a unit failure
+SuccessExitStatus=1 2
+Environment=PATH=__PATH__
+Environment=HOME=__HOME__
+Environment=SOLO_REPO=__REPO__
