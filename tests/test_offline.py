@@ -1678,6 +1678,19 @@ check("a say that raised is seen to raise", _raised)
 _n_crash = len(_con.posted)
 S.cmd_say(_say_args("Porto shipped v3.0.0, all checks green", to="@barada", frm="crash-agent"))
 check("…and its immediate retry is sent, not reported as already sent", len(_con.posted) > _n_crash, _con.posted[_n_crash:])
+# Interrupted once the post began, the words may be out with no outcome saved: no second post.
+def _intr(*a, **k): raise KeyboardInterrupt
+S.execute_decision = _intr
+try:
+    S.cmd_say(_say_args("Faro shipped v4.0.0, all checks green", to="@barada", frm="crash-agent"))
+    _intr_raised = False
+except KeyboardInterrupt:
+    _intr_raised = True
+S.execute_decision = _real_exec
+_n_intr = len(_con.posted)
+_intr_out = _capture(lambda: S.cmd_say(_say_args("Faro shipped v4.0.0, all checks green", to="@barada", frm="crash-agent")))
+check("a say interrupted mid-post keeps its claim: the retry is not posted again",
+      _intr_raised and len(_con.posted) == _n_intr and "still being composed" in _intr_out, _intr_out)
 
 _rd_ts = "1700000077.100"
 _rd_id = f"{D}-{_rd_ts.replace('.', '_')}"
@@ -1757,6 +1770,18 @@ check("say retry: a fresh claim whose process is gone died — allowed",
       S.say_retry_allowed({"at": _now - 5, "pid": 2 ** 22 + 12345}, now=_now))
 check("say retry: a fresh claim whose process is alive is in flight — blocked",
       not S.say_retry_allowed({"at": _now - 5, "pid": os.getpid()}, now=_now))
+S.save_item(dict(_ok_item, id="say-queuedtest", status="queued", outcome=None))
+check("say retry: a dead process that saved its item (queued for a writer, or killed after the post) "
+      "blocks the repeat until the claim is stale",
+      not S.say_retry_allowed({"at": _now - 5, "pid": 2 ** 22 + 12345, "id": "say-queuedtest"}, now=_now)
+      and S.say_retry_allowed({"at": _now - S.SAY_STALE_S - 1, "pid": 2 ** 22 + 12345, "id": "say-queuedtest"},
+                              now=_now))
+check("say retry: a dead process whose id is claimed but whose item never reached disk said nothing — allowed",
+      S.say_retry_allowed({"at": _now - 5, "pid": 2 ** 22 + 12345, "id": "say-neversaved"}, now=_now))
+for _later in ("clean", "deleted", "replaced", "overtaken", "missed"):
+    S.save_item(dict(_ok_item, id="say-latertest", status="done", outcome={"status": _later}))
+    check(f"say retry: a say that went out and was later marked {_later!r} still blocks the repeat",
+          not S.say_retry_allowed({"at": _now - 5, "id": "say-latertest"}, now=_now))
 for _st_name, _want in (("handling", False), ("decided", False), ("failed", False), ("queued", False), ("ignored", True)):
     S.save_item(dict(_rd_item, id="rd-status-test", status=_st_name, outcome={"status": _st_name}))
     check(f"a redelivered message whose run was left {_st_name!r} is {'skipped' if _want else 'handled again'}",

@@ -203,22 +203,27 @@ class Once:
     def record(self, k: str, **info) -> None:
         self._update(lambda d: d.setdefault(k, {"at": time.time()}).update(info))
 
-    def release(self, k: str) -> None:
-        """The post failed: the next try must not be taken for a duplicate."""
-        self._update(lambda d: d.pop(k, None))
+    def release(self, k: str, pid: int | None = None) -> None:
+        """The post failed: the next try must not be taken for a duplicate. With `pid`, only a claim
+        that process still holds is dropped — a retry may have taken it over meanwhile."""
+        def go(d):
+            if pid is None or (d.get(k) or {}).get("pid") == pid:
+                d.pop(k, None)
+        self._update(go)
 
 
 # ------------------------------------------------------------------ an agent's `say`, said once
 
-# Outcomes where the words reached someone, or wait for the owner's ✅. Anything else (failed,
-# dropped, ignored, simulated…) said nothing, and the same words again are a fair retry.
-SAID = frozenset({"sent", "sent_from_draft", "drafted", "escalated", "escalated_draft", "routed", "acked", "done",
-                  "corrected"})
+# Outcomes where the words reached no one, so the same words again are a fair retry. Anything
+# else — sent, drafted, escalated, and whatever later became of it (clean, deleted, replaced…) —
+# reached someone or waits for the owner's ✅. A deny-list: an outcome added later blocks a repeat.
+UNSAID = frozenset({"failed", "dropped", "ignored", "simulated", "no_reply", "ack_withheld"})
 
 
 def said(item: dict) -> bool:
     """This `say` item's words reached someone, or wait for the owner."""
-    return item.get("status") != "failed" and (item.get("outcome") or {}).get("status") in SAID
+    st = (item.get("outcome") or {}).get("status")
+    return item.get("status") != "failed" and bool(st) and st not in UNSAID
 
 
 def alive(pid) -> bool:
@@ -235,13 +240,17 @@ def say_retry_allowed(prev: dict, item: dict, now: float, stale_s: float) -> boo
     """A `say` with these words was claimed before (`prev`, its item `item` or {}). True when the
     same words again are a new try rather than a duplicate: the ask was answered (asking again is a
     new question), the try said nothing, or it never reached an outcome and its process is gone or
-    its claim is stale. A try still running, or one that was said, blocks the repeat."""
+    its claim is stale. A try still running, or one that was said, blocks the repeat.
+
+    A dead process only frees the words while it had saved no item: once one is on disk it may
+    still be queued for a writer, or the process died between the post and saving the outcome —
+    then only the stale window lets the words go again."""
     if item.get("answer"):
         return True
     if item.get("status") == "failed" or (item.get("outcome") and not said(item)):
         return True
     if item.get("outcome"):
         return False
-    if prev.get("pid") and not alive(prev["pid"]):
+    if not item and prev.get("pid") and not alive(prev["pid"]):
         return True
     return now - float(prev.get("at") or 0) >= stale_s

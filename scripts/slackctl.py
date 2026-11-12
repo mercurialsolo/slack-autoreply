@@ -4015,6 +4015,7 @@ def cmd_say(a):
             f"the same words from {a.from_} are still being composed ({mins} min ago); not queued again)"))
         return
     say_id = f"say-{uuid.uuid4().hex[:8]}"
+    posting = False   # set just before anything can reach Slack
     try:
         item = {"id": say_id, "created": now_iso(), "status": "queued",
                 "simulated": False, "outbound": True, "origin": f"agent:{a.from_}",
@@ -4043,8 +4044,10 @@ def cmd_say(a):
             item["context"] = (f"(outbound — {a.from_} investigated this because {tgt['sender_name']} asked: "
                                f"{(src.get('text') or '')[:300]}"
                                + (f"; {a.why}" if a.why else "") + ")")
-        save_item(item)
+        # The id goes in the claim before the item is saved: a retry that finds an id with no item
+        # on disk knows nothing was queued, one that finds the item knows it may still be.
         outbox().record(once_key, id=item["id"])
+        save_item(item)
         print(f"queued {item['id']} → {name} (asked by {a.from_})" + (f" with {describe_files(files)}" if files else ""))
         if channel in (s.self_dm, s.bot_dm):
             # Same test `execute_decision` applies: the owner's own DM. The words are the agent's,
@@ -4054,6 +4057,7 @@ def cmd_say(a):
             save_item(item)
             ledger, _ = load_services()
             fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
+            posting = True
             print(execute_decision(s, item, item["decision"], ledger, fus, set(), state=State()))
             return
         if CFG["dispatch"] != "claude":
@@ -4086,6 +4090,7 @@ def cmd_say(a):
                      f"   the message is in the owner's Solo DM in your own words instead — nothing was sent to anyone")
         ledger, _ = load_services()
         fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
+        posting = True
         outcome = execute_decision(s, item, item["decision"], ledger, fus, set(), state=State())
         if re_item:
             # The loop closes once there is a draft, so `delegations` can tell a task that came back
@@ -4093,11 +4098,14 @@ def cmd_say(a):
             record_delegation(item=re_item, role=a.from_, outcome="reported", say=item["id"],
                               report=a.intent[:200])
         print(outcome)
-    except BaseException:
-        # It raised, exited or was interrupted. If the words reached no one, a retry must be
-        # allowed to try at once; if they did (a draft is up), a retry would say them twice.
-        if not outbound.said(peek_item(say_id)):
-            outbox().release(once_key)
+    except BaseException as e:
+        # It raised, exited or was interrupted. If it stopped before the post, or the post itself
+        # raised (Slack refused it), a retry must be allowed to try at once. Interrupted once the
+        # post began, the words may be out with no outcome saved yet: the claim stays, and a retry
+        # waits for an outcome or the stale window. Only our own claim is dropped — a retry may
+        # hold it already (a failed item is a fair retry).
+        if (not posting or isinstance(e, Exception)) and not outbound.said(peek_item(say_id)):
+            outbox().release(once_key, pid=os.getpid())
         raise
 
 

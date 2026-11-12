@@ -103,6 +103,16 @@ with tempfile.TemporaryDirectory() as tmp:
     check("once: after the window it may post again", O.Once(p).claim(k, 60, now=1100) is None)
     O.Once(p).release(k)
     check("once: a released key posts again at once", O.Once(p).claim(k, 60, now=1101) is None)
+    O.Once(p).release(k)
+    check("once: a claim with a pid is taken", O.Once(p).claim(k, 60, now=2000, pid=111) is None)
+    O.Once(p).release(k, pid=222)
+    check("once: a release by another process leaves the claim that a retry took over",
+          O.Once(p).claim(k, 60, now=2001) is not None)
+    O.Once(p).release(k, pid=111)
+    check("once: a release by the holder drops it", O.Once(p).claim(k, 60, now=2002) is None)
+    check("said: an outcome nobody saw is not said, any other is",
+          not O.said({"outcome": {"status": "ignored"}}) and not O.said({"status": "queued"})
+          and O.said({"outcome": {"status": "clean"}}) and not O.said({"status": "failed", "outcome": {"status": "sent"}}))
     p.write_text("not json")
     check("once: a broken ledger is a fresh one, not a crash", O.Once(p).claim("z", 60) is None)
 
