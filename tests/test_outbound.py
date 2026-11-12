@@ -133,7 +133,7 @@ check("fold: a multi-line head keeps its lines", _h3.count("\n") >= 14, _h3[:80]
 
 # Review round 1 (max): what the rewrites must keep.
 check("plain: a < b … c > d is prose, and the code inside it is not leaked as a placeholder",
-      O.plain("if a < b and `c` > d") == "if a < b and `c` > d")
+      O.plain("if a < b and `c` > d") == "if a &lt; b and `c` &gt; d")   # Slack renders &lt; as <; a raw < opens markup
 check("plain: 'Factory task t_… for' keeps every word but the id",
       O.plain("Factory task t_abc12345 for Priyas bug") == "Factory task for Priyas bug")
 check("plain: an id that begins a sentence becomes 'the task'", O.plain("t_abc12345 finished") == "the task finished")
@@ -152,5 +152,35 @@ with tempfile.TemporaryDirectory() as tmp:
 check("said: dropped said nothing, sent did",
       not O.said({"outcome": {"status": "dropped"}}) and O.said({"outcome": {"status": "sent"}}))
 check("said: a failed item said nothing", not O.said({"status": "failed", "outcome": {"status": "sent"}}))
+
+# PR #7 review follow-ups.
+check("plain: a URL inside <prose> is linked once, and the brackets read as text",
+      O.plain("see <the doc at https://x.com/a> now") == "see &lt;the doc at <https://x.com/a|Open it>&gt; now",
+      O.plain("see <the doc at https://x.com/a> now"))
+check("plain: no 'the the task' or 'a the task'",
+      O.plain("Started a t_abc12345 run") == "Started a task run" and "the the" not in O.plain("Watch the t_abc12345 closely"),
+      (O.plain("Started a t_abc12345 run"), O.plain("Watch the t_abc12345 closely")))
+check("plain: 'an t_…' becomes 'a task', not 'an task'", O.plain("Open an t_abc12345 now") == "Open a task now",
+      O.plain("Open an t_abc12345 now"))
+check("url_tail: a trailing _ that belongs to the URL stays in it",
+      R.url_tail("https://example.com/foo_", "see ") == ("https://example.com/foo_", ""))
+check("url_tail: a _ that closes italics goes back to the sentence",
+      R.url_tail("https://example.com/foo_", "see _") == ("https://example.com/foo", "_"))
+check("url_tail: a closing quote always goes back to the sentence",
+      R.url_tail("https://example.com/a\u201d", "x") == ("https://example.com/a", "\u201d"))
+check("plain: italics around a URL stay outside the link",
+      O.plain("_https://example.com/foo_") == "_<https://example.com/foo|Open it>_", O.plain("_https://example.com/foo_"))
+check("plain: a URL ending in _ keeps it", O.plain("see https://example.com/foo_") == "see <https://example.com/foo_|Open it>",
+      O.plain("see https://example.com/foo_"))
+check("take_links: note_rules keeps a URL's own _, and gives italics' _ back to the sentence",
+      R.take_links("see https://example.com/foo_ now")[1][0][0] == "https://example.com/foo_"
+      and R.take_links("see _https://example.com/foo_ now")[1][0][0] == "https://example.com/foo")
+check("plain: a NUL byte in the text cannot break placeholder restore",
+      isinstance(O.plain("odd \x00 9\x00 byte `code`"), str) and "\x00" not in O.plain("odd \x00 9\x00 byte `code`"))
+check("unlinked: mentions, channels and specials read as words; entities unescape",
+      O.unlinked("<@U1|ana> and <@U2> in <#C1|ops>, <!here>: a &lt; b &amp; c") == "@ana and someone in #ops, @here: a < b & c",
+      O.unlinked("<@U1|ana> and <@U2> in <#C1|ops>, <!here>: a &lt; b &amp; c"))
+check("moved_below: the head points down instead of at a thread",
+      O.moved_below("Done.\n\n" + O.MORE) == "Done.\n\n" + O.MOVED and O.moved_below("Done.") == "Done.")
 
 print(f"\n{passed} checks passed")

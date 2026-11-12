@@ -1731,20 +1731,33 @@ _fold_d.notify("A very long report follows.\n\n" + "word " * 20000, ping=False)
 check("a folded notice's thread reply is cut below Slack's limit, not refused",
       len(_fold_d.bot.posted) == _n_big + 2 and len(_fold_d.bot.posted[-1][1]) <= S.REST_MAX + 60, len(_fold_d.bot.posted[-1][1]))
 
-_thr_d = _RealSlack(); _thr_d.bot = FakeClient(); _thr_d.bot_dm = "DBOT"
-_thr_real = _thr_d.console_post
+class _NoThreads(FakeClient):
+    """Slack refusing a thread reply (thread_not_found), from the bot and from the owner's token alike."""
+    def chat_postMessage(self, channel, text, thread_ts=None, blocks=None):
+        if thread_ts:
+            raise RuntimeError("thread_not_found")
+        return super().chat_postMessage(channel, text, thread_ts=thread_ts, blocks=blocks)
 
 
-def _thr_post(text, **kw):
-    if kw.get("thread_ts"):
-        raise RuntimeError("thread_not_found")
-    return _thr_real(text, **kw)
-
-
-_thr_d.console_post = _thr_post
-_thr_d.notify(_fold_text, ping=False)
-check("a notice whose thread reply fails still delivers the rest, below the summary",
-      len(_thr_d.bot.posted) == 2 and "> line 39 of what" in _thr_d.bot.posted[1][1], _thr_d.bot.posted)
+# The real console_post runs: the bot's thread reply fails, its fallback to the self-DM fails too,
+# and only then does notify post the rest below, once, and edit the summary to point down.
+_thr_d = _RealSlack(); _thr_d.bot = _NoThreads(); _thr_d.bot_dm = "DBOT"; _thr_d.client = _NoThreads()
+_thr_ts = _thr_d.notify(_fold_text, ping=False)
+_thr_all = _thr_d.bot.posted + _thr_d.client.posted
+check("a notice whose thread reply fails still delivers the rest, once, below the summary",
+      len(_thr_all) == 2 and _thr_d.bot.posted[0][3] == _thr_ts and sum("> line 39 of what" in p[1] for p in _thr_all) == 1
+      and all(p[2] is None for p in _thr_all), _thr_all)
+check("…and the summary no longer points at an empty thread",
+      [(u[1], u[2]) for u in _thr_d.bot.updates] == [(_thr_ts, _thr_d.bot.posted[0][1][: -len(S.outbound.MORE)] + S.outbound.MOVED)],
+      _thr_d.bot.updates)
+_png = []
+_png_real, S.subprocess.run = S.subprocess.run, lambda argv, **k: _png.append(argv[-1])
+_png_cfg, S.CFG["notify_cmd"] = S.CFG.get("notify_cmd"), "true"
+try:
+    _thr_d._ping("<@U123> asked: <https://x.example/a|the plan> &amp; <#C1|ops> — <!here>")
+finally:
+    S.subprocess.run, S.CFG["notify_cmd"] = _png_real, _png_cfg
+check("a ping outside Slack reads words, not markup, whoever calls it", _png == ["someone asked: the plan & #ops — @here"], _png)
 
 # A retry must not be blocked by a first try that said nothing.
 _now = time.time()
@@ -1752,8 +1765,9 @@ check("say retry: a fresh claim with nothing saved yet is in flight — blocked"
       not S.say_retry_allowed({"at": _now - 30}, now=_now))
 check("say retry: a claim that never reached an outcome and is stale died — allowed",
       S.say_retry_allowed({"at": _now - S.SAY_STALE_S - 1}, now=_now))
-_ok_item = S.load_item(next(i for i in sorted(f.stem for f in S.config.INBOX_DIR.glob("say-*.json"))
-                            if S.outbound.said(S.load_item(i) or {})))
+# A fixture built by hand: picking one with said() would let said() choose its own test case.
+_ok_item = {"id": "say-senttest", "status": "done", "outbound": True, "outcome": {"status": "sent", "ts": "1.0"}}
+S.save_item(_ok_item)
 check("say retry: a say that was said blocks the repeat, however old the claim",
       not S.say_retry_allowed({"at": _now - 10 * S.SAY_STALE_S, "id": _ok_item["id"]}, now=_now))
 _fail_item = dict(_ok_item, id="say-failtest", status="failed", outcome={"status": "failed", "why": "rate limit"})
@@ -1763,9 +1777,12 @@ check("say retry: a say that failed may be tried again at once",
 S.save_item(dict(_ok_item, id="say-droptest", status="decided", outcome={"status": "dropped"}))
 check("say retry: a say that reached an outcome but said nothing (dropped) may be tried again",
       S.say_retry_allowed({"at": _now - 5, "id": "say-droptest"}, now=_now))
-S.save_item(dict(_ok_item, id="say-answered", answer="Yes"))
-check("say retry: an ask that was answered may be asked again",
-      S.say_retry_allowed({"at": _now - 5, "id": "say-answered"}, now=_now))
+S.save_item(dict(_ok_item, id="say-answered", answer={"choice": "Yes"}))
+check("say retry: an ask answered but not yet read is the first call retried — blocked, not asked again",
+      not S.say_retry_allowed({"at": _now - 5, "id": "say-answered"}, now=_now))
+_capture(lambda: S.cmd_answer(SimpleNamespace(item="say-answered", wait=0)))
+check("say retry: once the agent read the answer, the same question again is a new one — allowed",
+      (S.load_item("say-answered") or {}).get("answer_read") and S.say_retry_allowed({"at": _now - 5, "id": "say-answered"}, now=_now))
 check("say retry: a fresh claim whose process is gone died — allowed",
       S.say_retry_allowed({"at": _now - 5, "pid": 2 ** 22 + 12345}, now=_now))
 check("say retry: a fresh claim whose process is alive is in flight — blocked",

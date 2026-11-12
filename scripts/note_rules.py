@@ -30,6 +30,24 @@ RULE = (
 
 URL = r"https?://[^\s<>|]+[^\s<>|.,;:!?)\]'\"]"
 URL_RE = re.compile(URL)
+MARK_TAIL_RE = re.compile(r"[*_~\u201d\u2019]+$")
+
+
+def url_tail(url: str, before: str = "") -> tuple[str, str]:
+    """A URL and what it swallowed of the sentence. A closing quote, `*` or `~` is the sentence's.
+    A closing `_` is too, but only while italics are open before the URL ("_see https://x_");
+    otherwise it is the URL's own: https://example.com/name_ keeps its underscore."""
+    m = MARK_TAIL_RE.search(url)
+    if not m:
+        return url, ""
+    cut = len(url)
+    for i in range(len(url) - 1, m.start() - 1, -1):
+        c = url[i]
+        if c != "_" or before.count("_") % 2 == 1:
+            cut = i
+        else:
+            break
+    return url[:cut], url[cut:]
 SLACK_LINK_RE = re.compile(r"<(" + URL + r")(?:\|([^>]*))?>")
 TASK_ID = r"\bt_[0-9a-f]{6,}\b"
 TASK_ID_RE = re.compile(TASK_ID)
@@ -126,8 +144,9 @@ def take_links(text: str) -> tuple[str, list[tuple[str, str]]]:
         return " " + _in_sentence(label, m.group(1), m.string[:m.start()], m.string[m.end():]) + " "
 
     def bare(m):
-        links.append((m.group(0), label_for(m.group(0), m.string[:m.start()])))
-        return " " + _in_sentence("", m.group(0), m.string[:m.start()], m.string[m.end():]) + " "
+        url, tail = url_tail(m.group(0), m.string[:m.start()])
+        links.append((url, label_for(url, m.string[:m.start()])))
+        return " " + _in_sentence("", url, m.string[:m.start()], tail + m.string[m.end():]) + " " + tail
     text = SLACK_LINK_RE.sub(slack, text)
     text = URL_RE.sub(bare, text)
     text = re.sub(r"(?:\s+(?:at|on|in|from)\b)?\s*\x07", " ", text)  # "Review #3558 at <sha>" reads "Review #3558"

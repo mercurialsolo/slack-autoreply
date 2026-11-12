@@ -43,13 +43,14 @@ _SLACK_LINK = re.compile(r"<(?:[a-z][a-z0-9+.-]*:|[@#!])[^<>\s|]+(?:\|[^<>\n]*)?
 _TASK_PAREN = re.compile(r"\s*\(\s*" + note_rules.TASK_ID + r"\s*\)")
 # An id inside a path or a file name (/tmp/t_ab12cd34/log, t_ab12cd34.log) is a path, and stays.
 _ID = r"(?<![/\w.])" + note_rules.TASK_ID + r"(?![\w/-]|[.:]\w)"
-# As note_rules.strip_machine reads it: in the subject's place, or after a preposition, the id is
-# "the task" — "Factory task t_… for Priya's bug" keeps every word but the id. Anywhere else it goes.
-_TASK_SUBJECT = re.compile(r"(?P<lead>\b(?:the[ \t]+)?task[ \t]+)?" + _ID + r"(?=[ \t]+[a-z])", re.I)
+# The same idea as note_rules.strip_machine, not the same output: this one stays on its line, keeps ids
+# in paths, knows "by" and articles. In the subject's place, after a preposition or an article, the
+# id is "the task" ("a task") — "Factory task t_… for Priya's bug" keeps every word but the id.
+# Anywhere else it goes. A capital word after the id (a title: "t_… Retro: …") still reads "the task".
+_TASK_ART = re.compile(r"\b(?P<art>the|an?)[ \t]+(?:task[ \t]+)?" + _ID, re.I)
+_TASK_SUBJECT = re.compile(r"(?P<lead>\btask[ \t]+)?" + _ID + r"(?=[ \t]+[a-z])", re.I)
 _TASK_OBJECT = re.compile(r"\b(to|for|on|of|about|with|from|in|by)[ \t]+(?:the[ \t]+)?(?:task[ \t]+)?" + _ID, re.I)
 _TASK_ID = re.compile(r"[ \t]*(?:\btask[ \t]+)?" + _ID, re.I)
-# Markup or a closing quote right after a URL is the sentence's, not the URL's.
-_URL_TAIL = re.compile(r"[*_~”’]+$")
 _SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[A-Z*_\"“])")
 
 
@@ -68,8 +69,11 @@ def _protect(text: str) -> tuple[str, list[str]]:
 
 
 def _restore(text: str, kept: list[str]) -> str:
+    def back(m):
+        i = int(m.group(1))
+        return kept[i] if i < len(kept) else m.group(0)
     for _ in range(len(kept) + 1):    # a placeholder can sit inside what another one hid
-        out = re.sub(r"\x00(\d+)\x00", lambda m: kept[int(m.group(1))], text)
+        out = re.sub(r"\x00(\d+)\x00", back, text)
         if out == text:
             break
         text = out
@@ -77,25 +81,33 @@ def _restore(text: str, kept: list[str]) -> str:
 
 
 def _link(m: re.Match, before: str) -> str:
-    url = m.group(0)
-    tail = _URL_TAIL.search(url)
-    url, tail = (url[:tail.start()], tail.group(0)) if tail else (url, "")
+    url, tail = note_rules.url_tail(m.group(0), before)
     return f"<{url}|{note_rules.label_for(url, before)}>{tail}"
 
 
 def unlinked(text: str) -> str:
-    """Slack's link markup as the words a reader sees — for a ping outside Slack."""
-    return re.sub(r"<([^<>|\s]+)\|([^<>\n]*)>", r"\2", re.sub(r"<((?:https?|mailto):[^<>|\s]+)>", r"\1", text))
+    """Slack's markup as the words a reader sees — for a ping outside Slack: a link reads its label,
+    a channel its #name, a person "@name" (or "someone" with no name), `&amp;` reads `&`."""
+    t = re.sub(r"<#[A-Z0-9]+\|([^<>\n]*)>", r"#\1", text)
+    t = re.sub(r"<@[A-Z0-9]+\|([^<>\n]*)>", lambda m: "@" + m.group(1).lstrip("@"), t)
+    t = re.sub(r"<@[A-Z0-9]+>", "someone", t)
+    t = re.sub(r"<!(here|channel|everyone)(?:\|[^<>\n]*)?>", r"@\1", t)
+    t = re.sub(r"<((?:https?|mailto):[^<>|\s]+)>", r"\1", t)
+    t = re.sub(r"<([^<>|\s]+)\|([^<>\n]*)>", r"\2", t)
+    return t.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
 def plain(line: str) -> str:
     """One prose line to the owner's rule: links as text, no task ids. Code and links already in
-    Slack's `<url|label>` form are left exactly as they are."""
-    t, kept = _protect(line)
+    Slack's `<url|label>` form are left exactly as they are. A `<` or `>` of the prose's own is
+    escaped, as Slack wants it, so a link made inside `<…>` is never nested markup."""
+    t, kept = _protect(line.replace("\x00", ""))   # NUL is the placeholder mark; it never means text
     t = note_rules.URL_RE.sub(lambda m: _link(m, t[:m.start()]), t)
     t, kept2 = _protect(_restore(t, kept))   # the new links are now out of reach too
+    t = t.replace("<", "&lt;").replace(">", "&gt;")
     t = _TASK_PAREN.sub("", t)
     t = _TASK_OBJECT.sub(r"\1 the task", t)
+    t = _TASK_ART.sub(lambda m: {"an": "a", "An": "A", "AN": "A"}.get(m.group("art"), m.group("art")) + " task", t)
     t = _TASK_SUBJECT.sub(lambda m: (m.group("lead") or "the task").rstrip(), t)
     t = _TASK_ID.sub("", t)
     if not line[:1].isspace():
@@ -143,6 +155,14 @@ def compose(text: str, *, fold: bool = True) -> tuple[str, str]:
     if not rest:
         return body, ""
     return f"{head}\n{MORE}", "\n\n".join(rest).strip()
+
+
+MOVED = "_More below._"
+
+
+def moved_below(head: str) -> str:
+    """A folded head whose thread reply could not be posted: the rest went below it instead."""
+    return head[: -len(MORE)] + MOVED if head.endswith(MORE) else head
 
 
 def _balanced(t: str) -> bool:
@@ -238,8 +258,8 @@ def alive(pid) -> bool:
 
 def say_retry_allowed(prev: dict, item: dict, now: float, stale_s: float) -> bool:
     """A `say` with these words was claimed before (`prev`, its item `item` or {}). True when the
-    same words again are a new try rather than a duplicate: the ask was answered (asking again is a
-    new question), the try said nothing, or it never reached an outcome and its process is gone or
+    same words again are a new try rather than a duplicate: the ask was answered and the agent read
+    the answer (asking again is a new question), the try said nothing, or it never reached an outcome and its process is gone or
     its claim is stale. A try still running, or one that was said, blocks the repeat.
 
     A dead process frees the words unless its claim says they were `handed` on — to a writer that
@@ -247,7 +267,9 @@ def say_retry_allowed(prev: dict, item: dict, now: float, stale_s: float) -> boo
     saving the outcome). Then only the stale window lets the words go again. A process killed while
     composing has handed nothing on: its retry goes at once."""
     if item.get("answer"):
-        return True
+        # Answered: once the agent has read the answer, the same question again is a new one. Until
+        # then a repeat is the first call retried after a timeout — it gets the answer, not a re-ask.
+        return bool(item.get("answer_read"))
     if item.get("status") == "failed" or (item.get("outcome") and not said(item)):
         return True
     if item.get("outcome"):

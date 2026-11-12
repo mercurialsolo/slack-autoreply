@@ -1043,13 +1043,17 @@ class Slack:
             try:
                 self.console_post(rest, thread_ts=ts)
             except Exception as e:  # noqa: BLE001 - the summary arrived; the rest must too
+                # Mostly Slack refused it (thread_not_found), so the reply is not there; a timeout after
+                # Slack took it could leave two copies, and two beat none. The summary is edited to
+                # point down instead of at an empty thread.
                 log.warning("could not post the rest of a notice in its thread (%s) — posting it below", e)
                 try:
                     self.console_post(rest)
+                    self.console_update(ts, outbound.moved_below(head))
                 except Exception as e2:  # noqa: BLE001 - the log is the last place it can be
                     log.error("could not post the rest of a notice at all (%s); here it is:\n%s", e2, rest)
         if ping:
-            self._ping(outbound.unlinked(head))
+            self._ping(head)
         return ts
 
     # ---- the console: the one conversation Solo talks to you in.
@@ -1096,7 +1100,7 @@ class Slack:
         cmd = CFG["notify_cmd"]
         if not cmd:
             return
-        summary = " ".join(text.split())[:180]
+        summary = " ".join(outbound.unlinked(text).split())[:180]   # outside Slack, markup is noise
         try:
             subprocess.run(shlex.split(cmd) + [summary], timeout=20,
                            capture_output=True, check=False)
@@ -4009,7 +4013,11 @@ def cmd_say(a):
     prev = outbox().claim(once_key, SAY_ONCE_S, retry=say_retry_allowed, pid=os.getpid())
     if prev is not None:
         mins = int((time.time() - float(prev.get("at") or 0)) // 60)
-        done = outbound.said(peek_item(prev["id"])) if prev.get("id") else False
+        prev_item = peek_item(prev["id"]) if prev.get("id") else {}
+        if (prev_item.get("answer") or {}).get("choice"):
+            print(f"queued {prev['id']} → {name} (already answered: {prev_item['answer']['choice']}; not asked again)")
+            return
+        done = outbound.said(prev_item)
         print(f"queued {prev.get('id') or 'earlier'} → {name} (" + (
             f"already sent — the same words from {a.from_} went there {mins} min ago; not sent again)" if done else
             f"the same words from {a.from_} are still being composed ({mins} min ago); not queued again)"))
@@ -4121,6 +4129,11 @@ def cmd_answer(a):
         ans = load_item(a.item).get("answer")
         if ans:
             print(ans.get("choice", ""))
+            # The agent has its answer: the same question again is a new one (outbound.say_retry_allowed).
+            item = load_item(a.item)
+            if not item.get("answer_read"):
+                item["answer_read"] = now_iso()
+                save_item(item)
             return
         if time.time() >= deadline:
             print("unanswered", file=sys.stderr)
