@@ -219,38 +219,16 @@ def save_item(item: dict) -> None:
     tmp.replace(p)
 
 
-def say_has_outcome(prev: dict) -> bool:
-    """The earlier `say` with these words reached an outcome (said, drafted, escalated)."""
-    try:
-        item = json.loads(item_path(prev["id"]).read_text(encoding="utf-8"))
-    except (KeyError, OSError, json.JSONDecodeError):
-        return False
-    return bool(item.get("outcome")) and item.get("status") != "failed"
-
-
 def say_retry_allowed(prev: dict, now: float | None = None) -> bool:
-    """A `say` with these words was claimed before. True when that try said nothing and is not
-    still running: its item failed, or it never reached an outcome and the claim is stale (the
-    process was killed or raised). A try still in flight, or one that was said, blocks the repeat."""
-    now = time.time() if now is None else now
-    item = {}
-    if prev.get("id"):
-        try:
-            item = json.loads(item_path(prev["id"]).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            item = {}
-    if item.get("status") == "failed":
-        return True
-    if item.get("outcome"):
-        return False
-    return now - float(prev.get("at") or 0) >= SAY_STALE_S
+    """`outbound.say_retry_allowed` for an earlier claim of the same `say`, with its item from disk."""
+    return outbound.say_retry_allowed(prev, peek_item(prev["id"]) if prev.get("id") else {},
+                                      time.time() if now is None else now, SAY_STALE_S)
 
 
 def handled_before(item_id: str) -> bool:
     """This message already has an outcome on disk — answered, drafted, escalated or dropped."""
-    try:
-        item = json.loads(item_path(item_id).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    item = peek_item(item_id)
+    if not item:
         return False
     # A run killed mid-way leaves "handling" (or "decided", when dispatch had chosen but not yet
     # acted) and a failed one "failed": Slack's redelivery is the retry those need, so none counts
@@ -1060,13 +1038,18 @@ class Slack:
         if rest and ts:
             if len(rest) > REST_MAX:   # Slack refuses a message much past 40k characters
                 log.info("notice thread text cut at %d of %d characters", REST_MAX, len(rest))
+                log.info("the cut part of that notice:\n%s", rest[REST_MAX:])
                 rest = rest[:REST_MAX].rstrip() + "\n_…cut here; the rest is in the log._"
             try:
                 self.console_post(rest, thread_ts=ts)
-            except Exception as e:  # noqa: BLE001 - the summary arrived; the rest is in the log
-                log.warning("could not post the rest of a notice in its thread: %s", e)
+            except Exception as e:  # noqa: BLE001 - the summary arrived; the rest must too
+                log.warning("could not post the rest of a notice in its thread (%s) — posting it below", e)
+                try:
+                    self.console_post(rest)
+                except Exception as e2:  # noqa: BLE001 - the log is the last place it can be
+                    log.error("could not post the rest of a notice at all (%s); here it is:\n%s", e2, rest)
         if ping:
-            self._ping(head)
+            self._ping(outbound.unlinked(head))
         return ts
 
     # ---- the console: the one conversation Solo talks to you in.
@@ -4021,18 +4004,19 @@ def cmd_say(a):
     # id each time made that a second message. The same sender, place and words are one message.
     once_key = outbound.key("say", a.from_, channel, a.thread_ts, re_item or "", a.intent, *(getattr(a, f, None) or "" for f in (
         "status", "headline", "points", "details", "options", "link")), *(files or []))
-    if (prev := outbox().claim(once_key, SAY_ONCE_S)) is not None and say_retry_allowed(prev):
-        outbox().release(once_key)   # the first try died before it said anything: this one may
-        prev = outbox().claim(once_key, SAY_ONCE_S)
+    # A first try that died before saying anything (killed, raised, failed) is taken over in the
+    # same locked step that finds it, so two retries cannot both post.
+    prev = outbox().claim(once_key, SAY_ONCE_S, retry=say_retry_allowed, pid=os.getpid())
     if prev is not None:
         mins = int((time.time() - float(prev.get("at") or 0)) // 60)
-        done = say_has_outcome(prev)
+        done = outbound.said(peek_item(prev["id"])) if prev.get("id") else False
         print(f"queued {prev.get('id') or 'earlier'} → {name} (" + (
             f"already sent — the same words from {a.from_} went there {mins} min ago; not sent again)" if done else
             f"the same words from {a.from_} are still being composed ({mins} min ago); not queued again)"))
         return
+    say_id = f"say-{uuid.uuid4().hex[:8]}"
     try:
-        item = {"id": f"say-{uuid.uuid4().hex[:8]}", "created": now_iso(), "status": "queued",
+        item = {"id": say_id, "created": now_iso(), "status": "queued",
                 "simulated": False, "outbound": True, "origin": f"agent:{a.from_}",
                 "channel": channel, "channel_type": "im" if kind == "people" else "channel",
                 "channel_name": name, "ts": f"{time.time():.6f}", "thread_ts": a.thread_ts,
@@ -4093,7 +4077,6 @@ def cmd_say(a):
             # in an exit code only the calling agent saw. The console is where the owner already
             # reads what agents send; the agent's own wording is better than nothing at all.
             dest = "you" if kind == "people" and tid == s.me else name
-            outbox().release(once_key)   # nothing was said: a retry must be allowed to try again
             s.notify(f"⚠️ *Solo could not write a message from `{a.from_}`* — {why_not[:200]}\n"
                      f"_nothing went to anyone. It was meant for {dest}. Below are {a.from_}'s own words, "
                      f"not a draft in your voice: place it, rewrite it or drop it._\n\n{quote(a.intent)}", ping=False)
@@ -4110,8 +4093,11 @@ def cmd_say(a):
             record_delegation(item=re_item, role=a.from_, outcome="reported", say=item["id"],
                               report=a.intent[:200])
         print(outcome)
-    except Exception:
-        outbox().release(once_key)   # it raised before saying anything: the retry must be allowed to try
+    except BaseException:
+        # It raised, exited or was interrupted. If the words reached no one, a retry must be
+        # allowed to try at once; if they did (a draft is up), a retry would say them twice.
+        if not outbound.said(peek_item(say_id)):
+            outbox().release(once_key)
         raise
 
 

@@ -43,7 +43,7 @@ check("budget: no task id left in the prose", not re.search(R.TASK_ID, R.SLACK_L
 check("budget: the ask URL is a text link, the id inside it kept", "<https://factory.staffai.workers.dev/#factory/ask/t_d1d740fc|Answer here>" in h, h)
 check("budget: no bare URL", not R.URL_RE.search(R.SLACK_LINK_RE.sub("", h)), h)
 check("budget: short, so one message and no thread", rest == "", rest)
-check("budget: the words around the id read on", "Needs an answer: Retro: wire review noise tripwire into reviewer briefs" in h, h)
+check("budget: the words around the id read on", "Needs an answer on the task: Retro: wire review noise tripwire into reviewer briefs" in h, h)
 
 # 2. The release note of 2026-11-10, as an SR hand-off posted it twice in one go: bare URLs,
 #    a repeated line, long enough to fold.
@@ -81,7 +81,7 @@ check("failure notice: the quote is whole, every line, word for word", rest == I
 # The rules, one at a time.
 check("plain: code spans and existing links are left exactly", O.plain("run `git push t_abc12345` or <https://x.io/a|see>")
       == "run `git push t_abc12345` or <https://x.io/a|see>")
-check("plain: 'for task t_…' leaves with its words", O.plain("Done for task t_abc12345, see the log.") == "Done, see the log.")
+check("plain: 'for task t_…' leaves with its words", O.plain("Done for task t_abc12345, see the log.") == "Done for the task, see the log.")
 check("plain: an id in brackets goes", O.plain("Merged the fix (t_abc12345).") == "Merged the fix.")
 check("compose: code fences are kept as written, repeats and all",
       O.compose("x\n```\nsame\nsame t_abc12345\n```")[0] == "x\n```\nsame\nsame t_abc12345\n```")
@@ -110,7 +110,7 @@ with tempfile.TemporaryDirectory() as tmp:
 check("plain: an id inside a path stays", O.plain("log is at /tmp/t_ab12cd34/run.log") == "log is at /tmp/t_ab12cd34/run.log")
 check("plain: indentation is left as it was", O.plain("    step  two") == "    step two")
 check("plain: a ratio's colon stays where it was", O.plain("ratio a :b") == "ratio a :b")
-check("plain: no leading space where a task id began the line", O.plain("task t_ab12cd34 finished") == "finished")
+check("plain: no leading space where a task id began the line", O.plain("task t_ab12cd34 finished") == "task finished")
 _lnk = ("Release is out. See <https://x.example/r|the release page> for notes. " + "More detail follows here. " * 25)
 _h, _r = O.compose(_lnk + "\n\n" + "tail " * 150)
 check("fold: a head with a link is still cut to two sentences", _h.startswith("Release is out. See <https://x.example/r|the release page> for notes.\n"), _h[:160])
@@ -120,5 +120,27 @@ check("fold: a cut that would split bold in two is not made", _h2.startswith(_bo
 _multi = "\n".join(f"Line {i} of a status. It ends." for i in range(15))
 _h3, _ = O.compose(_multi + "\n\n" + "tail " * 150)
 check("fold: a multi-line head keeps its lines", _h3.count("\n") >= 14, _h3[:80])
+
+# Review round 1 (max): what the rewrites must keep.
+check("plain: a < b … c > d is prose, and the code inside it is not leaked as a placeholder",
+      O.plain("if a < b and `c` > d") == "if a < b and `c` > d")
+check("plain: 'Factory task t_… for' keeps every word but the id",
+      O.plain("Factory task t_abc12345 for Priyas bug") == "Factory task for Priyas bug")
+check("plain: an id that begins a sentence becomes 'the task'", O.plain("t_abc12345 finished") == "the task finished")
+check("plain: a file named for a task stays", O.plain("Logs: t_abc12345.log") == "Logs: t_abc12345.log")
+check("plain: mentions and specials are kept", O.plain("<@U123> and <!here> look") == "<@U123> and <!here> look")
+check("plain: bold after a URL stays outside the link", O.plain("See https://x.io/a*").endswith("|Open it>*"),
+      O.plain("See https://x.io/a*"))
+check("unlinked: a ping outside Slack reads the label, or the bare URL",
+      O.unlinked("see <https://x.io/a|the page> and <https://y.io>") == "see the page and https://y.io")
+with tempfile.TemporaryDirectory() as tmp:
+    o = O.Once(Path(tmp) / "outbound.json")
+    check("once: a claim records what it was given", o.claim("k", 60, now=1000, pid=7) is None)
+    check("once: retry=False keeps the earlier claim", o.claim("k", 60, now=1001, retry=lambda p: False) == {"at": 1000, "pid": 7})
+    check("once: retry=True takes it over in the same step", o.claim("k", 60, now=1002, retry=lambda p: p["pid"] == 7, pid=8) is None)
+    check("once: the take-over is recorded, so a third try is blocked", o.claim("k", 60, now=1003)["pid"] == 8)
+check("said: dropped said nothing, sent did",
+      not O.said({"outcome": {"status": "dropped"}}) and O.said({"outcome": {"status": "sent"}}))
+check("said: a failed item said nothing", not O.said({"status": "failed", "outcome": {"status": "sent"}}))
 
 print(f"\n{passed} checks passed")

@@ -1718,6 +1718,21 @@ _fold_d.notify("A very long report follows.\n\n" + "word " * 20000, ping=False)
 check("a folded notice's thread reply is cut below Slack's limit, not refused",
       len(_fold_d.bot.posted) == _n_big + 2 and len(_fold_d.bot.posted[-1][1]) <= S.REST_MAX + 60, len(_fold_d.bot.posted[-1][1]))
 
+_thr_d = _RealSlack(); _thr_d.bot = FakeClient(); _thr_d.bot_dm = "DBOT"
+_thr_real = _thr_d.console_post
+
+
+def _thr_post(text, **kw):
+    if kw.get("thread_ts"):
+        raise RuntimeError("thread_not_found")
+    return _thr_real(text, **kw)
+
+
+_thr_d.console_post = _thr_post
+_thr_d.notify(_fold_text, ping=False)
+check("a notice whose thread reply fails still delivers the rest, below the summary",
+      len(_thr_d.bot.posted) == 2 and "> line 39 of what" in _thr_d.bot.posted[1][1], _thr_d.bot.posted)
+
 # A retry must not be blocked by a first try that said nothing.
 _now = time.time()
 check("say retry: a fresh claim with nothing saved yet is in flight — blocked",
@@ -1725,13 +1740,23 @@ check("say retry: a fresh claim with nothing saved yet is in flight — blocked"
 check("say retry: a claim that never reached an outcome and is stale died — allowed",
       S.say_retry_allowed({"at": _now - S.SAY_STALE_S - 1}, now=_now))
 _ok_item = S.load_item(next(i for i in sorted(f.stem for f in S.config.INBOX_DIR.glob("say-*.json"))
-                            if (S.load_item(i) or {}).get("outcome") and S.load_item(i).get("status") != "failed"))
+                            if S.outbound.said(S.load_item(i) or {})))
 check("say retry: a say that was said blocks the repeat, however old the claim",
       not S.say_retry_allowed({"at": _now - 10 * S.SAY_STALE_S, "id": _ok_item["id"]}, now=_now))
 _fail_item = dict(_ok_item, id="say-failtest", status="failed", outcome={"status": "failed", "why": "rate limit"})
 S.save_item(_fail_item)
 check("say retry: a say that failed may be tried again at once",
       S.say_retry_allowed({"at": _now - 5, "id": "say-failtest"}, now=_now))
+S.save_item(dict(_ok_item, id="say-droptest", status="decided", outcome={"status": "dropped"}))
+check("say retry: a say that reached an outcome but said nothing (dropped) may be tried again",
+      S.say_retry_allowed({"at": _now - 5, "id": "say-droptest"}, now=_now))
+S.save_item(dict(_ok_item, id="say-answered", answer="Yes"))
+check("say retry: an ask that was answered may be asked again",
+      S.say_retry_allowed({"at": _now - 5, "id": "say-answered"}, now=_now))
+check("say retry: a fresh claim whose process is gone died — allowed",
+      S.say_retry_allowed({"at": _now - 5, "pid": 2 ** 22 + 12345}, now=_now))
+check("say retry: a fresh claim whose process is alive is in flight — blocked",
+      not S.say_retry_allowed({"at": _now - 5, "pid": os.getpid()}, now=_now))
 for _st_name, _want in (("handling", False), ("decided", False), ("failed", False), ("queued", False), ("ignored", True)):
     S.save_item(dict(_rd_item, id="rd-status-test", status=_st_name, outcome={"status": _st_name}))
     check(f"a redelivered message whose run was left {_st_name!r} is {'skipped' if _want else 'handled again'}",

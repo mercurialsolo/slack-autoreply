@@ -22,6 +22,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -36,12 +37,19 @@ KEEP = 2000            # keys kept in the ledger, newest first
 
 _CODE_FENCE = re.compile(r"```.*?```", re.S)
 _CODE_SPAN = re.compile(r"`[^`\n]+`")
-_SLACK_LINK = re.compile(r"<[^<>\n]+>")
+# Slack's own markup only: <https://…|label>, <mailto:…>, <@U…>, <#C…|name>, <!here>. A bare "a < b … c > d"
+# is prose, and hiding it would hide whatever was already hidden inside it.
+_SLACK_LINK = re.compile(r"<(?:[a-z][a-z0-9+.-]*:|[@#!])[^<>\s|]+(?:\|[^<>\n]*)?>", re.I)
 _TASK_PAREN = re.compile(r"\s*\(\s*" + note_rules.TASK_ID + r"\s*\)")
-# "Budget for t_ab12cd34." -> "Budget." The id goes with the preposition that pointed at it; an id
-# inside a path (/tmp/t_ab12cd34/log) is a path, and stays.
-_TASK_ID = re.compile(r"[ \t]*(?:\b(?:for|from|in|on|by)[ \t]+)?(?:\btask[ \t]+)?(?<![/\w])" + note_rules.TASK_ID
-                      + r"(?![\w/-])", re.I)
+# An id inside a path or a file name (/tmp/t_ab12cd34/log, t_ab12cd34.log) is a path, and stays.
+_ID = r"(?<![/\w.])" + note_rules.TASK_ID + r"(?![\w/-]|[.:]\w)"
+# As note_rules.strip_machine reads it: in the subject's place, or after a preposition, the id is
+# "the task" — "Factory task t_… for Priya's bug" keeps every word but the id. Anywhere else it goes.
+_TASK_SUBJECT = re.compile(r"(?P<lead>\b(?:the[ \t]+)?task[ \t]+)?" + _ID + r"(?=[ \t]+[a-z])", re.I)
+_TASK_OBJECT = re.compile(r"\b(to|for|on|of|about|with|from|in|by)[ \t]+(?:the[ \t]+)?(?:task[ \t]+)?" + _ID, re.I)
+_TASK_ID = re.compile(r"[ \t]*(?:\btask[ \t]+)?" + _ID, re.I)
+# Markup or a closing quote right after a URL is the sentence's, not the URL's.
+_URL_TAIL = re.compile(r"[*_~”’]+$")
 _SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[A-Z*_\"“])")
 
 
@@ -60,16 +68,35 @@ def _protect(text: str) -> tuple[str, list[str]]:
 
 
 def _restore(text: str, kept: list[str]) -> str:
-    return re.sub(r"\x00(\d+)\x00", lambda m: kept[int(m.group(1))], text)
+    for _ in range(len(kept) + 1):    # a placeholder can sit inside what another one hid
+        out = re.sub(r"\x00(\d+)\x00", lambda m: kept[int(m.group(1))], text)
+        if out == text:
+            break
+        text = out
+    return text
+
+
+def _link(m: re.Match, before: str) -> str:
+    url = m.group(0)
+    tail = _URL_TAIL.search(url)
+    url, tail = (url[:tail.start()], tail.group(0)) if tail else (url, "")
+    return f"<{url}|{note_rules.label_for(url, before)}>{tail}"
+
+
+def unlinked(text: str) -> str:
+    """Slack's link markup as the words a reader sees — for a ping outside Slack."""
+    return re.sub(r"<([^<>|\s]+)\|([^<>\n]*)>", r"\2", re.sub(r"<((?:https?|mailto):[^<>|\s]+)>", r"\1", text))
 
 
 def plain(line: str) -> str:
     """One prose line to the owner's rule: links as text, no task ids. Code and links already in
     Slack's `<url|label>` form are left exactly as they are."""
     t, kept = _protect(line)
-    t = note_rules.URL_RE.sub(lambda m: f"<{m.group(0)}|{note_rules.label_for(m.group(0), t[:m.start()])}>", t)
+    t = note_rules.URL_RE.sub(lambda m: _link(m, t[:m.start()]), t)
     t, kept2 = _protect(_restore(t, kept))   # the new links are now out of reach too
     t = _TASK_PAREN.sub("", t)
+    t = _TASK_OBJECT.sub(r"\1 the task", t)
+    t = _TASK_SUBJECT.sub(lambda m: (m.group("lead") or "the task").rstrip(), t)
     t = _TASK_ID.sub("", t)
     if not line[:1].isspace():
         t = t.lstrip()
@@ -160,14 +187,16 @@ class Once:
             tmp.replace(self.path)
             return out
 
-    def claim(self, k: str, window_s: float, now: float | None = None) -> dict | None:
+    def claim(self, k: str, window_s: float, now: float | None = None, retry=None, **info) -> dict | None:
+        """`retry(prev)` says whether an earlier claim inside the window may be taken over (it died,
+        or said nothing); it runs under the lock, so two retries cannot both take it."""
         now = time.time() if now is None else now
 
         def go(d):
             prev = d.get(k)
-            if prev and now - float(prev.get("at") or 0) < window_s:
+            if prev and now - float(prev.get("at") or 0) < window_s and not (retry and retry(dict(prev))):
                 return dict(prev)
-            d[k] = {"at": now}
+            d[k] = {"at": now, **info}
             return None
         return self._update(go)
 
@@ -177,3 +206,42 @@ class Once:
     def release(self, k: str) -> None:
         """The post failed: the next try must not be taken for a duplicate."""
         self._update(lambda d: d.pop(k, None))
+
+
+# ------------------------------------------------------------------ an agent's `say`, said once
+
+# Outcomes where the words reached someone, or wait for the owner's ✅. Anything else (failed,
+# dropped, ignored, simulated…) said nothing, and the same words again are a fair retry.
+SAID = frozenset({"sent", "sent_from_draft", "drafted", "escalated", "escalated_draft", "routed", "acked", "done",
+                  "corrected"})
+
+
+def said(item: dict) -> bool:
+    """This `say` item's words reached someone, or wait for the owner."""
+    return item.get("status") != "failed" and (item.get("outcome") or {}).get("status") in SAID
+
+
+def alive(pid) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, ValueError, TypeError, OverflowError):
+        return True
+    return True
+
+
+def say_retry_allowed(prev: dict, item: dict, now: float, stale_s: float) -> bool:
+    """A `say` with these words was claimed before (`prev`, its item `item` or {}). True when the
+    same words again are a new try rather than a duplicate: the ask was answered (asking again is a
+    new question), the try said nothing, or it never reached an outcome and its process is gone or
+    its claim is stale. A try still running, or one that was said, blocks the repeat."""
+    if item.get("answer"):
+        return True
+    if item.get("status") == "failed" or (item.get("outcome") and not said(item)):
+        return True
+    if item.get("outcome"):
+        return False
+    if prev.get("pid") and not alive(prev["pid"]):
+        return True
+    return now - float(prev.get("at") or 0) >= stale_s
