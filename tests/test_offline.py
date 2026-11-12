@@ -1771,11 +1771,13 @@ check("say retry: a fresh claim whose process is gone died — allowed",
 check("say retry: a fresh claim whose process is alive is in flight — blocked",
       not S.say_retry_allowed({"at": _now - 5, "pid": os.getpid()}, now=_now))
 S.save_item(dict(_ok_item, id="say-queuedtest", status="queued", outcome=None))
-check("say retry: a dead process that saved its item (queued for a writer, or killed after the post) "
+check("say retry: a dead process that handed the words on (queued for a writer, or killed after the post) "
       "blocks the repeat until the claim is stale",
-      not S.say_retry_allowed({"at": _now - 5, "pid": 2 ** 22 + 12345, "id": "say-queuedtest"}, now=_now)
-      and S.say_retry_allowed({"at": _now - S.SAY_STALE_S - 1, "pid": 2 ** 22 + 12345, "id": "say-queuedtest"},
-                              now=_now))
+      not S.say_retry_allowed({"at": _now - 5, "pid": 2 ** 22 + 12345, "id": "say-queuedtest", "handed": True}, now=_now)
+      and S.say_retry_allowed({"at": _now - S.SAY_STALE_S - 1, "pid": 2 ** 22 + 12345, "id": "say-queuedtest",
+                               "handed": True}, now=_now))
+check("say retry: a dead process killed while composing (item saved, nothing handed on) — allowed at once",
+      S.say_retry_allowed({"at": _now - 5, "pid": 2 ** 22 + 12345, "id": "say-queuedtest"}, now=_now))
 check("say retry: a dead process whose id is claimed but whose item never reached disk said nothing — allowed",
       S.say_retry_allowed({"at": _now - 5, "pid": 2 ** 22 + 12345, "id": "say-neversaved"}, now=_now))
 for _later in ("clean", "deleted", "replaced", "overtaken", "missed"):

@@ -242,15 +242,16 @@ def say_retry_allowed(prev: dict, item: dict, now: float, stale_s: float) -> boo
     new question), the try said nothing, or it never reached an outcome and its process is gone or
     its claim is stale. A try still running, or one that was said, blocks the repeat.
 
-    A dead process only frees the words while it had saved no item: once one is on disk it may
-    still be queued for a writer, or the process died between the post and saving the outcome —
-    then only the stale window lets the words go again."""
+    A dead process frees the words unless its claim says they were `handed` on — to a writer that
+    runs later (the item is queued), or to the post itself (it may have died between the post and
+    saving the outcome). Then only the stale window lets the words go again. A process killed while
+    composing has handed nothing on: its retry goes at once."""
     if item.get("answer"):
         return True
     if item.get("status") == "failed" or (item.get("outcome") and not said(item)):
         return True
     if item.get("outcome"):
         return False
-    if not item and prev.get("pid") and not alive(prev["pid"]):
+    if not prev.get("handed") and prev.get("pid") and not alive(prev["pid"]):
         return True
     return now - float(prev.get("at") or 0) >= stale_s

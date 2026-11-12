@@ -4044,9 +4044,9 @@ def cmd_say(a):
             item["context"] = (f"(outbound — {a.from_} investigated this because {tgt['sender_name']} asked: "
                                f"{(src.get('text') or '')[:300]}"
                                + (f"; {a.why}" if a.why else "") + ")")
-        # The id goes in the claim before the item is saved: a retry that finds an id with no item
-        # on disk knows nothing was queued, one that finds the item knows it may still be.
-        outbox().record(once_key, id=item["id"])
+        # The id goes in the claim before the item is saved. Without the claude writer the saved
+        # item is the hand-off (another process composes it), so the claim says `handed` from here.
+        outbox().record(once_key, id=item["id"], **({"handed": True} if CFG["dispatch"] != "claude" else {}))
         save_item(item)
         print(f"queued {item['id']} → {name} (asked by {a.from_})" + (f" with {describe_files(files)}" if files else ""))
         if channel in (s.self_dm, s.bot_dm):
@@ -4058,6 +4058,7 @@ def cmd_say(a):
             ledger, _ = load_services()
             fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
             posting = True
+            outbox().record(once_key, handed=True)   # a dead pid no longer frees the words
             print(execute_decision(s, item, item["decision"], ledger, fus, set(), state=State()))
             return
         if CFG["dispatch"] != "claude":
@@ -4091,6 +4092,7 @@ def cmd_say(a):
         ledger, _ = load_services()
         fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
         posting = True
+        outbox().record(once_key, handed=True)
         outcome = execute_decision(s, item, item["decision"], ledger, fus, set(), state=State())
         if re_item:
             # The loop closes once there is a draft, so `delegations` can tell a task that came back
