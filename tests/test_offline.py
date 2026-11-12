@@ -321,7 +321,7 @@ check("a waiting draft pings you outside Slack when NOTIFY_CMD is set", _notify_
 def _notify_survives_a_broken_cmd():
     S.CFG["notify_cmd"] = "/nonexistent/ping"
     try:
-        return bool(S.Slack().notify("draft"))   # must still post
+        return bool(S.Slack().notify("draft", once=False))   # must still post
     finally:
         S.CFG["notify_cmd"] = ""
 
@@ -343,7 +343,7 @@ def _nudge_failure_is_survivable():
     class Broken:
         def chat_postMessage(self, **k): raise RuntimeError("bot revoked")
     d.bot = Broken(); d.bot_dm = "DBOT"
-    ts = d.notify("draft")
+    ts = d.notify("draft", once=False)
     # the draft must land somewhere approvable: the self-DM, not nowhere
     return bool(ts) and d.client.posted[-1][0] == "DSELF"
 
@@ -360,7 +360,7 @@ check("with a bot, the draft itself goes to the bot DM", _console_is_the_bot_dm(
 
 def _console_update_uses_the_bot():
     d = S.Slack(); d.bot = FakeClient(); d.bot_dm = "DBOT"
-    ts = d.notify("draft")
+    ts = d.notify("draft", once=False)
     d.console_update(ts, "✅ Sent to Priya")
     # a bot's message can only be edited by the bot
     return d.bot.updates and d.bot.updates[-1][0] == "DBOT" and not d.client.updates
@@ -369,7 +369,7 @@ check("a bot-posted draft is edited by the bot", _console_update_uses_the_bot())
 
 def _falls_back_without_a_bot():
     d = S.Slack(); d.bot = None; d.bot_dm = None
-    ts = d.notify("draft")
+    ts = d.notify("draft", once=False)
     d.console_update(ts, "✅ Sent")
     return d.console == "DSELF" and d.client.posted[-1][0] == "DSELF" and d.client.updates[-1][0] == "DSELF"
 
@@ -550,7 +550,7 @@ def _nudges():
     os.utime(S.config.p("VOICE.md"), (time.time() - 60, time.time() - 60))   # debt again
     sent = []
     real = S.Daemon.notify                           # patch the class: an instance attribute here
-    S.Daemon.notify = lambda self, t: sent.append(t) # would shadow every later test's patch
+    S.Daemon.notify = lambda self, t, **_: sent.append(t) # would shadow every later test's patch
     try:
         d.nudge_review(); d.nudge_review()           # twice on the same VOICE.md
     finally:
@@ -582,7 +582,7 @@ def _hand_over(mode, task="check the outreach threads for Danielle since Oct 15"
     S.dispatch_task = lambda it, who, where: (sent.append(it["id"]),
                                               S.record_delegation(item=it["id"], peer="p", outcome="dispatched",
                                                                   conversation=S.session_key(it)), "handed to p")[2]
-    S.Daemon.notify = lambda self, t: notes.append(t)
+    S.Daemon.notify = lambda self, t, **_: notes.append(t)
     old_mode = S.CFG["delegate_mode"]
     S.CFG["delegate_mode"] = mode
     it = S.load_item(iid2)
@@ -1319,6 +1319,15 @@ check("an agent's report still waits for the owner's ✅",
       _say["policy"]["effective"] == "draft")
 check("a report is threaded against the message it answers, not a local clock reading",
       _say["ts"] == S.load_item(_src)["ts"])
+# Two requests in the same DM can get the same answer ("done"); each is its own report, not a
+# retry of the other, so the once-ledger keys on the request too.
+_src_b = msg(d, U, D, "3000.000601", "and the RH-2 run?")
+S.record_delegation(item=_src_b, peer="somepeer", role="scout", task="read the RH-2 run log",
+                    outcome="dispatched", counterpart="Priya")
+S.cmd_say(_say_args("the RH-1 run finished at 02:14, no timeouts", re=_src_b))
+_rows_b = [json.loads(l) for l in S.DELEGATIONS.read_text().splitlines() if l.strip()]
+check("a report on a second request, worded like the first, is its own report, not deduped",
+      any(r.get("outcome") == "reported" and r.get("item") == _src_b for r in _rows_b))
 
 # `reported back` is the one state this whole round trip exists to state truthfully. Written when
 # the report arrives rather than when a draft exists, it would say "came back" in precisely the
@@ -1640,6 +1649,90 @@ check("another agent's note is not folded into it", _con.posted[-1][2] is None a
 _st = d.state.read(); _st["owner_group"]["at"] = time.time() - 400; S.STATE_FILE.write_text(json.dumps(_st))
 S.cmd_say(_say_args("Helsinki shipped v0.554.0", to="@barada", frm="another-agent"))
 check("after five minutes a note starts a new message", _con.posted[-1][2] is None and len(_con.updates) == _u_g + 2)
+
+# Owner, 2026-11-11: "no duplication". An agent whose `say` timed out ran it again and the owner got
+# the same note twice; a restart replayed an event Solo had already answered; the same warning
+# landed every pass. Each is now said once.
+_n_dup = len(_con.posted)
+S.cmd_say(_say_args("Lisbon shipped v2.1.0, all checks green", to="@barada", frm="retry-agent"))
+_n_once = len(_con.posted)
+_dup_out = _capture(lambda: S.cmd_say(_say_args("Lisbon  shipped v2.1.0, all checks green", to="@barada", frm="retry-agent")))
+check("a retried say with the same words posts once", _n_once > _n_dup and len(_con.posted) == _n_once, _con.posted[_n_dup:])
+check("…and tells the agent it was already sent, not that it failed", "already sent" in _dup_out, _dup_out)
+S.cmd_say(_say_args("Lisbon shipped v2.1.1, all checks green", to="@barada", frm="retry-agent"))
+check("…while different words are a new note", len(_con.posted) > _n_once)
+# A say that raised before saying anything must not block its own retry as "already sent".
+_real_exec = S.execute_decision
+def _boom(*a, **k): raise RuntimeError("slack 500")
+S.execute_decision = _boom
+try:
+    S.cmd_say(_say_args("Porto shipped v3.0.0, all checks green", to="@barada", frm="crash-agent"))
+    _raised = False
+except RuntimeError:
+    _raised = True
+S.execute_decision = _real_exec
+check("a say that raised is seen to raise", _raised)
+_n_crash = len(_con.posted)
+S.cmd_say(_say_args("Porto shipped v3.0.0, all checks green", to="@barada", frm="crash-agent"))
+check("…and its immediate retry is sent, not reported as already sent", len(_con.posted) > _n_crash, _con.posted[_n_crash:])
+
+_rd_ts = "1700000077.100"
+_rd_id = f"{D}-{_rd_ts.replace('.', '_')}"
+_rd_ev = {"user": U, "channel": D, "channel_type": "im", "text": "all good here", "ts": _rd_ts}
+_rd_ign = triage.Triage(route="ignore", confidence=0.9, sensitivity=1.0, urgency=1.0, needs_context=0.1,
+                        asks_for_content=0.1, source="jev:test", topic="social", can_answer=0.9)
+_with_triage(_rd_ign, lambda: d.on_inbound(dict(_rd_ev)))
+_rd_item = S.load_item(_rd_id) or {}
+_rd_seen = []
+_real_save = S.save_item
+S.save_item = lambda it: (_rd_seen.append(it.get("id")), _real_save(it))
+try:
+    _with_triage(_rd_ign, lambda: d.on_inbound(dict(_rd_ev)))
+finally:
+    S.save_item = _real_save
+check("a redelivered event for a message already handled is skipped, not rebuilt",
+      S.handled_before(_rd_id) and _rd_id not in _rd_seen and (S.load_item(_rd_id) or {}).get("status") == _rd_item.get("status"),
+      (_rd_item.get("status"), _rd_seen))
+
+_fold_d = _RealSlack(); _fold_d.bot = FakeClient(); _fold_d.bot_dm = "DBOT"
+_fold_text = "Solo could not reach the writer twice tonight. Nothing was sent.\n\n" + "\n".join(
+    f"> line {i} of what the agent asked for, word for word" for i in range(40))
+_fold_ts = _fold_d.notify(_fold_text, ping=False)
+_fold_posts = _fold_d.bot.posted
+check("a long notice opens with its summary and the rest goes in its thread",
+      len(_fold_posts) == 2 and _fold_posts[0][1].endswith(S.outbound.MORE) and _fold_posts[1][2] == _fold_ts
+      and "> line 39 of what" in _fold_posts[1][1], _fold_posts)
+_fold_d.notify(_fold_text, ping=False)
+check("two failures worded the same are two events: a plain notice is not deduped",
+      len(_fold_d.bot.posted) == 4, _fold_d.bot.posted)
+_n_rem = len(_fold_d.bot.posted)
+_fold_d.notify("⏰ You told Ana you'd get back to her today", ping=False, once=True)
+_fold_d.notify("⏰ You told Ana you'd get back to her today", ping=False, once=True)
+check("…but a reminder a loop can raise again (once=True) is said once in half an hour",
+      len(_fold_d.bot.posted) == _n_rem + 1, _fold_d.bot.posted[_n_rem:])
+_n_big = len(_fold_d.bot.posted)
+_fold_d.notify("A very long report follows.\n\n" + "word " * 20000, ping=False)
+check("a folded notice's thread reply is cut below Slack's limit, not refused",
+      len(_fold_d.bot.posted) == _n_big + 2 and len(_fold_d.bot.posted[-1][1]) <= S.REST_MAX + 60, len(_fold_d.bot.posted[-1][1]))
+
+# A retry must not be blocked by a first try that said nothing.
+_now = time.time()
+check("say retry: a fresh claim with nothing saved yet is in flight — blocked",
+      not S.say_retry_allowed({"at": _now - 30}, now=_now))
+check("say retry: a claim that never reached an outcome and is stale died — allowed",
+      S.say_retry_allowed({"at": _now - S.SAY_STALE_S - 1}, now=_now))
+_ok_item = S.load_item(next(i for i in sorted(f.stem for f in S.config.INBOX_DIR.glob("say-*.json"))
+                            if (S.load_item(i) or {}).get("outcome") and S.load_item(i).get("status") != "failed"))
+check("say retry: a say that was said blocks the repeat, however old the claim",
+      not S.say_retry_allowed({"at": _now - 10 * S.SAY_STALE_S, "id": _ok_item["id"]}, now=_now))
+_fail_item = dict(_ok_item, id="say-failtest", status="failed", outcome={"status": "failed", "why": "rate limit"})
+S.save_item(_fail_item)
+check("say retry: a say that failed may be tried again at once",
+      S.say_retry_allowed({"at": _now - 5, "id": "say-failtest"}, now=_now))
+for _st_name, _want in (("handling", False), ("decided", False), ("failed", False), ("queued", False), ("ignored", True)):
+    S.save_item(dict(_rd_item, id="rd-status-test", status=_st_name, outcome={"status": _st_name}))
+    check(f"a redelivered message whose run was left {_st_name!r} is {'skipped' if _want else 'handled again'}",
+          S.handled_before("rd-status-test") is _want)
 
 # Until Interactivity is on in the Slack app a press only shows a warning icon, so buttons wait for
 # OWNER_BUTTONS=1 and the choices are named in words, with the answer page.
@@ -1997,7 +2090,7 @@ def _probe(result, health=None, mins=30, dispatch="claude", logged_in=(True, "")
     calls, notes = [], []
     real_run, real_notify, real_auth = S._run_claude_once, S.Daemon.notify, S.writer_logged_in
     S._run_claude_once = lambda item, session, prompt=None: (calls.append(prompt), ([], result, ""))[1]
-    S.Daemon.notify = lambda self, text: notes.append(text)
+    S.Daemon.notify = lambda self, text, **_: notes.append(text)
     S.writer_logged_in = lambda: logged_in
     old_dispatch, old_mins = d.dispatch, S.CFG["health_probe_minutes"]
     d.dispatch, S.CFG["health_probe_minutes"] = dispatch, mins
@@ -2803,7 +2896,7 @@ def _sr_stub():
     S.dispatch_task = lambda it, who, where: (sent.append(it["id"]), _sr_briefs.__setitem__(it["id"], it["decision"]["task"]),
                                               S.record_delegation(item=it["id"], peer="p", outcome="dispatched",
                                                                   conversation=S.session_key(it)), "handed to p: …")[3]
-    S.Daemon.notify = lambda self, t: None
+    S.Daemon.notify = lambda self, t, **_: None
     return sent, saved
 
 
@@ -3087,7 +3180,7 @@ try:
     _RESULTS.write_text(json.dumps({_csv: {"state": "failed", "last_error": "gate red"}}))
     di.poll_intake()
     check("loop back: a failed task tells the owner, never the requester",
-          len(_says) == _n and any(_csv in m and "failed" in m for m in _dms()), str(_dms()[-2:]))
+          len(_says) == _n and any("Add CSV export" in m and "failed" in m for m in _dms()), str(_dms()[-2:]))
     check("…both threads that reported it are closed out", SI.rows()[f"slack:{SC}:1710000010.000"]["state"] == "failed"
           and SI.rows()[f"slack:{SC}:1710000020.000"]["state"] == "failed")
 finally:

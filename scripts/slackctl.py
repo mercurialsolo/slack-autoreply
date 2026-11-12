@@ -44,6 +44,7 @@ import config  # noqa: E402
 import linear  # noqa: E402
 import owner_note  # noqa: E402
 import note_shape  # noqa: E402
+import outbound  # noqa: E402
 import recall  # noqa: E402
 import staff_intake  # noqa: E402
 import voice  # noqa: E402
@@ -218,6 +219,45 @@ def save_item(item: dict) -> None:
     tmp.replace(p)
 
 
+def say_has_outcome(prev: dict) -> bool:
+    """The earlier `say` with these words reached an outcome (said, drafted, escalated)."""
+    try:
+        item = json.loads(item_path(prev["id"]).read_text(encoding="utf-8"))
+    except (KeyError, OSError, json.JSONDecodeError):
+        return False
+    return bool(item.get("outcome")) and item.get("status") != "failed"
+
+
+def say_retry_allowed(prev: dict, now: float | None = None) -> bool:
+    """A `say` with these words was claimed before. True when that try said nothing and is not
+    still running: its item failed, or it never reached an outcome and the claim is stale (the
+    process was killed or raised). A try still in flight, or one that was said, blocks the repeat."""
+    now = time.time() if now is None else now
+    item = {}
+    if prev.get("id"):
+        try:
+            item = json.loads(item_path(prev["id"]).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            item = {}
+    if item.get("status") == "failed":
+        return True
+    if item.get("outcome"):
+        return False
+    return now - float(prev.get("at") or 0) >= SAY_STALE_S
+
+
+def handled_before(item_id: str) -> bool:
+    """This message already has an outcome on disk — answered, drafted, escalated or dropped."""
+    try:
+        item = json.loads(item_path(item_id).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    # A run killed mid-way leaves "handling" (or "decided", when dispatch had chosen but not yet
+    # acted) and a failed one "failed": Slack's redelivery is the retry those need, so none counts
+    # as handled.
+    return item.get("status") not in (None, "queued", "handling", "decided", "failed")
+
+
 def list_items(statuses: set[str] | None = None) -> list[dict]:
     config.ensure_dirs()
     out = []
@@ -281,6 +321,17 @@ def record_delegation(**row) -> None:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+NOTIFY_ONCE_S = 30 * 60   # the same console notice inside this is a repeat, not news
+SAY_ONCE_S = 6 * 3600     # an agent's identical `say` inside this is a retry, not a second message
+SAY_STALE_S = 45*60    # a say claimed this long ago that never reached an outcome died: try again (one compose can wait on a lock and run the writer twice)
+REST_MAX = 35_000      # characters of a folded notice's thread reply
+
+
+def outbox() -> outbound.Once:
+    """The ledger of what was already said — on disk, so a restart or a retry cannot say it twice."""
+    return outbound.Once(config.p("outbound.json"))
+
+
 def withhold_report(slack: "Slack", intent: str, frm: str, why: str, re_item: str | None = None):
     """Solo will not place this report. Tell the owner anyway, then fail.
 
@@ -291,9 +342,9 @@ def withhold_report(slack: "Slack", intent: str, frm: str, why: str, re_item: st
     and been refused. The gate is about which room hears it, and the console is not a room; it is
     where drafts already wait for a ✅.
     """
-    slack.console_post(f"🤐 *A report from `{frm}` was not placed* — {why}\n"
-                       f"_nothing went to anyone. Below are {frm}'s own words, not a draft in your voice: "
-                       f"place it, rewrite it or drop it._\n{quote(intent[:1200])}")
+    slack.notify(f"🤐 *A report from `{frm}` was not placed* — {why}\n"
+                 f"_nothing went to anyone. Below are {frm}'s own words, not a draft in your voice: "
+                 f"place it, rewrite it or drop it._\n\n{quote(intent)}", ping=False, once=True)
     if re_item:
         record_delegation(item=re_item, role=frm, outcome="report_refused",
                           report=intent[:200], error=why[:200])
@@ -974,7 +1025,8 @@ class Slack:
     def update(self, channel: str, ts: str, text: str) -> None:
         self.client.chat_update(channel=channel, ts=ts, text=text)
 
-    def notify(self, text: str) -> str:
+    def notify(self, text: str, *, composed: bool = False, fold: bool = True, once: bool = False,
+               ping: bool = True) -> str:
         """Post to the owner's self-DM, and ping them outside Slack if they asked for it.
 
         Slack will not notify you about your own messages, and Solo posts as you — so a draft
@@ -985,9 +1037,36 @@ class Slack:
         So the ping has to come from outside your own Slack identity. NOTIFY_CMD is whatever
         reaches you — `node-notify blocked`, a phone push, `osascript -e 'display notification'`.
         The summary is passed as one extra argument.
+
+        Every notice goes through `outbound.compose` (links as text, no task ids, a long one opens
+        with its summary and the rest goes in the thread) unless it is `composed` already. A notice
+        a loop can raise again (a reminder) passes `once=True`: the same words inside NOTIFY_ONCE_S
+        return the first post's ts instead of a second post. Off by default — two failures worded
+        the same are still two events. A draft passes `fold=False` — ✅ on that one message sends it.
         """
-        ts = self.console_post(text)
-        self._ping(text)
+        head, rest = (text, "") if composed else outbound.compose(text, fold=fold)
+        k = outbound.key("notify", head, rest) if once else None
+        if k and (prev := outbox().claim(k, NOTIFY_ONCE_S)) is not None:
+            log.info("already in the console (%s) — not posting it again: %s", prev.get("ts"), head[:80])
+            return prev.get("ts") or ""
+        try:
+            ts = self.console_post(head)
+        except BaseException:
+            if k:
+                outbox().release(k)
+            raise
+        if k:
+            outbox().record(k, ts=ts)
+        if rest and ts:
+            if len(rest) > REST_MAX:   # Slack refuses a message much past 40k characters
+                log.info("notice thread text cut at %d of %d characters", REST_MAX, len(rest))
+                rest = rest[:REST_MAX].rstrip() + "\n_…cut here; the rest is in the log._"
+            try:
+                self.console_post(rest, thread_ts=ts)
+            except Exception as e:  # noqa: BLE001 - the summary arrived; the rest is in the log
+                log.warning("could not post the rest of a notice in its thread: %s", e)
+        if ping:
+            self._ping(head)
         return ts
 
     # ---- the console: the one conversation Solo talks to you in.
@@ -1344,7 +1423,7 @@ def deliver_to_owner(slack: Slack, item: dict, text: str) -> tuple[str, list[str
                     slack.console_post(entry, thread_ts=ts)
             slack._ping(r["text"])  # noqa: SLF001 - an edit does not notify
             return ts, []
-        ts = slack.notify(r["text"])
+        ts = slack.notify(r["text"], composed=True)
         State().update(lambda d: d.__setitem__("owner_group", {"key": key, "ts": ts, "at": now,
                                                                 "notes": [owner_note.to_dict(note)]}))
     if r["details"] and ts:
@@ -1428,11 +1507,12 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
                 + f"\n{quote(item['text'][:400])}" + (f"\n{item['permalink']}" if item.get("permalink") else ""))
         if text:
             att = f"\n{describe_files(item['files'])}" if item.get("files") else ""
-            draft_ts = slack.notify(f"{note}\n*Draft* — react ✅ to send as-is, ❌ to drop{att}\n{quote(text)}")
+            draft_ts = slack.notify(f"{note}\n*Draft* — react ✅ to send as-is, ❌ to drop{att}\n{quote(text)}",
+                                   fold=False, once=False)
             item["outcome"] = {"status": "escalated_draft", "draft_ts": draft_ts}
             state.update(lambda d: d["pending"].__setitem__(draft_ts, item["id"]))
         else:
-            slack.notify(note)
+            slack.notify(note, fold=False)
             item["outcome"] = {"status": "escalated"}
         if t and attention_worthy(t):
             # Jev says this needs the owner's eyes now, not just an answer today. The sender of
@@ -1519,7 +1599,7 @@ def execute_decision(slack: Slack, item: dict, decision: dict, ledger: Ledger, f
         note += f"\n{decision['note']}"
     if item.get("files"):
         note += f"\n{describe_files(item['files'])}"
-    draft_ts = slack.notify(f"{note}\n{quote(text)}")
+    draft_ts = slack.notify(f"{note}\n{quote(text)}", fold=False, once=False)
     item["outcome"] = {"status": "drafted", "draft_ts": draft_ts, "at": now_iso()}
     save_item(item)
     state.update(lambda d: d["pending"].__setitem__(draft_ts, item["id"]))
@@ -2306,7 +2386,7 @@ class Daemon(Slack):
     def _remind(self, f: Followup) -> None:
         due = datetime.fromisoformat(f.due).strftime("%a %-I:%M%p").lower()
         self.notify(f"⏰ You told *{f.counterpart_name}* you'd get back {f.phrase} (due {due}) about:\n{quote(f.summary)}"
-                    + (f"\n{f.permalink}" if f.permalink else ""))
+                    + (f"\n{f.permalink}" if f.permalink else ""), once=True)
 
     # -------------------------------------------------------------- events
 
@@ -3228,6 +3308,10 @@ class Daemon(Slack):
                 return
         elif ctype != "im":
             return
+        if handled_before(f"{channel}-{ev['ts'].replace('.', '_')}"):
+            # Slack redelivers an event it thinks was missed, and after a restart `seen` is empty:
+            # the item on disk is what remembers that this message was already answered.
+            log.info("skip (already handled) %s %s", channel, ev["ts"]); return
         who = self.name_of(sender)
         clean = clean_text(text, self.name_of)
         if (paused := self.state.pause_info()) is not None:
@@ -3577,7 +3661,7 @@ class Daemon(Slack):
                 self.notify(writer_alert(why, cls))
             elif ok and not was_ok:
                 self.notify(f"✅ *Solo can draft again* — the writer answered at "
-                            f"{datetime.now():%H:%M}. Nothing was lost while it was down.")
+                            f"{datetime.now():%H:%M}. Nothing was lost while it was down.", once=False)
         finally:
             self._probe_lock.release()
 
@@ -3608,7 +3692,7 @@ class Daemon(Slack):
                                                      "cls": cls, "source": "run", "since": now_iso(),
                                                      **({"last_ok": now_iso()} if ok else {})}))
         if ok:
-            self.notify(f"✅ *Solo can draft again* — the writer answered at {datetime.now():%H:%M}. Nothing was lost while it was down.")
+            self.notify(f"✅ *Solo can draft again* — the writer answered at {datetime.now():%H:%M}. Nothing was lost while it was down.", once=False)
         else:
             self.notify(writer_alert(why, cls))
 
@@ -3933,82 +4017,102 @@ def cmd_say(a):
     except ValueError as e:
         sys.exit(str(e))
     print(f"→ {routed}")
-    item = {"id": f"say-{uuid.uuid4().hex[:8]}", "created": now_iso(), "status": "queued",
-            "simulated": False, "outbound": True, "origin": f"agent:{a.from_}",
-            "channel": channel, "channel_type": "im" if kind == "people" else "channel",
-            "channel_name": name, "ts": f"{time.time():.6f}", "thread_ts": a.thread_ts,
-            "reply_thread_ts": a.thread_ts,
-            "sender": tid, "sender_name": name, "sender_handle": name.lower().replace(" ", ""),
-            "intent": a.intent, "why": a.why or "",
-            "text": f"[{a.from_} wants to tell {name}]: {a.intent}",
-            "permalink": None,
-            "context": f"(nothing — this is outbound; {a.from_} asked for it"
-                       + (f" because: {a.why}" if a.why else "") + ")"}
-    if files:
-        item["files"] = files
-    spec = {k: v for k, v in (("status", getattr(a, "status", None)), ("headline", getattr(a, "headline", None)),
-                              ("points", getattr(a, "points", None)), ("details", getattr(a, "details", None)),
-                              ("options", getattr(a, "options", None)), ("link", getattr(a, "link", None))) if v}
-    if spec:
-        item["note"] = spec
-    if getattr(a, "group", None):
-        item["group"] = a.group
-    if tgt:
-        item.update(tgt)
-        item["re"] = re_item
-        item["text"] = f"[{a.from_} reporting on what you asked {tgt['sender_name']} about]: {a.intent}"
-        item["context"] = (f"(outbound — {a.from_} investigated this because {tgt['sender_name']} asked: "
-                           f"{(src.get('text') or '')[:300]}"
-                           + (f"; {a.why}" if a.why else "") + ")")
-    save_item(item)
-    print(f"queued {item['id']} → {name} (asked by {a.from_})" + (f" with {describe_files(files)}" if files else ""))
-    if channel in (s.self_dm, s.bot_dm):
-        # Same test `execute_decision` applies: the owner's own DM. The words are the agent's,
-        # verbatim; `execute_decision` still records policy and outcome, and still falls back to
-        # a draft if the console cannot be reached.
-        item["decision"] = {"action": "reply", "text": a.intent, "verbatim": True}
+    # An agent that timed out waiting for this command runs it again with the same words; a fresh
+    # id each time made that a second message. The same sender, place and words are one message.
+    once_key = outbound.key("say", a.from_, channel, a.thread_ts, re_item or "", a.intent, *(getattr(a, f, None) or "" for f in (
+        "status", "headline", "points", "details", "options", "link")), *(files or []))
+    if (prev := outbox().claim(once_key, SAY_ONCE_S)) is not None and say_retry_allowed(prev):
+        outbox().release(once_key)   # the first try died before it said anything: this one may
+        prev = outbox().claim(once_key, SAY_ONCE_S)
+    if prev is not None:
+        mins = int((time.time() - float(prev.get("at") or 0)) // 60)
+        done = say_has_outcome(prev)
+        print(f"queued {prev.get('id') or 'earlier'} → {name} (" + (
+            f"already sent — the same words from {a.from_} went there {mins} min ago; not sent again)" if done else
+            f"the same words from {a.from_} are still being composed ({mins} min ago); not queued again)"))
+        return
+    try:
+        item = {"id": f"say-{uuid.uuid4().hex[:8]}", "created": now_iso(), "status": "queued",
+                "simulated": False, "outbound": True, "origin": f"agent:{a.from_}",
+                "channel": channel, "channel_type": "im" if kind == "people" else "channel",
+                "channel_name": name, "ts": f"{time.time():.6f}", "thread_ts": a.thread_ts,
+                "reply_thread_ts": a.thread_ts,
+                "sender": tid, "sender_name": name, "sender_handle": name.lower().replace(" ", ""),
+                "intent": a.intent, "why": a.why or "",
+                "text": f"[{a.from_} wants to tell {name}]: {a.intent}",
+                "permalink": None,
+                "context": f"(nothing — this is outbound; {a.from_} asked for it"
+                           + (f" because: {a.why}" if a.why else "") + ")"}
+        if files:
+            item["files"] = files
+        spec = {k: v for k, v in (("status", getattr(a, "status", None)), ("headline", getattr(a, "headline", None)),
+                                  ("points", getattr(a, "points", None)), ("details", getattr(a, "details", None)),
+                                  ("options", getattr(a, "options", None)), ("link", getattr(a, "link", None))) if v}
+        if spec:
+            item["note"] = spec
+        if getattr(a, "group", None):
+            item["group"] = a.group
+        if tgt:
+            item.update(tgt)
+            item["re"] = re_item
+            item["text"] = f"[{a.from_} reporting on what you asked {tgt['sender_name']} about]: {a.intent}"
+            item["context"] = (f"(outbound — {a.from_} investigated this because {tgt['sender_name']} asked: "
+                               f"{(src.get('text') or '')[:300]}"
+                               + (f"; {a.why}" if a.why else "") + ")")
         save_item(item)
+        outbox().record(once_key, id=item["id"])
+        print(f"queued {item['id']} → {name} (asked by {a.from_})" + (f" with {describe_files(files)}" if files else ""))
+        if channel in (s.self_dm, s.bot_dm):
+            # Same test `execute_decision` applies: the owner's own DM. The words are the agent's,
+            # verbatim; `execute_decision` still records policy and outcome, and still falls back to
+            # a draft if the console cannot be reached.
+            item["decision"] = {"action": "reply", "text": a.intent, "verbatim": True}
+            save_item(item)
+            ledger, _ = load_services()
+            fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
+            print(execute_decision(s, item, item["decision"], ledger, fus, set(), state=State()))
+            return
+        if CFG["dispatch"] != "claude":
+            print(f"compose it with: claude -p '/solo:slack-autoreply compose {item_path(item['id'])}'")
+            return
+        tools, result, err, cls = compose(item, State(), prompt=f"{config.SKILL_COMMAND} compose {item_path(item['id'])}")
+        item = load_item(item["id"])
+        if not item.get("decision"):
+            why_not = run_said(result, err) if (result or err) else "no decision"
+            # `reported back` has to mean the owner has something to approve. Recorded here, where
+            # there is no draft, it would lie in exactly the case it exists to catch — and a compose
+            # failure is not hypothetical: a weekly rate limit does precisely this.
+            item["status"], item["outcome"] = "failed", {"status": "failed", "why": why_not, "at": now_iso()}
+            item["run"] = {"tools": tools, "subtype": (result or {}).get("subtype"), "said": why_not}
+            save_item(item)
+            if re_item:
+                record_delegation(item=re_item, role=a.from_, outcome="report_failed",
+                                  say=item["id"], error=str(why_not)[:200])
+            # The words still reach the owner. Four release notes went missing on 27 Oct because the
+            # writer's account was out of quota for half an hour and every one of them ended here,
+            # in an exit code only the calling agent saw. The console is where the owner already
+            # reads what agents send; the agent's own wording is better than nothing at all.
+            dest = "you" if kind == "people" and tid == s.me else name
+            outbox().release(once_key)   # nothing was said: a retry must be allowed to try again
+            s.notify(f"⚠️ *Solo could not write a message from `{a.from_}`* — {why_not[:200]}\n"
+                     f"_nothing went to anyone. It was meant for {dest}. Below are {a.from_}'s own words, "
+                     f"not a draft in your voice: place it, rewrite it or drop it._\n\n{quote(a.intent)}", ping=False)
+            fix = WRITER_FAILURES.get(cls or "", {}).get("fix")
+            sys.exit(f"Solo could not compose it{f' ({cls})' if cls else ''}: {why_not}\n"
+                     + (f"   fix: {fix}\n" if fix else "") +
+                     f"   the message is in the owner's Solo DM in your own words instead — nothing was sent to anyone")
         ledger, _ = load_services()
         fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
-        print(execute_decision(s, item, item["decision"], ledger, fus, set(), state=State()))
-        return
-    if CFG["dispatch"] != "claude":
-        print(f"compose it with: claude -p '/solo:slack-autoreply compose {item_path(item['id'])}'")
-        return
-    tools, result, err, cls = compose(item, State(), prompt=f"{config.SKILL_COMMAND} compose {item_path(item['id'])}")
-    item = load_item(item["id"])
-    if not item.get("decision"):
-        why_not = run_said(result, err) if (result or err) else "no decision"
-        # `reported back` has to mean the owner has something to approve. Recorded here, where
-        # there is no draft, it would lie in exactly the case it exists to catch — and a compose
-        # failure is not hypothetical: a weekly rate limit does precisely this.
-        item["status"], item["outcome"] = "failed", {"status": "failed", "why": why_not, "at": now_iso()}
-        item["run"] = {"tools": tools, "subtype": (result or {}).get("subtype"), "said": why_not}
-        save_item(item)
+        outcome = execute_decision(s, item, item["decision"], ledger, fus, set(), state=State())
         if re_item:
-            record_delegation(item=re_item, role=a.from_, outcome="report_failed",
-                              say=item["id"], error=str(why_not)[:200])
-        # The words still reach the owner. Four release notes went missing on 27 Oct because the
-        # writer's account was out of quota for half an hour and every one of them ended here,
-        # in an exit code only the calling agent saw. The console is where the owner already
-        # reads what agents send; the agent's own wording is better than nothing at all.
-        dest = "you" if kind == "people" and tid == s.me else name
-        s.console_post(f"⚠️ *Solo could not write a message from `{a.from_}`* — {why_not[:200]}\n"
-                       f"_nothing went to anyone. It was meant for {dest}. Below are {a.from_}'s own words, "
-                       f"not a draft in your voice: place it, rewrite it or drop it._\n{quote(a.intent[:1200])}")
-        fix = WRITER_FAILURES.get(cls or "", {}).get("fix")
-        sys.exit(f"Solo could not compose it{f' ({cls})' if cls else ''}: {why_not}\n"
-                 + (f"   fix: {fix}\n" if fix else "") +
-                 f"   the message is in the owner's Solo DM in your own words instead — nothing was sent to anyone")
-    ledger, _ = load_services()
-    fus = Followups(str(config.p("followups.json")), lambda f: None, CFG["followup_lead"])
-    outcome = execute_decision(s, item, item["decision"], ledger, fus, set(), state=State())
-    if re_item:
-        # The loop closes once there is a draft, so `delegations` can tell a task that came back
-        # from one that was handed over and never heard from again.
-        record_delegation(item=re_item, role=a.from_, outcome="reported", say=item["id"],
-                          report=a.intent[:200])
-    print(outcome)
+            # The loop closes once there is a draft, so `delegations` can tell a task that came back
+            # from one that was handed over and never heard from again.
+            record_delegation(item=re_item, role=a.from_, outcome="reported", say=item["id"],
+                              report=a.intent[:200])
+        print(outcome)
+    except Exception:
+        outbox().release(once_key)   # it raised before saying anything: the retry must be allowed to try
+        raise
 
 
 
