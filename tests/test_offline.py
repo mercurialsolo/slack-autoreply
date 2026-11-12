@@ -933,7 +933,7 @@ _lim.unlink(); os.environ.pop("FAKE_LIMIT", None)
 _ok_item = {**_lim_item, "id": "LIM-2.000", "ts": "3.000"}; S.save_item(_ok_item)
 _back_notes: list = []
 _real_notify_lim = S.Daemon.notify
-S.Daemon.notify = lambda self, text: _back_notes.append(text)
+S.Daemon.notify = lambda self, text, **_: _back_notes.append(text)
 try:
     d.handle_with_claude(dict(_ok_item))
 finally:
@@ -1655,12 +1655,15 @@ check("after five minutes a note starts a new message", _con.posted[-1][2] is No
 # landed every pass. Each is now said once.
 _n_dup = len(_con.posted)
 S.cmd_say(_say_args("Lisbon shipped v2.1.0, all checks green", to="@barada", frm="retry-agent"))
-_n_once = len(_con.posted)
+_n_once = len(_con.posted); _u_once = len(_con.updates)
 _dup_out = _capture(lambda: S.cmd_say(_say_args("Lisbon  shipped v2.1.0, all checks green", to="@barada", frm="retry-agent")))
-check("a retried say with the same words posts once", _n_once > _n_dup and len(_con.posted) == _n_once, _con.posted[_n_dup:])
+check("a retried say with the same words posts once", _n_once > _n_dup and len(_con.posted) == _n_once and len(_con.updates) == _u_once, _con.posted[_n_dup:])
 check("…and tells the agent it was already sent, not that it failed", "already sent" in _dup_out, _dup_out)
 S.cmd_say(_say_args("Lisbon shipped v2.1.1, all checks green", to="@barada", frm="retry-agent"))
-check("…while different words are a new note", len(_con.posted) > _n_once)
+# Inside five minutes the same agent's next note joins the first message (an edit), so "new"
+# means a post or an edit, where the retried same words were neither.
+check("…while different words are a new note", len(_con.posted) > _n_once or len(_con.updates) > _u_once,
+      (_con.posted[_n_once:], _con.updates[_u_once:]))
 # A say that raised before saying anything must not block its own retry as "already sent".
 _real_exec = S.execute_decision
 def _boom(*a, **k): raise RuntimeError("slack 500")
@@ -2200,7 +2203,7 @@ def _writer_case(plugins=None, heal_to=None, auth=None):
 
 _wn: list[str] = []
 _real_notify_w = S.Daemon.notify
-S.Daemon.notify = lambda self, text: _wn.append(text)
+S.Daemon.notify = lambda self, text, **_: _wn.append(text)
 _d_old = d.dispatch
 d.dispatch = "claude"
 _seq = [0]
