@@ -1848,6 +1848,8 @@ _n_b = len(_con.posted); _u_b = len(_con.updates)
 d.on_button(_press("UME", "Wait"))
 check("the owner's press is kept on the note", S.load_item(_ask["id"]).get("answer", {}).get("choice") == "Wait")
 check("…passed to the coordinator, as a typed thread reply would be", _coord.exists() and _coord.read_text().strip().endswith(": Wait"))
+check("…and counts as read, so the same question later is a new one, not the stale answer",
+      S.load_item(_ask["id"]).get("answer_read") and S.say_retry_allowed({"at": time.time() - 5, "id": _ask["id"]}, now=time.time()))
 check("…the buttons give way to the choice", _con.updates[_u_b:] and _con.updates[_u_b][1] == _ask_msg[3] and "✔️ Wait" in _con.updates[_u_b][2]
       and not any(b["type"] == "actions" for b in (_con.update_blocks.get(_ask_msg[3]) or []))
       and any("Wait" in str(b) for b in (_con.update_blocks.get(_ask_msg[3]) or [])), _con.update_blocks.get(_ask_msg[3]))

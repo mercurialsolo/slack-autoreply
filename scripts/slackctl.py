@@ -3152,6 +3152,8 @@ class Daemon(Slack):
             if item.get("answer"):
                 return  # double delivery, or a second press before the edit landed
             item["answer"] = {"choice": choice, "at": now_iso(), "by": user}
+            if coordinator_inbox():
+                item["answer_read"] = now_iso()   # the coordinator reads it from its inbox, never via `answer`
             save_item(item)
             note = owner_note.from_dict(item.get("note_rendered") or {})
             head = owner_note.render(note)
@@ -3202,6 +3204,8 @@ class Daemon(Slack):
                 # buttons wait for Interactivity, and as good as a press once they are on.
                 item = load_item(ask["item"])
                 item["answer"] = {"choice": said, "at": now_iso(), "by": self.me, "typed": True}
+                if coordinator_inbox():
+                    item["answer_read"] = now_iso()   # as above: the inbox is where it is read
                 save_item(item)
                 origin = item.get("origin", "").removeprefix("agent:")
                 if inbox := coordinator_inbox():
@@ -4016,6 +4020,9 @@ def cmd_say(a):
         prev_item = peek_item(prev["id"]) if prev.get("id") else {}
         if (prev_item.get("answer") or {}).get("choice"):
             print(f"queued {prev['id']} → {name} (already answered: {prev_item['answer']['choice']}; not asked again)")
+            if not prev_item.get("answer_read"):   # handed back here: the next same question is a new one
+                prev_item["answer_read"] = now_iso()
+                save_item(prev_item)
             return
         done = outbound.said(prev_item)
         print(f"queued {prev.get('id') or 'earlier'} → {name} (" + (
