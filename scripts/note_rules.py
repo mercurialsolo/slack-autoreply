@@ -48,7 +48,35 @@ def url_tail(url: str, before: str = "") -> tuple[str, str]:
         else:
             break
     return url[:cut], url[cut:]
-SLACK_LINK_RE = re.compile(r"<(" + URL + r")(?:\|([^>]*))?>")
+SLACK_LINK_RE = re.compile(r"<(https?://[^\s<>|]+)(?:\|([^>]*))?>")  # the brackets bound it: a URL may end in ")"
+# The same link once escaped on its way here (`&lt;url|label&gt;`), and a Markdown one (`[label](url)`):
+# Slack shows both as source, brackets and pipe. They are read as the Slack link they mean.
+ESCAPED_LINK_RE = re.compile(r"&lt;(https?://[^\s<>|]+?)(?:\|([^<>\n]*?))?&gt;")
+MD_LINK_RE = re.compile(r"(?<!!)\[([^\[\]\n]+)\]\((https?://(?:[^\s()<>]|\([^\s()<>]*\))+)\)")  # "Foo_(bar)" keeps its ")"
+
+
+def slack_links(text: str) -> str:
+    """Every link in `text` in Slack's own `<url|label>` form, so it is parsed as a link, never shown as source."""
+    if not text or ("&lt;" not in text and "](" not in text):
+        return text
+
+    def link(url, label, before):  # a label is plain words: no link in it, no bracket or pipe to end the link early
+        label = " ".join(re.sub(r"[<>|]", " ", MD_LINK_RE.sub(r"\1", label or "")).split())
+        if not label:  # never a bare URL: the words a bare one gets ("the PR"), capitalised to start a sentence
+            lb = label_for(url, before)
+            label = lb if re.search(r"(?:^|[.!?:])\s*$", before) else WORDS_FOR.get(lb, lb[:1].lower() + lb[1:])
+        return f"<{url.replace('|', '%7C')}|{label}>"  # a "|" in the URL would end it early
+
+    def prose(t):  # `&amp;` stays: Slack wants it escaped inside a link too
+        t = ESCAPED_LINK_RE.sub(lambda m: link(m.group(1), m.group(2), m.string[:m.start()]), t)
+        return MD_LINK_RE.sub(lambda m: link(m.group(2), m.group(1), m.string[:m.start()]), t)
+    out, at = [], 0
+    for m in CODE_RE.finditer(text):  # code is someone's exact words: left as written
+        out += [prose(text[at:m.start()]), m.group(0)]
+        at = m.end()
+    return "".join(out + [prose(text[at:])])
+
+
 TASK_ID = r"\bt_[0-9a-f]{6,}\b"
 TASK_ID_RE = re.compile(TASK_ID)
 # A command is a command word with arguments that only a shell would want: a flag, a path, an
@@ -105,7 +133,9 @@ def label_for(url: str, before: str = "") -> str:
 # A link label that is only a call to open it ("Answer here", "Details"): at the end of a sentence it
 # goes with its link; any other label is part of the sentence ("merge main into #2767 and land").
 CTA_LABEL_RE = re.compile(r"^(?:answer here|answer|here|link|details?|open(?: it)?|what changed|release page|"
-                          r"the (?:pr|issue|ci run|log)|dashboard|view|see|click here)$", re.I)
+                          r"the (?:pr|issue|ci run|log)|dashboard|view|see|click here|"
+                          r"(?:open|see|view) (?:the |it on the )?(?:dashboard|answer page|page|pr|issue|ci run|log|release|"
+                          r"release page|changelog|details|run))$", re.I)
 PR_NUM_RE = re.compile(r"^#\d+$")
 SHA_LABEL_RE = re.compile(r"^[0-9a-f]{7,40}$")
 WORDS_FOR = {"Answer here": "the answer page", "Open it": "the link"}
@@ -121,7 +151,7 @@ def _in_sentence(label: str, url: str, before: str, after: str) -> str:
         if PR_NUM_RE.match(label):
             return label if ("/pull/" not in url or re.search(r"\b(?:PRs?|pull request)\s*$", before, re.I)) else f"PR {label}"
         if tail and CTA_LABEL_RE.match(label):
-            return ""
+            return "\x06"  # a call to open it, ending its sentence: gone, with an "or" before it (see the caller)
         return label
     if tail:
         return ""
@@ -134,8 +164,10 @@ def take_links(text: str) -> tuple[str, list[tuple[str, str]]]:
 
     The sentence keeps the link's words: a label in mid-sentence stays as text ("#2767" reads "PR
     #2767"), a bare URL in mid-sentence reads "the PR" / "the issue"; only a link that ends its
-    sentence with nothing but "Answer here" is taken out whole. A sentence never keeps a hole."""
+    sentence with nothing but "Answer here" is taken out whole. A sentence never keeps a hole.
+    An escaped or Markdown link is read as the Slack link it means (`slack_links`)."""
     links: list[tuple[str, str]] = []
+    text = slack_links(text)
 
     def slack(m):
         label = (m.group(2) or "").strip()
@@ -150,6 +182,7 @@ def take_links(text: str) -> tuple[str, list[tuple[str, str]]]:
     text = SLACK_LINK_RE.sub(slack, text)
     text = URL_RE.sub(bare, text)
     text = re.sub(r"(?:\s+(?:at|on|in|from)\b)?\s*\x07", " ", text)  # "Review #3558 at <sha>" reads "Review #3558"
+    text = re.sub(r"(?:,?\s+(?:or|and)\b)?\s*\x06", " ", text)  # "reply in the thread, or <url|Answer here>." ends at "thread."
     return text, links
 
 

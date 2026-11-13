@@ -134,7 +134,10 @@ def build(body: str, sender: str, spec: dict | None = None, call=None, buttons: 
     cut headline or two icons — a model words it from the agent's text, and the rendered note is
     checked again. Whatever is still against the rule is dropped (`owner_note.scrub`); the agent's
     words stay whole in Details. A note that breaks the rule is never posted (owner, 2026-11-11)."""
-    spec = spec or {}
+    sl = note_rules.slack_links  # the sender's links as Slack links once, before any part is read, scrubbed or kept
+    body, spec = sl(body or ""), {**(spec or {}), "headline": sl((spec or {}).get("headline")),
+                                  "points": [sl(p) for p in (spec or {}).get("points") or []],
+                                  "details": sl((spec or {}).get("details"))}
     kw = dict(status=spec.get("status"), details=spec.get("details"), options=spec.get("options"),
               link=spec.get("link") or "")
     context = "\n".join([spec.get("headline") or ""] + list(spec.get("points") or []) + [body]).strip()

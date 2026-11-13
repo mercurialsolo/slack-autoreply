@@ -183,4 +183,9 @@ check("unlinked: mentions, channels and specials read as words; entities unescap
 check("moved_below: the head points down instead of at a thread",
       O.moved_below("Done.\n\n" + O.MORE) == "Done.\n\n" + O.MOVED and O.moved_below("Done.") == "Done.")
 
+check("plain: an escaped or Markdown link becomes the Slack link it means, code left alone",
+      O.plain("See [the PR](https://h/pull/3) and &lt;https://a.b|A&gt; `[x](https://y.z)`")
+      == "See <https://h/pull/3|the PR> and <https://a.b|A> `[x](https://y.z)`",
+      O.plain("See [the PR](https://h/pull/3) and &lt;https://a.b|A&gt; `[x](https://y.z)`"))
+
 print(f"\n{passed} checks passed")

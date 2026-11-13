@@ -100,8 +100,9 @@ def unlinked(text: str) -> str:
 def plain(line: str) -> str:
     """One prose line to the owner's rule: links as text, no task ids. Code and links already in
     Slack's `<url|label>` form are left exactly as they are. A `<` or `>` of the prose's own is
-    escaped, as Slack wants it, so a link made inside `<…>` is never nested markup."""
-    t, kept = _protect(line.replace("\x00", ""))   # NUL is the placeholder mark; it never means text
+    escaped, as Slack wants it, so a link made inside `<…>` is never nested markup. An escaped
+    (`&lt;url|label&gt;`) or Markdown (`[label](url)`) link becomes the Slack link it means."""
+    t, kept = _protect(note_rules.slack_links(line.replace("\x00", "")))   # NUL is the placeholder mark
     t = note_rules.URL_RE.sub(lambda m: _link(m, t[:m.start()]), t)
     t, kept2 = _protect(_restore(t, kept))   # the new links are now out of reach too
     t = t.replace("<", "&lt;").replace(">", "&gt;")
