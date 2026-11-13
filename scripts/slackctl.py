@@ -47,6 +47,7 @@ import note_shape  # noqa: E402
 import outbound  # noqa: E402
 import recall  # noqa: E402
 import staff_intake  # noqa: E402
+import factory_converse  # noqa: E402
 import voice  # noqa: E402
 from config import CFG, DELEGATE_REACTIONS, DROP_REACTIONS, OK_SUBTYPES, SEND_REACTIONS  # noqa: E402
 from followups import Followup, Followups, hold_deadline  # noqa: E402
@@ -1376,7 +1377,16 @@ def deliver_to_owner(slack: Slack, item: dict, text: str) -> tuple[str, list[str
         if r["details"] and ts:
             slack.console_post(r["details"], thread_ts=ts)
         return ts, file_ids
-    if note.options:
+    if item.get("factory_task"):
+        # A factory push (an ask, done, red, released, a rollback) stands alone, and its thread is bound
+        # to its task: a reply or a press there goes back to that task (factory_converse).
+        ts = slack.console_post(r["text"], blocks=r["blocks"])
+        slack._ping(r["text"])  # noqa: SLF001
+        if ts:
+            factory_converse.bind(factory_converse.thread_key(slack.console, ts), item["factory_task"],
+                                  principal=slack.me, title=note.headline, options=note.options,
+                                  content=note.headline)
+    elif note.options:
         # An ask stands alone: its buttons are the point, and a group would bury them.
         ts = slack.console_post(r["text"], blocks=r["blocks"])
         slack._ping(r["text"])  # noqa: SLF001
@@ -2409,6 +2419,8 @@ class Daemon(Slack):
         if sender == self.me:
             self.on_owner_message(ev)
             return
+        if self.on_factory_chat(ev):
+            return
         if self.on_intake(ev):
             return
         self.on_inbound(ev)
@@ -3137,6 +3149,11 @@ class Daemon(Slack):
         ts, channel = cont.get("message_ts"), cont.get("channel_id")
         for act in payload.get("actions") or []:
             aid = act.get("action_id") or ""
+            if aid.startswith(factory_converse.ACTION_PREFIX) or (
+                    aid.startswith("solo_answer_") and aid != "solo_answer_link" and channel
+                    and factory_converse.bound(factory_converse.thread_key(channel, ts))):
+                self.on_factory_press(channel, ts, user, act)
+                return
             if not aid.startswith("solo_answer_") or aid == "solo_answer_link":
                 continue
             if user != self.me:
@@ -3172,6 +3189,69 @@ class Daemon(Slack):
             except Exception as e:  # noqa: BLE001 - the answer is recorded; the receipt is a courtesy
                 log.warning("could not confirm the answer in the thread: %s", e)
             return
+
+    # ------------------------------------------------------------ factory conversation (factory_converse.py)
+
+    def factory_chat(self):
+        conf = factory_converse.load_conf()
+        if not conf:
+            return None
+        chat = self.__dict__.get("_factory_chat")
+        if chat is None or chat.conf != conf:
+            chat = self.__dict__["_factory_chat"] = factory_converse.Conversation(conf, owner=self.me)
+        return chat
+
+    def _factory_post(self, channel: str):
+        def post(text, blocks, thread_ts):
+            r = self.bot.chat_postMessage(channel=channel, text=text, thread_ts=thread_ts,
+                                          **({"blocks": blocks} if blocks else {}))
+            return r.get("ts")
+        return post
+
+    def on_factory_chat(self, ev: dict) -> bool:
+        """A message to Solo about factory work, answered in its thread. The owner: the bot DM console.
+        Anyone else: a DM or a mention, read-only and about their own tasks — a request of theirs returns
+        False and stays with staff_intake. False too when it is not about the factory, or anything fails."""
+        chat = self.factory_chat()
+        if chat is None or self.bot is None:
+            return False
+        sender, channel = ev.get("user"), ev.get("channel")
+        is_owner = sender == self.me
+        if is_owner and channel != self.bot_dm:
+            return False
+        if not is_owner and ev.get("channel_type") != "im" and f"<@{self.me}>" not in (ev.get("text") or ""):
+            return False
+        if not is_owner and (self.state.pause_info() is not None or not self._allowed(sender, channel)):
+            return False
+        try:
+            text = clean_text(ev.get("text", "") or "", self.name_of).strip()
+            got = chat.message(channel=channel, ts=ev["ts"], thread_ts=ev.get("thread_ts"), user=sender, text=text)
+            if got is None:
+                return False
+            key, reply = got
+            choice = chat.route(key, sender, reply)
+            factory_converse.deliver(reply, key, self._factory_post(channel), choice.get("modality", "structured_text"))
+            log.info("factory chat: %s -> %s", sender, reply.headline[:100])
+            return True
+        except Exception:  # noqa: BLE001 - never a guess, never a crash: the normal path takes it
+            log.exception("factory chat failed")
+            return False
+
+    def on_factory_press(self, channel: str, ts: str, user: str, act: dict) -> None:
+        chat = self.factory_chat()
+        if chat is None:
+            return
+        got = factory_converse.parse_press(act.get("value") or "")
+        key, value = got if got else (factory_converse.thread_key(channel, ts), (act.get("value") or "").strip())
+        try:
+            reply = chat.press(key=key, value=value, user=user)
+            if reply is None:
+                log.warning("factory button pressed by %s, who may not — ignored", user)
+                return
+            chat.route(key, user, reply)
+            factory_converse.deliver(reply, key, self._factory_post(channel))
+        except Exception:  # noqa: BLE001
+            log.exception("factory press failed")
 
     CONSOLE_HELP = ("`pause` / `pause 2h` / `resume` · `status` · `mode learn|draft|auto`\n"
                     "anything else is kept as feedback on how I write, and folded in at the next review")
@@ -3215,6 +3295,9 @@ class Daemon(Slack):
                 else:
                     reply = f"got it — *{said[:80]}*. `{origin}` reads it with `answer {item['id']}`"
                 log.info("owner answered %s in the thread: %s", item["id"], said[:100])
+            elif in_thread and factory_converse.load_conf() and factory_converse.bound(
+                    factory_converse.thread_key(self.bot_dm, ev["ts"], thread)) and self.on_factory_chat(ev):
+                pass   # a reply under a factory note goes back to its task (factory_converse)
             elif in_thread and (inbox := coordinator_inbox()):
                 with open(inbox, "a", encoding="utf-8") as f:
                     f.write(f"- {now_iso()} owner (Slack thread reply to the note at {thread}): {said}\n")
@@ -3253,6 +3336,8 @@ class Daemon(Slack):
                     reply = (f"MODE is set in .env and read at startup, so I can't change it from here. "
                              f"On the machine running me: `solo ssh` then edit MODE={want} and `solo restart`. "
                              f"To stop me right now: `pause`.")
+            elif factory_converse.load_conf() and self.on_factory_chat(ev):
+                pass   # about factory work: answered in the thread by factory_converse
             else:
                 # Not a command: the owner correcting how Solo writes. Keep it verbatim where
                 # `review` will see it, rather than guessing an edit to VOICE.md unprompted.
@@ -4052,6 +4137,8 @@ def cmd_say(a):
             item["note"] = spec
         if getattr(a, "group", None):
             item["group"] = a.group
+        if getattr(a, "factory_task", None):
+            item["factory_task"] = a.factory_task
         if tgt:
             item.update(tgt)
             item["re"] = re_item
@@ -4920,6 +5007,8 @@ def main():
                         "coordinator and kept on the item — read it with `answer <say-id>`")
     g.add_argument("--link", help="the answer page or a release page, shown as a labelled text link (and a button on an ask)")
     g.add_argument("--group", help="notes with the same key inside 5 minutes become one message (default: the --from agent)")
+    g.add_argument("--factory-task", dest="factory_task", metavar="TASK_ID",
+                   help="a factory push about this task: the owner's reply or press in its thread goes back to it")
     p.set_defaults(fn=cmd_say)
     p = sub.add_parser("answer", help="what the owner chose on a note with --option buttons")
     p.add_argument("item", help="the say-… id printed by `say`")

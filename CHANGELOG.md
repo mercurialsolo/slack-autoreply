@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **Factory chat in Slack.** A model reads the owner's DMs to Solo (and other people's DMs or mentions)
+  and, when one is about factory work, runs it. It can show a status, list tasks, say what was released,
+  show the waiting asks, start a new task, answer an ask, instruct a task, or cancel one. It uses
+  POST /v1/converse when `converse_url` is set, and the factory CLI until then. The reply goes in the same
+  thread as an owner note with real buttons, and cancel asks Yes/No first. Push notes sent with
+  `say --factory-task` bind their thread, so a reply or a press goes back to that task. Other people get
+  read-only answers about their own requests. Turned on by `~/.slack-autoreply/factory_chat.json`
+  (`{"repo": "..."}`).
+- **Channel and modality are learnt.** `channel_choice.py` has a model choose the channel and modality
+  for each reply. It records the choice, the outcome and any correction per person. A nightly
+  `channel_choice.py learn` writes `people_channels.json`, which feeds the next choice.
+
 ## 1.4.1 — 2026-11-11
 
 **Factory notes read once, whole, with one icon**
