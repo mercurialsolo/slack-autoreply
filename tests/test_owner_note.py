@@ -363,4 +363,66 @@ _e = N.group_thread(_a, named=False)
 check("a digest note past the named ones keeps its headline in the thread", "Board #9?" in _e, _e)
 check("a digest thread entry keeps the ask", "Board it" in N.group_thread(_a) and "Park it" in N.group_thread(_a), N.group_thread(_a))
 
+# factory notes: a link reaches the owner as a link, in whatever form the factory wrote it (owner, 2026-11-13:
+# "See this": the 00:06Z burn alert showed its link as source)
+_dash = "https://factory.staffai.workers.dev/#factory/ops"
+_burn = ("⚠️ Alert: The operator's burn rule\n*Burn* is past the limit. See it on the dashboard.\n"
+         f"<{_dash}|Open the dashboard>\n_from factory · details in the thread_")
+for _form, _link in (("Slack", f"<{_dash}|Open the dashboard>"), ("escaped", f"&lt;{_dash}|Open the dashboard&gt;"),
+                     ("Markdown", f"[Open the dashboard]({_dash})")):
+    _n = note_shape.build("", "factory", {"status": "warn", "headline": "Alert: The operator's burn rule",
+                                          "points": ["Burn is past the limit.", f"See it on the dashboard: {_link}."],
+                                          "details": f"Refs: 3bdcaec1, see {_link}"}, call=lambda p: None)
+    _r = N.render(_n)
+    check(f"golden: the burn alert's {_form} link is the note's link, never source", _r["text"] == _burn and
+          _n.links == [(_dash, "Open the dashboard")] and not R.violations(_r["text"]), f"{_r['text']}\n{_n.links}")
+    check(f"…its {_form} link in the details is a Slack link too", f"<{_dash}|Open the dashboard>" in _r["details"]
+          and "&lt;" not in _r["details"] and "](" not in _r["details"], _r["details"])
+check("a Markdown link in code is someone's exact words: left as written",
+      R.slack_links("Run `[x](https://y.z)` or [the PR](https://h/pull/3)") == "Run `[x](https://y.z)` or <https://h/pull/3|the PR>")
+check("an escaped link keeps its `&amp;`: Slack wants it escaped in a link too",
+      R.slack_links("&lt;https://a.b/?x=1&amp;y=2|A &amp; B&gt;") == "<https://a.b/?x=1&amp;y=2|A &amp; B>")
+check("an image is not a link", R.slack_links("![logo](https://a.b/l.png)") == "![logo](https://a.b/l.png)")
+for _kind, _spec, _want in (
+        ("canary", {"status": "warn", "headline": "Canary: staff-factory PR #3062's train did not go green",
+                    "points": ["The merge-path PRs on staff-factory are held.", f"See it on the dashboard: <{_dash}|Open the dashboard>."]},
+         "⚠️ Canary: staff-factory PR #3062's train did not go green\nThe merge-path PRs on staff-factory are held. "
+         f"See it on the dashboard.\n<{_dash}|Open the dashboard>\n_from factory_"),
+        ("schedule recovered", {"status": "ok", "headline": "Recovered: schedule nightly-build",
+                                "points": ["The schedule nightly-build ran clean again.",
+                                           f"See it on the dashboard: &lt;{_dash}|Open the dashboard&gt;."]},
+         "✅ Recovered: schedule nightly-build\nThe schedule nightly-build ran clean again. See it on the dashboard.\n"
+         f"<{_dash}|Open the dashboard>\n_from factory_")):
+    _r = N.render(note_shape.build("", "factory", _spec, call=lambda p: None))
+    check(f"the factory's {_kind} note renders its link as a link", _r["text"] == _want, f"--- got\n{_r['text']}\n--- want\n{_want}")
+for _in, _out in (("[a > b](https://x.y/z)", "<https://x.y/z|a b>"),  # a ">" in a label never ends the link early
+                  ("[Docs](https://en.wikipedia.org/wiki/Foo_(bar))", "<https://en.wikipedia.org/wiki/Foo_(bar)|Docs>"),
+                  ("See &lt;https://github.com/o/r/pull/3&gt; now", "See <https://github.com/o/r/pull/3|the PR> now"),
+                  ("[x](https://a.b/?q=a|b)", "<https://a.b/?q=a%7Cb|x>"),
+                  ("&lt;https://a.b|see [x](https://y.z)&gt;", "<https://a.b|see x>")):
+    check(f"slack_links reads {_in!r} as one whole Slack link", R.slack_links(_in) == _out, R.slack_links(_in))
+check("a link that ends in ')' is one link, whole", R.take_links("&lt;https://en.wikipedia.org/wiki/Foo_(bar)&gt;")[1]
+      == [("https://en.wikipedia.org/wiki/Foo_(bar)", "Open it")], R.take_links("&lt;https://en.wikipedia.org/wiki/Foo_(bar)&gt;"))
+_n = note_shape.build("", "factory", {"status": "warn", "headline": "Alert: four things", "points": [
+    "One is late.", "Two is late.", "Three is late.", f"See it: [Open the dashboard]({_dash})."]}, call=lambda p: None)
+check("a point past the summary keeps its link a link in the thread", f"<{_dash}|Open the dashboard>" in _n.details
+      and "](" not in _n.details, _n.details)
+_n = note_shape.build(f"The burn rule tripped on Helsinki at 00:06 and the operator paused two lanes until the budget resets. "
+                      f"See it on the dashboard: [Open the dashboard]({_dash}).", "factory", call=lambda p: None)
+check("a free-text body's Markdown link is a link in the note and never source in the thread",
+      _n.links == [(_dash, "Open the dashboard")] and "](" not in (_n.details or "") + N.render(_n)["text"], (_n, N.render(_n)))
+_ans = "https://factory.staffai.workers.dev/#factory/ask/t_d1d740fc"
+for _link in (f"<{_ans}|Answer here>", f"[Answer here]({_ans})"):
+    _n = note_shape.build("", "factory", {"status": "ask", "headline": "Needs your answer: Grant more budget?",
+                                          "points": ["Grant more or stop it?", "Reply *yes* to Grant more or *no* to Stop it "
+                                                     f"in the thread, or {_link}."], "options": ["Grant more", "Stop it"]},
+                          call=lambda p: None)
+    _r, _off = N.render(_n), N.render(_n, buttons=False)
+    _btn = [e for b in _r["blocks"] if b.get("type") == "actions" for e in b["elements"] if e.get("url")]
+    check("the factory's ask: its answer link is the answer button, and the sentence keeps no dangling 'or'",
+          _btn and _btn[0]["url"] == _ans and _btn[0]["text"]["text"] == "Open the answer page"
+          and "in the thread." in _r["text"] and ", or" not in _r["text"] and not R.violations(_r["text"]), _r)
+    check("…with buttons off, the answer page is a text link", _off["text"].endswith(f"<{_ans}|Answer here>\n_from factory_"),
+          _off["text"])
+
 print(f"\n{passed} checks passed")
