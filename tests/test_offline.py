@@ -1599,7 +1599,10 @@ check("…headed by what the owner has to do; the command itself waits in the th
       len(_vn_posts) == 2 and _vn_posts[0].startswith("❓ Needs on the agentvm VM")
       and "kernel.apparmor" not in _vn_posts[0] and "The command is in the thread" in _vn_posts[0], _vn_posts)
 check("…and the command is whole there", "kernel.apparmor_restrict_unprivileged_userns=0" in _vn_posts[1])
-check("…and the agent's own words, whole, in the Details reply in its thread", _long_note in _vn_posts[1] and _vn_posts[1].startswith("🔎 *Details*")
+# Owner, 2026-11-13: "same message is almost duplicated - little new info". The thread adds to the note.
+check("…and the Details reply in its thread carries only what the note did not say",
+      _vn_posts[1].startswith("🔎 *Details*") and "#1739 and CI is green on it, twice" in _vn_posts[1]
+      and "bubblewrap" not in _vn_posts[1] and "The fallback lane holds" not in _vn_posts[1]
       and [q[2] for q in _con.posted[_n_con2:]][1] == [q[3] for q in _con.posted[_n_con2:]][0], _vn_posts)
 check("…signed by who sent it", "_from factory-pr1739 · details in the thread_" in _vn_posts[0])
 check("…with nothing left pending", d.state.read()["pending"] == _pend2)
@@ -1643,7 +1646,7 @@ check("…which leads with the worst of the two and lists each",
       and "⏸️ *Hillsboro* frozen at *v0.537.0*" in _g_upd[0][2], _g_upd)
 _n_g2 = len(_con.posted); S.cmd_say(_say_args("Canary on Hillsboro is red", to="@barada", frm="release-lane", details="Canary on Hillsboro is red\nrollback ran at 14:02")); _g2 = _con.posted[_n_g2:]
 check("…no thread copy of a note the message says in full; a third note's thread entry is its details only (owner 11-11)", len(_g_posts) == 1 and len(_g2) == 1 and _g2[0][2] == _g_posts[0][3]
-      and _g2[0][1].startswith("🔎 *Details*") and "rollback ran" in _g2[0][1] and _g2[0][1].count("Canary on Hillsboro") == 1, _g2)
+      and _g2[0][1].startswith("🔎 *Details*") and "rollback ran" in _g2[0][1] and "Canary on Hillsboro" not in _g2[0][1], _g2)  # the entry names it; its details add only the new
 S.cmd_say(_say_args("Helsinki shipped v0.553.0", to="@barada", frm="another-agent"))
 check("another agent's note is not folded into it", _con.posted[-1][2] is None and len(_con.updates) == _u_g + 2)
 _st = d.state.read(); _st["owner_group"]["at"] = time.time() - 400; S.STATE_FILE.write_text(json.dumps(_st))

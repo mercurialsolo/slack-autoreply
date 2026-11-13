@@ -174,7 +174,14 @@ def reads_to_rule(name, src, out):
     sentences = len([x for x in re.split(r"(?<=[.?!])\s+|\n", R.ICON_RE.sub("", plain)) if re.search(r"\w{2}", x)])
     check(name, not re.search(r"\bt_[0-9a-f]", plain) and "http" not in plain and not re.search(r"^- ", text, re.M)
           and len(R.SLACK_LINK_RE.findall(text)) <= 2 and "…" not in text and 2 <= sentences <= 3
-          and R.violations(text) == [] and src in out["details"], f"{text}\n(sentences: {sentences})")
+          and R.violations(text) == [] and NEW[src] in out["details"], f"{text}\n(sentences: {sentences})")
+    # Owner, 2026-11-13: the thread adds to the note; it does not say the note again
+    said = [x.strip(" .") for x in re.split(r"(?<=[.?!])\s+|\n", R.SLACK_LINK_RE.sub("", body)) if len(x.strip(" .")) > 12]
+    check(name + ": its thread says nothing the note said", not [x for x in said if R.ICON_RE.sub("", x).strip() in out["details"]],
+          out["details"])
+
+
+NEW = {BUDGET: "274/1,200 turns", RELEASE: "24 passed"}  # what only the thread says: the counters
 
 
 for label, src in (("the budget ask", BUDGET), ("the v0.771.0 release", RELEASE)):
@@ -424,5 +431,48 @@ for _link in (f"<{_ans}|Answer here>", f"[Answer here]({_ans})"):
           and "in the thread." in _r["text"] and ", or" not in _r["text"] and not R.violations(_r["text"]), _r)
     check("…with buttons off, the answer page is a text link", _off["text"].endswith(f"<{_ans}|Answer here>\n_from factory_"),
           _off["text"])
+
+
+# Owner, 2026-11-13, on key-health's memory note: "same message is almost duplicated - little new info".
+# Its Details thread said the headline, "Nothing was stopped" and both lists again. The thread now
+# carries only what the note did not say; nothing new, no thread and no "details in the thread".
+import note_thread as T  # noqa: E402
+KEY_HEALTH = ("Box memory high: 53% of 63 GB used, swap 76%. Nothing was stopped.\n"
+              "- Biggest: qemu-system-x86 18.2 GB, qemu-system-x86 9.6 GB, python3 2.1 GB, node 1.4 GB, claude 0.9 GB\n"
+              "- VMs running (3): agentvm, hillsboro, helsinki")
+_kh = N.from_text(KEY_HEALTH, "key-health")
+golden("key-health memory note, no model: the note says the state", KEY_HEALTH,
+       "📨 Box memory high: 53% of 63 GB used, swap 76%.\n*Nothing* was stopped.\n_from key-health · details in the thread_",
+       sender="key-health")
+check("…its thread has only the lists the note left out, no sentence of the note again",
+      _kh.details == KEY_HEALTH.split("\n", 1)[1] and "Box memory" not in _kh.details and "stopped" not in _kh.details, repr(_kh.details))
+_kh = N.from_text(KEY_HEALTH, "key-health", shaped={
+    "headline": "Box memory high: 53% of 63 GB used, swap 76%",
+    "summary": "Nothing was stopped; the 3 VMs running are agentvm, hillsboro and helsinki. Biggest: qemu-system-x86 18.2 GB, "
+               "qemu-system-x86 9.6 GB, python3 2.1 GB, node 1.4 GB, claude 0.9 GB."})
+_t = N.render(_kh)["text"]
+check("…a note that says it all: no thread, and no 'details in the thread'", _kh.details == ""
+      and _t.endswith("_from key-health_"), f"{_t}\n{_kh.details!r}")
+_kh = N.from_text(KEY_HEALTH, "key-health", shaped={
+    "headline": "Box memory high: 53% of 63 GB used, swap 76%",
+    "summary": "Nothing was stopped. Biggest: qemu-system-x86 18.2 GB, qemu-system-x86 9.6 GB, python3 2.1 GB, node 1.4 GB, claude 0.9 GB."})
+check("…a note that names the biggest but not the VMs: the thread has only the VMs",
+      _kh.details == "- VMs running (3): agentvm, hillsboro, helsinki", repr(_kh.details))
+
+check("beyond: a sentence in other filler words is a repeat; a new number, name or link is not",
+      T.beyond("Nothing stopped.\nRSS sampled at 02:26Z.", ["Nothing was stopped."]) == "RSS sampled at 02:26Z."
+      and T.beyond("See <https://x.example/log|the log>.", ["See the log."]) == "See <https://x.example/log|the log>.")
+check("beyond: a header with no item left is dropped; a code block stays whole, repeats and all",
+      T.beyond("Biggest:\n- qemu 18.2 GB", ["Biggest qemu 18.2 GB"]) == ""
+      and T.beyond("```\nNothing was stopped.\n```", ["Nothing was stopped."]) == "```\nNothing was stopped.\n```")
+_d = "- Biggest: qemu 18.2 GB\n- VMs running (3): agentvm, hillsboro\n```\nraw\n```"
+check("model_beyond keeps only the lines the model calls new, and code blocks",
+      T.model_beyond(_d, "note", lambda p: '{"new": [1]}') == "- Biggest: qemu 18.2 GB\n```\nraw\n```")
+check("…the model is offered the numbered lines, not the code block",
+      T.model_beyond(_d, "note", lambda p: "raw" in p and "1/0" or '{"new": [1, 2]}') == _d)
+check("…bad JSON, a throw, or a non-number: the lines as they were",
+      all(T.model_beyond(_d, "n", c) == _d for c in (lambda p: "nope", lambda p: 1 / 0, lambda p: '{"new": ["1"]}',
+                                                     lambda p: '{"new": true}')))
+check("…the model says nothing is new: no thread", T.model_beyond("- a\n- b", "n", lambda p: '{"new": []}') == "")
 
 print(f"\n{passed} checks passed")

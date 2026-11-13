@@ -21,6 +21,7 @@ import subprocess
 
 import config
 import note_rules
+import note_thread
 import owner_note
 
 STATUSES = owner_note.STATUSES
@@ -159,14 +160,28 @@ def build(body: str, sender: str, spec: dict | None = None, call=None, buttons: 
     else:
         note = owner_note.from_text(body, sender, shaped=ask(body), **kw)
     if not _broken(note, buttons):
-        return note
+        return _thread(note, buttons, call)
     again = ask(context, force=True)
     if again:
         redo = owner_note.from_text(body, sender, shaped=again, **kw)
         if not _broken(redo, buttons):
-            return redo
+            return _thread(redo, buttons, call)
         note = redo
-    return owner_note.scrub(note, buttons, body)
+    return _thread(owner_note.scrub(note, buttons, body), buttons, call)
+
+
+def _thread(note: owner_note.Note, buttons: bool, call=None) -> owner_note.Note:
+    """A model's second look at the Details thread next to the note as posted: only the lines that
+    add to it stay; none left, no thread (owner, 2026-11-13). The rules already dropped the plain
+    repeats (note_thread.beyond); a model also catches one in other words. Never load-bearing."""
+    if not note.details:
+        return note
+    if call is None:
+        if mode() == "off":
+            return note
+        call = _call_api if mode() == "api" else _call_cli
+    note.details = note_thread.model_beyond(note.details, owner_note.render(note, buttons)["text"], call)
+    return note
 
 
 def _broken(note: owner_note.Note, buttons: bool) -> bool:

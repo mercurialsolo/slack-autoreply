@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import json
 import re
-from collections import Counter
 from dataclasses import dataclass, field
 
 import note_rules
+import note_thread
 from note_rules import COMMAND_RE
 
 # Most severe first: a message that is several things takes the icon of the worst.
@@ -421,7 +421,8 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
             # Only counters, no words around them ("Canary green: 5/5"): the counter is the news.
             raw = note_rules.tidy(note_rules.TASK_ID_RE.sub("", note_rules.take_links(intent)[0]))
             head = raw if re.search(r"[A-Za-z]", raw) and len(raw) <= 120 else "(empty note)"
-            return Note(st, head, links=note_rules.merge_links(given, taken), details=intent,
+            links = note_rules.merge_links(given, taken)
+            return Note(st, head, links=links, details=note_thread.beyond(intent, [head], [u for u, _ in links]),
                         options=options, sender=sender)
         ask_i = max((i for i, x in enumerate(cleaned) if x.endswith("?")), default=None)
         asks = cleaned[ask_i] if ask_i is not None else ""
@@ -442,8 +443,8 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
         summary = (summary + " " + CMD_NOTE).strip()
     note = Note(st, head, summary, note_rules.sentence(asks) if asks else "", note_rules.merge_links(given, taken),
                 whole, options, sender, reshape=holed or not head or len(head) > HEADLINE_MAX)
-    if details is None and not (Counter(_norm(note.details)) - Counter(_norm(" ".join([head, summary, asks])))):
-        note.details = ""  # the body already says all of it: no thread
+    # The thread carries only what the note did not say; nothing new, no thread (owner, 2026-11-13)
+    note.details = note_thread.beyond(note.details, [head, summary, asks], [u for u, _ in note.links])
     return note
 
 
@@ -564,6 +565,8 @@ def scrub(note: Note, buttons: bool = True, body: str = "") -> Note:
         note.options, note.links = [], []
     if body and (note.headline, note.summary, note.ask, note.options) != before and body.strip() not in (note.details or ""):
         note.details = (note.details + "\n" if note.details else "") + body.strip()  # a dropped part is never lost
+    # ...and what the scrubbed note still says is not said again in its thread (owner, 2026-11-13)
+    note.details = note_thread.beyond(note.details, [note.headline, note.summary, note.ask], [u for u, _ in note.links])
     return note
 
 
