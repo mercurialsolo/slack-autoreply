@@ -142,6 +142,7 @@ def forget(person: str | None = None) -> None:
 def learn(person: str | None = None) -> dict:
     """Fold the log into each person's profile. Stats only — what was answered, how fast, what was asked
     again, what was corrected — so the profile is evidence for the chooser, not a decision."""
+    started = now_iso()   # a correction logged while this runs is after it, so the chooser still hears it
     rows = events(person)
     choices = {r["piece"]: r for r in rows if r.get("type") == "choice" and r.get("piece")}
     by_person: dict[str, dict] = {}
@@ -174,7 +175,7 @@ def learn(person: str | None = None) -> dict:
             s["answer_rate"] = round(s["answered"] / s["sent"], 2) if s["sent"] else None
         p["corrections"] = p["corrections"][-EXAMPLES_KEPT:]
         p["examples"] = p["examples"][-EXAMPLES_KEPT:]
-        p["learnt_at"] = now_iso()
+        p["learnt_at"] = started
         store[who] = p
     tmp = config.p(PROFILES + ".tmp")
     tmp.write_text(json.dumps(store, ensure_ascii=False, indent=1), encoding="utf-8")

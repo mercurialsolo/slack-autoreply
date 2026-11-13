@@ -414,15 +414,21 @@ class Conversation:
         v = judge(self.conf, text=text, sender=user, owner=self.owner, is_owner=is_owner,
                   turns=th.get("turns") or [], candidates=cands, run=self.judge_run)
         pend = th.get("pending") or {}
-        if v is NOT_FACTORY and th.get("bound") and is_owner and pend.get("kind") != "ask":
+        if v is NOT_FACTORY and th.get("bound") and is_owner:
+            self._outcome(key, th, user)
+            _add_turn(key, user, text)
+            if pend.get("kind") == "ask":
+                # chit-chat under an open question is neither its answer nor lost: the question is shown again
+                opts = " / ".join(pend.get("options") or [])
+                return key, Reply("warn", f"Still waiting for your answer{': ' + opts if opts else ''}.",
+                                  ["Press a button, or reply with the answer in words."])
             # "thanks" under a factory note that asks nothing: not an instruction to its task, and not an
-            # answer for the note's ask path either. Taken, and left at that.
+            # answer for the note's ask path either. Taken, and marked as seen.
             return key, ACKNOWLEDGED
         if v is NOT_FACTORY:
             v = None
         if v is None and th.get("bound") and is_owner:
-            # an open question's thread, or a judge that could not say: the reply goes back to its task
-            # rather than be lost
+            # a judge that could not say: the reply goes back to its task rather than be lost
             v = {"verb": "answer" if pend.get("kind") == "ask" else "instruct", "task": th["bound"], "text": text,
                  "query": "", "correction": ""}
         if v is None:
@@ -436,6 +442,8 @@ class Conversation:
         if not v.get("task") and th.get("bound") and v["verb"] in ("answer", "instruct"):
             v["task"] = th["bound"]
         reply = self._do(key, v, user=user, text=text, mine=mine, cands=cands, link=_link(channel, ts))
+        if v["verb"] == "answer" and pend.get("kind") == "ask" and v.get("task") == pend.get("task") and took(reply):
+            _update(key, pending=None)   # answered in words: the question is closed, as a press closes it
         _update(key, principal=th.get("principal") or user)
         _add_turn(key, "solo", reply.headline)
         return key, reply
@@ -471,7 +479,7 @@ class Conversation:
         is in this Slack thread now, so Slack is where it lands; the modality shapes the rendering."""
         kind = "confirm" if reply.options and set(reply.options) == {"Yes", "No"} else "ask" if reply.options else "update"
         action = ("press a button" if reply.options else
-                  f"read a headline and {len(reply.points)} points" if reply.points else "read a headline")
+                  "read a headline and a few points" if reply.points else "read a headline")
         choice = channel_choice.choose(user, kind=kind, content=reply.headline, urgency=3 if reply.options else 2,
                                        action=action,
                                        where="in this Slack thread, writing to Solo now", model=self.chooser,

@@ -112,6 +112,9 @@ class FakeSlack:
         self.posts.append({"channel": channel, "text": text, "thread_ts": thread_ts, "blocks": blocks, "ts": ts})
         return {"ts": ts}
 
+    def reactions_add(self, channel, timestamp, name):
+        self.reactions = getattr(self, "reactions", []) + [(channel, timestamp, name)]
+
     def post_fn(self, channel):
         return lambda text, blocks, thread_ts: self.chat_postMessage(channel, text, thread_ts, blocks)["ts"]
 
@@ -249,14 +252,27 @@ got = chat.message(channel=DM, ts="1700000012.000200", thread_ts=push2, user=OWN
 check("push thread: a bare thanks is taken quietly, not forwarded to the task",
       got and got[1] is F.ACKNOWLEDGED and not F.took(got[1]) and len(fac.did("task", "instruct")) == n_instruct,
       (got, fac.calls[-3:]))
+F.bind(F.thread_key(DM, "1700000012.000260"), "t_bbb22222", principal=OWNER, title="Ranking is green")
+chat.message(channel=DM, ts="1700000012.000270", thread_ts="1700000012.000260", user=OWNER, text="thanks!")
+check("push thread: the acknowledged reply counts as the note being read",
+      any(e["type"] == "outcome" and e["piece"] == F.thread(F.thread_key(DM, "1700000012.000260"))["piece"]
+          for e in C.events(OWNER)))
 check("not factory outside a bound thread is still left to Solo",
       chat.message(channel=DM, ts="1700000012.000250", thread_ts=None, user=OWNER, text="thanks!") is None)
 push3 = "1700000012.000400"
 F.bind(F.thread_key(DM, push3), "t_ccc33333", principal=OWNER, title="Ship or hold?", options=["Ship it", "Hold"])
-jud.say["go ahead once the docs land"] = {"factory": False}
-say("go ahead once the docs land", ts="1700000012.000500", thread_ts=push3)
-check("open ask: a reply the judge calls chit-chat still reaches the task as its answer",
-      fac.did("task", "answer", "t_ccc33333", "go ahead once the docs land"), fac.calls[-3:])
+n_answer = len(fac.did("task", "answer"))
+got = chat.message(channel=DM, ts="1700000012.000500", thread_ts=push3, user=OWNER, text="thanks!")
+check("open ask: chit-chat is not sent as its answer; the question is shown again",
+      got and "Still waiting" in got[1].headline and "Hold" in got[1].headline and not F.took(got[1])
+      and len(fac.did("task", "answer")) == n_answer, (got, fac.calls[-3:]))
+jud.say["go ahead once the docs land"] = {"factory": True, "verb": "answer", "text": "go ahead once the docs land"}
+say("go ahead once the docs land", ts="1700000012.000600", thread_ts=push3)
+check("open ask: an answer in words reaches the task", fac.did("task", "answer", "t_ccc33333", "go ahead once the docs land"),
+      fac.calls[-3:])
+got = chat.message(channel=DM, ts="1700000012.000700", thread_ts=push3, user=OWNER, text="thanks!")
+check("open ask: once answered in words, the question is closed and a thanks is only acknowledged",
+      got and got[1] is F.ACKNOWLEDGED and len(fac.did("task", "answer")) == n_answer + 1, (got, fac.calls[-3:]))
 jud.say["revert to last week's weights"] = "FAIL"
 say("revert to last week's weights", ts="1700000012.000300", thread_ts=push2)
 check("push thread: when the judge cannot say, the reply still reaches the task",
@@ -344,7 +360,7 @@ C.choose(STAFF, kind="update", content="after learning", model=counted)
 check("chooser: a newly learnt profile asks the model again", len(calls) == 5, len(calls))
 C.choose(STAFF, kind="update", content="held", model=counted)
 store = json.loads((HOME / C.PROFILES).read_text())
-store[STAFF]["learnt_at"] = "2099-01-01T00:00:00Z"   # the nightly pass, in its own process
+store[STAFF]["learnt_at"] = "2099-01-01T00:00:00+00:00"   # the nightly pass, in its own process
 (HOME / C.PROFILES).write_text(json.dumps(store))
 C.choose(STAFF, kind="update", content="after another process learnt", model=counted)
 check("chooser: a profile learnt by another process is read at once", len(calls) == 6, len(calls))
@@ -421,7 +437,7 @@ jud.say["thanks, nice"] = {"factory": False}
 ok = D.on_factory_chat(stub, {"user": OWNER, "channel": DM, "ts": "1700000025.000100", "thread_ts": ts3,
                               "text": "thanks, nice"})
 check("console: a thanks under a factory note is taken, nothing posted, nothing forwarded, no answer recorded",
-      ok is True and len(bot.posts) == n_posts and len(fac.did("task", "instruct")) == n_instruct
+      ok is True and (DM, "1700000025.000100", "eyes") in getattr(bot, "reactions", []) and len(bot.posts) == n_posts and len(fac.did("task", "instruct")) == n_instruct
       and not slackctl.load_item("say-push-3").get("answer"), (ok, bot.posts[n_posts:], slackctl.load_item("say-push-3")))
 
 # 11. Review round 2: the factory's own choices go back to it; every piece gets its outcome; chat off binds nothing.
