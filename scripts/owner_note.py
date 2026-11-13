@@ -365,9 +365,10 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
               link: str = "", shaped: dict | None = None) -> Note:
     """Read a note for the owner into a Note, to the rule. What the agent said explicitly wins over
     a model's reading (`shaped`, from note_shape), which wins over the rules' own reading."""
-    intent = note_rules.slack_links((intent or "").strip())  # an escaped or Markdown link reads as a link,
-    details = note_rules.slack_links(details) if details else details  # in the note and in its thread
-    options =[o.strip() for o in (options or []) if o and o.strip()]
+    sl = note_rules.slack_links  # an escaped or Markdown link reads as a link, in the note and in its thread
+    intent, details = sl((intent or "").strip()), sl(details)
+    headline, points = sl(headline), [sl(p) for p in points or []]
+    options = [o.strip() for o in (options or []) if o and o.strip()]
     given = [(link, note_rules.label_for(link, "answer" if options else ""))] if link else []
     had_cmd, taken = False, []
 

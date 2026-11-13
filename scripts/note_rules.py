@@ -48,24 +48,28 @@ def url_tail(url: str, before: str = "") -> tuple[str, str]:
         else:
             break
     return url[:cut], url[cut:]
-SLACK_LINK_RE = re.compile(r"<(" + URL + r")(?:\|([^>]*))?>")
+SLACK_LINK_RE = re.compile(r"<(https?://[^\s<>|]+)(?:\|([^>]*))?>")  # the brackets bound it: a URL may end in ")"
 # The same link once escaped on its way here (`&lt;url|label&gt;`), and a Markdown one (`[label](url)`):
 # Slack shows both as source, brackets and pipe. They are read as the Slack link they mean.
 ESCAPED_LINK_RE = re.compile(r"&lt;(https?://[^\s<>|]+?)(?:\|([^<>\n]*?))?&gt;")
-MD_LINK_RE = re.compile(r"(?<!!)\[([^\[\]\n]+)\]\((https?://[^\s()<>]+)\)")
+MD_LINK_RE = re.compile(r"(?<!!)\[([^\[\]\n]+)\]\((https?://(?:[^\s()<>]|\([^\s()<>]*\))+)\)")  # "Foo_(bar)" keeps its ")"
 
 
 def slack_links(text: str) -> str:
     """Every link in `text` in Slack's own `<url|label>` form, so it is parsed as a link, never shown as source."""
     if not text or ("&lt;" not in text and "](" not in text):
         return text
-    def esc(m):  # `&amp;` stays: Slack wants it escaped inside a link too
-        label = (m.group(2) or "").strip()
-        return f"<{m.group(1)}" + (f"|{label}>" if label else ">")
 
-    def prose(t):
-        t = ESCAPED_LINK_RE.sub(esc, t)
-        return MD_LINK_RE.sub(lambda m: f"<{m.group(2)}|{m.group(1).replace('|', '/').strip()}>", t)
+    def link(url, label, before):  # a label is plain words: no link in it, no bracket or pipe to end the link early
+        label = " ".join(re.sub(r"[<>|]", " ", MD_LINK_RE.sub(r"\1", label or "")).split())
+        if not label:  # never a bare URL: the words a bare one gets ("the PR"), capitalised to start a sentence
+            lb = label_for(url, before)
+            label = lb if re.search(r"(?:^|[.!?:])\s*$", before) else WORDS_FOR.get(lb, lb[:1].lower() + lb[1:])
+        return f"<{url.replace('|', '%7C')}|{label}>"  # a "|" in the URL would end it early
+
+    def prose(t):  # `&amp;` stays: Slack wants it escaped inside a link too
+        t = ESCAPED_LINK_RE.sub(lambda m: link(m.group(1), m.group(2), m.string[:m.start()]), t)
+        return MD_LINK_RE.sub(lambda m: link(m.group(2), m.group(1), m.string[:m.start()]), t)
     out, at = [], 0
     for m in CODE_RE.finditer(text):  # code is someone's exact words: left as written
         out += [prose(text[at:m.start()]), m.group(0)]

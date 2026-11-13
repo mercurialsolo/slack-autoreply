@@ -395,6 +395,22 @@ for _kind, _spec, _want in (
          f"<{_dash}|Open the dashboard>\n_from factory_")):
     _r = N.render(note_shape.build("", "factory", _spec, call=lambda p: None))
     check(f"the factory's {_kind} note renders its link as a link", _r["text"] == _want, f"--- got\n{_r['text']}\n--- want\n{_want}")
+for _in, _out in (("[a > b](https://x.y/z)", "<https://x.y/z|a b>"),  # a ">" in a label never ends the link early
+                  ("[Docs](https://en.wikipedia.org/wiki/Foo_(bar))", "<https://en.wikipedia.org/wiki/Foo_(bar)|Docs>"),
+                  ("See &lt;https://github.com/o/r/pull/3&gt; now", "See <https://github.com/o/r/pull/3|the PR> now"),
+                  ("[x](https://a.b/?q=a|b)", "<https://a.b/?q=a%7Cb|x>"),
+                  ("&lt;https://a.b|see [x](https://y.z)&gt;", "<https://a.b|see x>")):
+    check(f"slack_links reads {_in!r} as one whole Slack link", R.slack_links(_in) == _out, R.slack_links(_in))
+check("a link that ends in ')' is one link, whole", R.take_links("&lt;https://en.wikipedia.org/wiki/Foo_(bar)&gt;")[1]
+      == [("https://en.wikipedia.org/wiki/Foo_(bar)", "Open it")], R.take_links("&lt;https://en.wikipedia.org/wiki/Foo_(bar)&gt;"))
+_n = note_shape.build("", "factory", {"status": "warn", "headline": "Alert: four things", "points": [
+    "One is late.", "Two is late.", "Three is late.", f"See it: [Open the dashboard]({_dash})."]}, call=lambda p: None)
+check("a point past the summary keeps its link a link in the thread", f"<{_dash}|Open the dashboard>" in _n.details
+      and "](" not in _n.details, _n.details)
+_n = note_shape.build(f"The burn rule tripped on Helsinki at 00:06 and the operator paused two lanes until the budget resets. "
+                      f"See it on the dashboard: [Open the dashboard]({_dash}).", "factory", call=lambda p: None)
+check("a free-text body's Markdown link is a link in the note and never source in the thread",
+      _n.links == [(_dash, "Open the dashboard")] and "](" not in (_n.details or "") + N.render(_n)["text"], (_n, N.render(_n)))
 _ans = "https://factory.staffai.workers.dev/#factory/ask/t_d1d740fc"
 for _link in (f"<{_ans}|Answer here>", f"[Answer here]({_ans})"):
     _n = note_shape.build("", "factory", {"status": "ask", "headline": "Needs your answer: Grant more budget?",
