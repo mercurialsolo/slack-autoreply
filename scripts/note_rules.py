@@ -85,6 +85,8 @@ CMD_WORD = r"\b(?:sudo|ssh|colima|kubectl|curl|git|python3?|npm|pip3?|brew|launc
 CMD_ARGS = r"(?=[^.?!()\n]*?(?:\s--?[a-z]|\S=\S|\s[~.]?/\w|\.\.\.|…))"
 COMMAND_SPAN_RE = re.compile(CMD_WORD + CMD_ARGS + r"[^()\n]*?(?=\s*\(|[?!]|\.\s|\.$|$)", re.I)
 CODE_RE = re.compile(r"```.*?```|`[^`\n]+`", re.S)
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z*❓🔴⚠⏸🚀✅\"'])")
+LIST_ITEM_RE = re.compile(r"^\s*(?:[-•*◦]|\d+[.)])\s+")  # a bullet or numbered list line
 COMMAND_RE = re.compile(r"`|" + CMD_WORD + CMD_ARGS, re.I)  # does this text carry a command at all
 COUNTER_RE = re.compile(r"(?:\b[a-z][a-z-]*\s+)?\b\d[\d,]*\s*/\s*\d[\d,]*\b")
 CHECKS_RE = re.compile(r"\b(?:checks?\s*:\s*)?(\d+)\s+passed,?\s+0\s+failed(?:,?\s+(?:and\s+)?0\s+warnings?)?", re.I)

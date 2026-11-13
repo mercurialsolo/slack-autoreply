@@ -21,6 +21,7 @@ import subprocess
 
 import config
 import note_rules
+import note_thread
 import owner_note
 
 STATUSES = owner_note.STATUSES
@@ -113,16 +114,21 @@ def parse(answer: str, source: str) -> dict | None:
             "ask": str(d.get("ask") or "").strip(), "links": links}
 
 
+def _resolve_call():
+    """The model to call by NOTE_SHAPER, or None when it is off."""
+    m = mode()
+    return None if m == "off" else _call_api if m == "api" else _call_cli
+
+
 def shape(text: str, call=None, force: bool = False) -> dict | None:
     """{status, headline, summary, ask, links} for a note, or None when the rules alone should read it.
 
     `call(prompt) -> str` is the model; tests pass their own. `force` asks even for a short or
     structured note — the rules already failed it. Never raises."""
     try:
+        call = call or (_resolve_call() if force or wanted(text) else None)
         if call is None:
-            if mode() == "off" or not (force or wanted(text)):
-                return None
-            call = _call_api if mode() == "api" else _call_cli
+            return None
         return parse(call(PROMPT.format(rule=note_rules.RULE, text=text.strip())), text)
     except Exception:  # noqa: BLE001 - the shaper is a courtesy; the fallback always reads the note
         return None
@@ -158,15 +164,29 @@ def build(body: str, sender: str, spec: dict | None = None, call=None, buttons: 
             note = owner_note.from_text(body, sender, headline=spec["headline"], points=spec.get("points"), **kw)
     else:
         note = owner_note.from_text(body, sender, shaped=ask(body), **kw)
+    # the thread's second look: only where a model already reads this note (no extra call for a short line)
+    look = call or (_resolve_call() if wanted(context) or wanted(body) else None)
+    if not call and any(v is None for v in asked.values()):
+        look = None  # the model already failed (or timed out) on this note: no second wait for it
     if not _broken(note, buttons):
-        return note
+        return _thread(note, buttons, look)
     again = ask(context, force=True)
     if again:
         redo = owner_note.from_text(body, sender, shaped=again, **kw)
         if not _broken(redo, buttons):
-            return redo
+            return _thread(redo, buttons, look)
         note = redo
-    return owner_note.scrub(note, buttons, body)
+    return _thread(owner_note.scrub(note, buttons, body), buttons, look)
+
+
+def _thread(note: owner_note.Note, buttons: bool, call=None) -> owner_note.Note:
+    """A model's second look at the Details thread next to the note as posted: only the lines that
+    add to it stay; none left, no thread (owner, 2026-11-13). The rules already dropped the plain
+    repeats (note_thread.beyond); a model also catches one in other words. Never load-bearing.
+    `call` None: no model for this note (a short plain line costs no model call)."""
+    if note.details and call:
+        note.details = note_thread.model_beyond(note.details, owner_note.render(note, buttons)["text"], call)
+    return note
 
 
 def _broken(note: owner_note.Note, buttons: bool) -> bool:
