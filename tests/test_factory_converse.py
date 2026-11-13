@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import tempfile
 from pathlib import Path
 
@@ -93,6 +94,8 @@ class FakeJudge:
         message = input.split("The message, between the two fence lines")[1]
         for key, v in reversed(self.say.items()):   # the newest line wins
             if key in message:
+                if v == "FAIL":   # the model could not say
+                    return subprocess.CompletedProcess(argv, 1, "", "overloaded")
                 return subprocess.CompletedProcess(argv, 0, json.dumps(v), "")
         return subprocess.CompletedProcess(argv, 0, '{"factory": false}', "")
 
@@ -235,9 +238,20 @@ check("not factory: left to Solo's normal path", say("lunch at noon?", ts="17000
 # 6. A thread reply under a push note goes back to the same task.
 push2 = "1700000011.000100"
 F.bind(F.thread_key(DM, push2), "t_bbb22222", principal=OWNER, title="Ranking is red", kind="update")
+jud.say["try the older model first"] = {"factory": True, "verb": "instruct", "text": "try the older model first"}
 _, reply, _ = say("try the older model first", ts="1700000012.000100", thread_ts=push2)
 check("push thread: a reply goes back to that task", fac.did("task", "instruct", "t_bbb22222", "try the older model first"),
       fac.calls)
+check("push thread: the judge saw the push note it replies to", "factory: t_bbb22222: Ranking is red" in jud.prompts[-1],
+      jud.prompts[-1][-600:])
+n_instruct = len(fac.did("task", "instruct"))
+got = say("thanks!", ts="1700000012.000200", thread_ts=push2)
+check("push thread: a bare thanks is not forwarded to the task",
+      got[0] is None and len(fac.did("task", "instruct")) == n_instruct, fac.calls[-3:])
+jud.say["revert to last week's weights"] = "FAIL"
+say("revert to last week's weights", ts="1700000012.000300", thread_ts=push2)
+check("push thread: when the judge cannot say, the reply still reaches the task",
+      fac.did("task", "instruct", "t_bbb22222", "revert to last week's weights"), fac.calls[-3:])
 
 # 7. Somebody else: read-only, their own tasks only; their requests stay with staff_intake.
 jud.say["my login copy"] = {"factory": True, "verb": "status", "task": "t_ddd44444"}
@@ -295,6 +309,35 @@ check("channel: only what the caller can send on is offered or taken", only["cha
       and "Channels: slack." in seen[0], (only, seen[0][:200]))
 check("channel: a model that fails keeps the default", C.choose(OWNER, kind="ask", content="x",
                                                                 model=lambda p: "nonsense")["channel"] == "slack")
+
+# The chooser is held per person and kind for a while: one model call per conversation, not per reply.
+calls = []
+def counted(prompt):
+    calls.append(prompt)
+    return '{"channel": "slack", "modality": "short_text", "why": "quick"}'
+clock = [1000.0]
+C._clock = lambda: clock[0]
+C.forget()
+for n in range(3):
+    C.choose(STAFF, kind="update", content=f"reply {n}", model=counted)
+check("chooser: replies in a row pay one model call", len(calls) == 1, len(calls))
+C.choose(STAFF, kind="ask", content="pick one", model=counted)
+check("chooser: another kind of piece is its own choice", len(calls) == 2, len(calls))
+clock[0] += C.CHOICE_TTL_S + 1
+C.choose(STAFF, kind="update", content="later", model=counted)
+check("chooser: the held choice runs out", len(calls) == 3, len(calls))
+C.record_correction(STAFF, "too long, just a line")
+C.choose(STAFF, kind="update", content="after the correction", model=counted)
+check("chooser: a correction asks the model again at once", len(calls) == 4, len(calls))
+C.learn(STAFF)
+C.choose(STAFF, kind="update", content="after learning", model=counted)
+check("chooser: a newly learnt profile asks the model again", len(calls) == 5, len(calls))
+n = len(calls)
+C.choose(STAFF, kind="confirm", content="x", model=lambda p: calls.append(p) or "nonsense")
+C.choose(STAFF, kind="confirm", content="x", model=lambda p: calls.append(p) or "nonsense")
+check("chooser: a fallback is not held", len(calls) == n + 2, len(calls))
+C._clock = time.monotonic
+C.forget()
 
 # 9. The daemon wiring: a console message reaches the factory and the reply lands in its thread.
 os.environ.setdefault("SLACK_USER_TOKEN", "xoxp-test")

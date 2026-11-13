@@ -52,6 +52,7 @@ TURNS_KEPT = 8
 CANDIDATES = 6
 TIMEOUT_S = 120
 ACTION_PREFIX = "solo_factory_"
+NOT_FACTORY = {"factory": False}   # the judge's own "not about the factory", told apart from no answer
 DEFAULT_JUDGE = ('{claude} -p --model opus --output-format text --tools "" --strict-mcp-config '
                  '--no-session-persistence')
 
@@ -73,6 +74,8 @@ What each verb does:
   submit    a new task (title, brief, kind)        answer    answer the question a task asked
   instruct  tell a running task something          cancel    stop a task
 
+In a thread under a factory note, a reply that answers the note's question or tells its task something is
+factory work (answer or instruct). Thanks, ok, emoji, acknowledgements and chit-chat are not: factory false.
 "the other one", "that", "it" refer to the thread's tasks. If it is unclear which task, leave task empty
 and give the words to search by in query. Name a task only from the list above.
 If the sender also says how they want to be told ("send me that on Slack", "show me", "too long", "call me"),
@@ -224,6 +227,7 @@ def bind(key: str, task: str, *, principal: str, title: str = "", options: list[
                                                      "why": "factory push note"},
                                          kind="ask" if options else kind, content=content or title, where="slack")
     _add_tasks(key, [{"id": task, "title": title}])
+    _add_turn(key, "factory", f"{task}: {content or title}")   # the judge reads replies under it in context
     _update(key, principal=principal, bound=task, piece=piece, sent_at=time.time(),
             pending={"kind": "ask", "task": task, "options": list(options)} if options else None)
 
@@ -284,8 +288,8 @@ def _post_json(url: str, payload: dict) -> dict:
 
 def judge(conf: dict, *, text: str, sender: str, owner: str, is_owner: bool, turns: list[dict],
           candidates: list[dict], run=subprocess.run) -> dict | None:
-    """The model's verdict, or None when it is not about factory work or the model could not say (the
-    message then takes Solo's normal path — never a guess)."""
+    """The model's verdict; NOT_FACTORY when the model says it is not about factory work; None when the model
+    could not say. Either way that is not a verdict to act on: the message takes Solo's normal path."""
     cmd = conf.get("judge_cmd") or DEFAULT_JUDGE.format(claude=shlex.quote(config.env("CLAUDE_BIN", "claude")))
     mark = staff_intake.fence()
     prompt = PROMPT.format(
@@ -305,6 +309,8 @@ def judge(conf: dict, *, text: str, sender: str, owner: str, is_owner: bool, tur
         v = json.loads(m.group(0)) if m else None
     except ValueError:
         return None
+    if isinstance(v, dict) and v.get("factory") is False:
+        return NOT_FACTORY
     if not isinstance(v, dict) or v.get("factory") is not True or v.get("verb") not in READS + WRITES:
         return None
     ids = {t["id"] for t in candidates}
@@ -403,8 +409,10 @@ class Conversation:
         cands = self._candidates(th, text, mine)
         v = judge(self.conf, text=text, sender=user, owner=self.owner, is_owner=is_owner,
                   turns=th.get("turns") or [], candidates=cands, run=self.judge_run)
+        if v is NOT_FACTORY:
+            return None   # "thanks" under a factory note is not an instruction to its task
         if v is None and th.get("bound") and is_owner:
-            # a reply under a factory note goes back to its task, whatever the judge made of it
+            # the judge could not say: a reply under a factory note goes back to its task rather than be lost
             pend = th.get("pending") or {}
             v = {"verb": "answer" if pend.get("kind") == "ask" else "instruct", "task": th["bound"], "text": text,
                  "query": "", "correction": ""}

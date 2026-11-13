@@ -3260,8 +3260,9 @@ class Daemon(Slack):
                 return
             if factory_converse.took(reply):
                 self._factory_answered(ts, value, user, typed=False)
-            chat.route(key, user, reply)
-            factory_converse.deliver(reply, key, self._factory_post(channel), buttons=owner_buttons())
+            choice = chat.route(key, user, reply)
+            factory_converse.deliver(reply, key, self._factory_post(channel), choice.get("modality", "structured_text"),
+                                     buttons=owner_buttons())
         except Exception:  # noqa: BLE001
             log.exception("factory press failed")
 

@@ -25,6 +25,8 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from statistics import median
@@ -38,6 +40,12 @@ LOG = "channel_events.jsonl"
 PROFILES = "people_channels.json"
 EXAMPLES_KEPT = 8
 TIMEOUT_S = 60
+# A choice holds for a person and a kind of piece this long, so a conversation pays one chooser call, not one
+# per reply. A correction from that person, or a newly learnt profile, ends it at once.
+CHOICE_TTL_S = 600
+_choices: dict[tuple, tuple[float, dict]] = {}
+_choices_lock = threading.Lock()
+_clock = time.monotonic
 # The chooser reads no untrusted text beyond a short content summary: no tools, no MCP, no session.
 DEFAULT_CHOOSER = ('{claude} -p --model sonnet --output-format text --tools "" --strict-mcp-config '
                    '--no-session-persistence')
@@ -119,6 +127,14 @@ def record_outcome(person: str, piece: str, *, answered: bool, latency_s: float 
 def record_correction(person: str, said: str, piece: str | None = None) -> None:
     """The person told us how they want it: kept verbatim, the nightly pass reads it."""
     _append({"type": "correction", "person": person, "piece": piece, "said": " ".join(said.split())[:300]})
+    forget(person)
+
+
+def forget(person: str | None = None) -> None:
+    """Drop the held choices of `person` (everyone when None): the next choose() asks the model again."""
+    with _choices_lock:
+        for k in [k for k in _choices if person is None or k[0] == person]:
+            del _choices[k]
 
 
 # --- the nightly pass --------------------------------------------------------------------------------------
@@ -163,6 +179,7 @@ def learn(person: str | None = None) -> dict:
     tmp = config.p(PROFILES + ".tmp")
     tmp.write_text(json.dumps(store, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(config.p(PROFILES))
+    forget(person)
     return store
 
 
@@ -202,10 +219,18 @@ def choose(person: str, *, kind: str, content: str, urgency: int = 3, action: st
     `available` is the channels the caller can actually send on: the model chooses among those only, so
     what is recorded as chosen is what went out."""
     channels = tuple(c for c in (available or CHANNELS) if c in CHANNELS) or CHANNELS
+    prof = profile(person)
+    # a newly learnt profile (the nightly pass runs in its own process) is a new key, so it is read at once
+    held_key = (person, prof.get("learnt_at"), kind, urgency, action, where, channels,
+                json.dumps(default or {}, sort_keys=True))
+    with _choices_lock:
+        held = _choices.get(held_key)
+    if held and _clock() - held[0] < CHOICE_TTL_S:
+        return dict(held[1])
     fallback = dict(default or {"channel": "slack", "modality": "structured_text"}, why="the chooser did not answer")
     prompt = PROMPT.format(person=person, channels=", ".join(channels), modalities=", ".join(MODALITIES),
                            kind=kind, urgency=urgency, action=action, where=where,
-                           content=" ".join(content.split())[:400], profile=profile_text(profile(person)))
+                           content=" ".join(content.split())[:400], profile=profile_text(prof))
     try:
         out = (model or _model)(prompt)
         m = re.search(r"\{.*\}", out or "", re.S)
@@ -214,7 +239,10 @@ def choose(person: str, *, kind: str, content: str, urgency: int = 3, action: st
         return fallback
     if not isinstance(v, dict) or v.get("channel") not in channels or v.get("modality") not in MODALITIES:
         return fallback
-    return {"channel": v["channel"], "modality": v["modality"], "why": str(v.get("why") or "")[:200]}
+    got = {"channel": v["channel"], "modality": v["modality"], "why": str(v.get("why") or "")[:200]}
+    with _choices_lock:
+        _choices[held_key] = (_clock(), got)   # only a real answer is held; a fallback asks again next time
+    return dict(got)
 
 
 if __name__ == "__main__":
