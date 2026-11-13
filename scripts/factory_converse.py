@@ -313,7 +313,7 @@ def judge(conf: dict, *, text: str, sender: str, owner: str, is_owner: bool, tur
         v = json.loads(m.group(0)) if m else None
     except ValueError:
         return None
-    if isinstance(v, dict) and v.get("factory") is False:
+    if not_factory(v):
         # a fresh verdict each time, keeping any correction said alongside the "thanks"
         return {"factory": False, "correction": " ".join(str(v.get("correction") or "").split())}
     if not isinstance(v, dict) or v.get("factory") is not True or v.get("verb") not in READS + WRITES:
@@ -342,6 +342,7 @@ class Reply:
     options: list[str] = field(default_factory=list)
     labels: list[str] = field(default_factory=list)   # button words when the option value is an id
     ask: str = ""
+    reask: bool = False   # an open question shown again: the question's own piece keeps its outcome
 
 
 # "thanks" under a factory note: taken by the conversation, nothing forwarded, nothing posted.
@@ -423,12 +424,13 @@ class Conversation:
             if v["correction"]:
                 channel_choice.record_correction(user, v["correction"], th.get("piece"))
             _add_turn(key, user, text)
-            if pend.get("kind") == "ask":
-                # no outcome yet: the ask is not answered, and its answer later records how long it took
-                # chit-chat under an open question is neither its answer nor lost: the question is shown again
+            if pend:
+                # no outcome yet: the question is not answered, and its answer later records how long it took.
+                # Chit-chat under any open question (ask, confirm, pick, reply) is neither its answer nor
+                # lost: the question is shown again, as a re-ask that leaves the question's piece in place
                 opts = " / ".join(pend.get("options") or [])
                 return key, Reply("warn", f"Still waiting for your answer{': ' + opts if opts else ''}.",
-                                  ["Press a button, or reply with the answer in words."])
+                                  ["Press a button, or reply with the answer in words."], reask=True)
             # "thanks" under a factory note that asks nothing: not an instruction to its task, and not an
             # answer for the note's ask path either. Taken, and marked as seen.
             self._outcome(key, th, user)
@@ -486,6 +488,8 @@ class Conversation:
     def route(self, key: str, user: str, reply: Reply) -> dict:
         """The model's channel/modality choice for this reply, recorded with what was delivered. The person
         is in this Slack thread now, so Slack is where it lands; the modality shapes the rendering."""
+        if reply.reask:   # the open question's piece and send time stay, so its answer is measured from it
+            return {"channel": "slack", "modality": "structured_text"}
         kind = "confirm" if reply.options and set(reply.options) == {"Yes", "No"} else "ask" if reply.options else "update"
         action = ("press a button" if reply.options else
                   "read a headline and a few points" if reply.points else "read a headline")

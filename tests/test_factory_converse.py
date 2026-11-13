@@ -300,6 +300,29 @@ check("open ask: an answer in words keeps the question the factory asks next",
       got and got[1].headline == "Which region first?"
       and (F.thread(F.thread_key(DM, push6)).get("pending") or {}).get("options") == ["EU", "US"],
       F.thread(F.thread_key(DM, push6)).get("pending"))
+# Review round 4: the re-ask keeps the question's piece, so its answer is the question's outcome; chit-chat
+# under any open question (a confirm too) is shown the question again, not taken as read.
+push7 = "1700000012.001100"
+k7 = F.thread_key(DM, push7)
+F.bind(k7, "t_ccc33333", principal=OWNER, title="Ship or hold, once more?", options=["Ship it", "Hold"])
+p7 = F.thread(k7)["piece"]
+got = chat.message(channel=DM, ts="1700000012.001110", thread_ts=push7, user=OWNER, text="thanks!")
+chat.route(k7, OWNER, got[1])
+check("open ask: the question shown again keeps the question's own piece", F.thread(k7)["piece"] == p7,
+      (p7, F.thread(k7).get("piece")))
+chat.press(key=k7, value="Hold", user=OWNER)
+check("open ask: the press after a re-ask is the question's outcome",
+      any(e["type"] == "outcome" and e["piece"] == p7 for e in C.events(OWNER)))
+push8 = "1700000012.001200"
+k8 = F.thread_key(DM, push8)
+F.bind(k8, "t_ccc33333", principal=OWNER, title="Ranking is amber again")
+F._update(k8, pending={"kind": "confirm", "task": "t_ccc33333", "options": ["Yes", "No"],
+                       "verdict": {"verb": "cancel", "task": "t_ccc33333"}})
+p8 = F.thread(k8)["piece"]
+got = chat.message(channel=DM, ts="1700000012.001210", thread_ts=push8, user=OWNER, text="thanks!")
+check("open confirm: chit-chat shows the question again and records no outcome",
+      got and "Still waiting" in got[1].headline and "Yes" in got[1].headline
+      and not any(e["type"] == "outcome" and e["piece"] == p8 for e in C.events(OWNER)), got)
 jud.say["revert to last week's weights"] = "FAIL"
 say("revert to last week's weights", ts="1700000012.000300", thread_ts=push2)
 check("push thread: when the judge cannot say, the reply still reaches the task",
