@@ -166,6 +166,8 @@ def build(body: str, sender: str, spec: dict | None = None, call=None, buttons: 
         note = owner_note.from_text(body, sender, shaped=ask(body), **kw)
     # the thread's second look: only where a model already reads this note (no extra call for a short line)
     look = call or (_resolve_call() if wanted(context) or wanted(body) else None)
+    if not call and any(v is None for v in asked.values()):
+        look = None  # the model already failed (or timed out) on this note: no second wait for it
     if not _broken(note, buttons):
         return _thread(note, buttons, look)
     again = ask(context, force=True)

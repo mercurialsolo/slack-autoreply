@@ -468,8 +468,10 @@ check("beyond: a header with no item left is dropped; a code block stays whole, 
 _d = "- Biggest: qemu 18.2 GB\n- VMs running (3): agentvm, hillsboro\n```\nraw\n```"
 check("model_beyond keeps only the lines the model calls new, and code blocks",
       T.model_beyond(_d, "note", lambda p: '{"new": [1]}') == "- Biggest: qemu 18.2 GB\n```\nraw\n```")
+_seen = []
 check("…the model is offered the numbered lines, not the code block",
-      T.model_beyond(_d, "note", lambda p: "raw" in p and "1/0" or '{"new": [1, 2]}') == _d)
+      T.model_beyond(_d, "note", lambda p: _seen.append(p) or '{"new": [1, 2]}') == _d
+      and "raw" not in _seen[0] and "2. - VMs running" in _seen[0], _seen)
 check("…bad JSON, a throw, or a non-number: the lines as they were",
       all(T.model_beyond(_d, "n", c) == _d for c in (lambda p: "nope", lambda p: 1 / 0, lambda p: '{"new": ["1"]}',
                                                      lambda p: '{"new": true}')))
@@ -497,6 +499,34 @@ try:
 finally:
     note_shape._call_cli = _orig
 check("a short plain note costs no model call for its thread", _calls == [] and _n.details == "rollback ran at 14:02", (_calls, _n))
+
+# Review round 2 (PR #12)
+check("the same words that say something else are news: a status mix-up reaches the thread",
+      T.beyond("Helsinki failed.", ["Helsinki is green. Hillsboro failed."]) == "Helsinki failed."
+      and T.beyond("Hillsboro is green; Helsinki is red.", ["Hillsboro is red, Helsinki is green."]) != "")
+check("…while the note's own sentence is still a repeat", T.beyond("Hillsboro failed.", ["Helsinki is green. Hillsboro failed."]) == "")
+_hn = N.from_text("Retry queued as t_9f3a2b1c. See <https://a.example|one>, <https://b.example|two> and "
+                           "<https://c.example|three>.", "factory", headline="Retry queued as t_9f3a2b1c",
+                           points=["See <https://a.example|one>, <https://b.example|two> and <https://c.example|three>."])
+check("sender's headline: the task id and the link past the note's cut stay in the thread",
+      "t_9f3a2b1c" in _hn.details and "c.example" in _hn.details, (_hn, _hn.details))
+check("a line with no Latin word is kept unless the note says it verbatim",
+      T.beyond("日本語のログ", ["Box failed"]) == "日本語のログ" and T.beyond("日本語のログ", ["日本語のログ"]) == "")
+check("a header over a prose line or a link keeps its label",
+      T.beyond("Logs:\nhttps://x.example/log", ["Box failed"]) == "Logs:\nhttps://x.example/log"
+      and T.beyond("Next steps:\nRun the migration first, then deploy.", ["Box failed"]).startswith("Next steps:"))
+check("…a header whose items were all said is still dropped",
+      T.beyond("Biggest:\n- qemu 18.2 GB\nVMs:\n- agentvm", ["Biggest qemu 18.2 GB"]) == "VMs:\n- agentvm")
+check("a clause kept without its neighbour leaves no dangling ';'",
+      T.beyond("Rollback at 14:02; ran the deploy", ["Ran the deploy"]) == "Rollback at 14:02")
+_calls = []
+note_shape._call_cli = lambda p: _calls.append(p) or ""
+try:
+    _n = note_shape.build(KEY_HEALTH, "key-health", {})
+finally:
+    note_shape._call_cli = _orig
+check("the model failed on this note: no second wait for the thread look",
+      _calls and not any("Its thread reply would add" in p for p in _calls), _calls)
 
 
 print(f"\n{passed} checks passed")

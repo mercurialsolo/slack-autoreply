@@ -236,7 +236,7 @@ class Note:
 
 LIST_ITEM_RE = note_rules.LIST_ITEM_RE
 THEME_RE = re.compile(r"^\s*\**([^:*]{2,40}?)\**\s*:\s+\S")
-SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z*❓🔴⚠⏸🚀✅\"'])")
+SENTENCE_SPLIT = note_rules.SENTENCE_SPLIT
 CMD_NOTE = "The command is in the thread."
 REPLY_LINE_RE = re.compile(r"^\W*(?:please\s+)?(?:reply|respond|answer)\b[^?]{0,30}\b(?:yes|no|ok|approve|go)\b[^?]*$", re.I)
 
@@ -387,7 +387,7 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
             head, body = next(((b, body[:i] + body[i + 1:]) for i, b in enumerate(body) if b), ("", body))
         st = norm_status(status) or ("ask" if options else worst([status_of(head)] + [status_of(b) for b in body if b] + labels))
         extra = points[SUMMARY_MAX:]
-        whole = details if details is not None else note_thread.beyond(intent, [headline] + points)
+        whole = details if details is not None else intent  # pruned once, against the note as shown
         if extra and not all(x in whole for x in extra):
             whole = "\n".join(x for x in [whole] + extra if x)  # the points the body had no room for
         if had_cmd:  # the body says the command is in the thread: make sure it is
