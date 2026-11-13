@@ -213,6 +213,9 @@ solo say "<full technical detail>" --to @owner --from release \
   answer page). They show as buttons where Slack allows, otherwise in words on the 👉 line. Their
   answer is passed to the coordinator and kept on the note: `solo answer <say-id>` prints it
   (`--wait 600` to block).
+- `--factory-task <task_id>` marks the note as a factory push (an ask, done, red, released, a
+  rollback) for that task. It goes out on its own, never grouped. The owner's thread reply or button
+  press goes back to that task, not to the coordinator.
 
 You get no delivery receipt. Do not wait for one, and do not re-send.
 
