@@ -448,7 +448,7 @@ check("…its thread has only the lists the note left out, no sentence of the no
       _kh.details == KEY_HEALTH.split("\n", 1)[1] and "Box memory" not in _kh.details and "stopped" not in _kh.details, repr(_kh.details))
 _kh = N.from_text(KEY_HEALTH, "key-health", shaped={
     "headline": "Box memory high: 53% of 63 GB used, swap 76%",
-    "summary": "Nothing was stopped; the 3 VMs running are agentvm, hillsboro and helsinki. Biggest: qemu-system-x86 18.2 GB, "
+    "summary": "Nothing was stopped; VMs running (3): agentvm, hillsboro and helsinki. Biggest: qemu-system-x86 18.2 GB, "
                "qemu-system-x86 9.6 GB, python3 2.1 GB, node 1.4 GB, claude 0.9 GB."})
 _t = N.render(_kh)["text"]
 check("…a note that says it all: no thread, and no 'details in the thread'", _kh.details == ""
@@ -474,5 +474,29 @@ check("…bad JSON, a throw, or a non-number: the lines as they were",
       all(T.model_beyond(_d, "n", c) == _d for c in (lambda p: "nope", lambda p: 1 / 0, lambda p: '{"new": ["1"]}',
                                                      lambda p: '{"new": true}')))
 check("…the model says nothing is new: no thread", T.model_beyond("- a\n- b", "n", lambda p: '{"new": []}') == "")
+
+# Review round 1 (PR #12)
+_tb = "Traceback:\n```\nTraceback (most recent call last):\n  File \"x.py\", line 3\n\n\nValueError: bad\n```"
+check("a code block stays whole, its header line, blank lines and the line that introduces it too",
+      T.beyond(_tb, ["Box failed"]) == _tb and T.model_beyond(_tb, "n", lambda p: '{"new": []}') == _tb)
+check("model_beyond keeps paragraph breaks", T.model_beyond("Para one new.\n\nPara two new.", "n", lambda p: '{"new": [1, 2]}')
+      == "Para one new.\n\nPara two new.")
+check("a task id the note left out is news in the thread", T.beyond("Retry queued as t_9f3a2b1c.", ["Retry queued."])
+      == "Retry queued as t_9f3a2b1c.")
+check("a command is never pruned, by the rules or the model, and never cut at its ';'",
+      T.beyond("Run `cd /srv; make deploy` to fix it.", ["Deploy failed. Run make deploy to fix it."]) == "Run `cd /srv; make deploy` to fix it."
+      and T.model_beyond("Deploy blocked; run `kubectl rollout undo deploy/api`", "n", lambda p: '{"new": []}') == "Deploy blocked; run `kubectl rollout undo deploy/api`")
+check("per-item numbers the note pairs differently are news", T.beyond("- hillsboro: 1 passed\n- helsinki: 3 failed",
+      ["3 passed, 1 failed on hillsboro and helsinki"]) == "- hillsboro: 1 passed\n- helsinki: 3 failed")
+_calls = []
+os.environ["NOTE_SHAPER"] = "claude"
+_orig = note_shape._call_cli
+note_shape._call_cli = lambda p: _calls.append(p) or ""
+try:
+    _n = note_shape.build("P1 merged", "release", {"details": "rollback ran at 14:02"})
+finally:
+    note_shape._call_cli = _orig
+check("a short plain note costs no model call for its thread", _calls == [] and _n.details == "rollback ran at 14:02", (_calls, _n))
+
 
 print(f"\n{passed} checks passed")

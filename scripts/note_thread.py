@@ -20,8 +20,10 @@ import re
 
 import note_rules
 
-LIST_ITEM_RE = re.compile(r"^\s*(?:[-•*◦]|\d+[.)])\s+")
-SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z*\"'(])|(?<=;)\s+")  # a clause after ";" is its own fact
+LIST_ITEM_RE = note_rules.LIST_ITEM_RE
+NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")  # a count or a size: which item it belongs to is a fact
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z*\"'(])")
+CLAUSE_SPLIT = re.compile(r"(?<=;)\s+")  # a clause after ";" is its own fact, unless it is a command's
 # Words that carry no fact: "Nothing was stopped" says what "Nothing stopped" says.
 FILLER = {"a", "an", "the", "is", "are", "was", "were", "be", "been", "has", "have", "had", "of", "to", "in",
           "on", "at", "and", "or", "for", "it", "its", "this", "that", "with", "by", "as", "so", "there",
@@ -43,11 +45,21 @@ or other words, is not new.
 Reply with JSON only: {{"new": [the numbers of the new lines]}}"""
 
 
+def _seq(text: str) -> list[str]:
+    """The fact-bearing words of a text in order, links taken out. A task id counts: the note leaves
+    ids out on purpose, so the thread is where the owner finds one (unless the note links to it)."""
+    t = re.sub(r"[*_~`]", " ", note_rules.take_links(text or "")[0].lower())
+    t = re.sub(r"\(\d+\)(?=:)", " ", t)  # "VMs running (3): a, b, c": the count of the list it heads, no fact of its own
+    return [w for w in re.findall(r"[a-z0-9]+(?:[.'][a-z0-9]+)*", t) if w not in FILLER]
+
+
 def words(text: str) -> set[str]:
-    """The fact-bearing words of a text, links taken out: does the note already say this?"""
-    t = note_rules.TASK_ID_RE.sub(" ", note_rules.take_links(text or "")[0])  # an id the note left out is not news
-    t = re.sub(r"[*_~`]", "", t.lower())
-    return {w for w in re.findall(r"[a-z0-9]+(?:[.'][a-z0-9]+)*", t) if w not in FILLER}
+    """The fact-bearing words of a text: does the note already say this?"""
+    return set(_seq(text))
+
+
+def _pairs(seq: list[str]) -> set[tuple[str, str]]:
+    return set(zip(seq, seq[1:]))
 
 
 def urls(text: str) -> set[str]:
@@ -55,51 +67,75 @@ def urls(text: str) -> set[str]:
 
 
 def _units(line: str) -> list[str]:
-    """A line as the pieces that can be said or not: a list item whole, prose by its sentences."""
-    if LIST_ITEM_RE.match(line):
+    """A line as the pieces that can be said or not: a list item or a line with inline code whole,
+    prose by its sentences and ";" clauses. A sentence with a command stays whole (a command is
+    never cut at its ";")."""
+    if LIST_ITEM_RE.match(line) or "`" in line:
         return [line]
-    return [s for s in SENTENCE_SPLIT.split(line) if s.strip()]
+    out: list[str] = []
+    for sent in SENTENCE_SPLIT.split(line):
+        out += [sent] if note_rules.COMMAND_RE.search(sent) else CLAUSE_SPLIT.split(sent)
+    return [u for u in out if u.strip()]
 
 
 def _fences(lines: list[str]) -> list[bool]:
-    """Which lines are inside a ``` block (the raw record, someone's exact words: never pruned)."""
+    """Which lines are inside a ``` block, its fences too (the raw record, someone's exact words)."""
     out, inside = [], False
     for ln in lines:
-        fence = ln.count("```") % 2 == 1
         out.append(inside or "```" in ln)
-        inside ^= fence
+        inside ^= ln.count("```") % 2 == 1
     return out
+
+
+def _kept(line: str, fenced: bool) -> bool:
+    """A line no check may drop: code (a block, a command, inline code). The note never carries a
+    command, and when it says "the command is in the thread" the command must be there."""
+    return fenced or bool(note_rules.COMMAND_RE.search(line))
 
 
 def beyond(details: str, said: list[str], links: list[str] | tuple = ()) -> str:
     """`details` without what `said` (the note's headline, sentences and question) already says.
 
-    A sentence or list line stays when it has a word the note does not, or a link the note does not
-    carry. A header line ("Biggest:") stays only with an item under it. Code blocks stay whole."""
-    said_words = set().union(*(words(s) for s in said if s))
-    said_urls = set(links).union(*(urls(s) for s in said if s))
+    A sentence or list line stays when it has a word or a link the note does not, or numbers the
+    note pairs differently ("hillsboro: 1 passed" against "3 passed, 1 failed on hillsboro"). A
+    header line ("Biggest:") stays only with an item under it. Code stays whole."""
+    said = [s for s in said if s]
+    said_words = set().union(*(words(s) for s in said))
+    said_pairs = set().union(*(_pairs(_seq(s)) for s in said))
+    said_urls = set(links).union(*(urls(s) for s in said))
+    # a task id the note links to (its answer page) is said; one it does not is news
+    said_words |= {w for u in said_urls for i in note_rules.TASK_ID_RE.findall(u) for w in _seq(i)}
+
+    def new(unit: str) -> bool:
+        seq = _seq(unit)
+        if set(seq) - said_words or urls(unit) - said_urls:
+            return True
+        return any(NUMBER_RE.fullmatch(a) or NUMBER_RE.fullmatch(b) for a, b in _pairs(seq) - said_pairs)
+
     lines = (details or "").splitlines()
     kept: list[str] = []
     for ln, fenced in zip(lines, _fences(lines)):
-        if fenced:
+        if fenced or not ln.strip():
             kept.append(ln)
             continue
-        if not ln.strip():
-            kept.append("")
-            continue
-        new = [u for u in _units(ln) if (words(u) - said_words) or (urls(u) - said_urls)]
-        if new:
-            kept.append(" ".join(new) if not LIST_ITEM_RE.match(ln) else ln)
+        fresh = [u for u in _units(ln) if note_rules.COMMAND_RE.search(u) or new(u)]
+        if fresh:
+            kept.append(ln if LIST_ITEM_RE.match(ln) or len(fresh) == len(_units(ln)) else " ".join(fresh))
     return _tidy(kept)
 
 
 def _tidy(lines: list[str]) -> str:
-    """No header left without its items, no runs of blank lines."""
+    """No header left without its items (or the code block it introduces), no runs of blank lines
+    outside code. A code block is never touched."""
+    fenced = _fences(lines)
     out: list[str] = []
     for i, ln in enumerate(lines):
+        if fenced[i]:
+            out.append(ln)
+            continue
         if ln.rstrip().endswith(":") and not LIST_ITEM_RE.match(ln):
             nxt = next((x for x in lines[i + 1:] if x.strip()), "")
-            if not LIST_ITEM_RE.match(nxt):
+            if not (LIST_ITEM_RE.match(nxt) or nxt.lstrip().startswith("```")):
                 continue
         if not ln.strip() and (not out or not out[-1].strip()):
             continue
@@ -107,28 +143,31 @@ def _tidy(lines: list[str]) -> str:
     return "\n".join(out).strip()
 
 
-def _lines(details: str) -> list[str]:
-    return [ln for ln in (details or "").splitlines() if ln.strip()]
+def _intro(lines: list[str], i: int) -> bool:
+    """A "Raw record:" line that heads the code block under it: part of the block."""
+    nxt = next((x for x in lines[i + 1:] if x.strip()), "")
+    return lines[i].rstrip().endswith(":") and nxt.lstrip().startswith("```")
 
 
 def model_beyond(details: str, note_text: str, call) -> str:
     """`details` with only the lines a model calls new next to `note_text`. `call(prompt) -> str`.
-    Code blocks are not offered: they stay whole. Never raises; on any doubt, `details` as it was."""
-    lines = _lines(details)
-    if not lines or not call:
+    Code is not offered (it stays whole), blank lines stay. Never raises; on any doubt, `details`
+    as it was."""
+    lines = (details or "").splitlines()
+    if not call or not any(ln.strip() for ln in lines):
         return details
-    fenced = _fences(lines)
-    offer = [(i, ln) for i, (ln, f) in enumerate(zip(lines, fenced)) if not f]
+    fixed = [_kept(ln, f) or not ln.strip() or _intro(lines, i) for i, (ln, f) in enumerate(zip(lines, _fences(lines)))]
+    offer = [i for i, f in enumerate(fixed) if not f]
     if not offer:
         return details
     try:
-        listing = "\n".join(f"{n}. {ln.strip()}" for n, (_, ln) in enumerate(offer, 1))
+        listing = "\n".join(f"{n}. {lines[i].strip()}" for n, i in enumerate(offer, 1))
         answer = call(PROMPT.format(note=note_text.strip(), lines=listing))
         m = re.search(r"\{.*\}", answer or "", re.S)
         new = json.loads(m.group(0)).get("new") if m else None
         if not isinstance(new, list) or not all(isinstance(n, int) and not isinstance(n, bool) for n in new):
             return details
-        keep = {offer[n - 1][0] for n in new if 1 <= n <= len(offer)}
+        keep = {offer[n - 1] for n in new if 1 <= n <= len(offer)}
     except Exception:  # noqa: BLE001 - the model is a second look, never load-bearing
         return details
-    return _tidy([ln for i, ln in enumerate(lines) if fenced[i] or i in keep])
+    return _tidy([ln for i, ln in enumerate(lines) if fixed[i] or i in keep])

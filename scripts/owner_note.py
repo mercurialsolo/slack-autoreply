@@ -234,7 +234,7 @@ class Note:
         return self.links[0][0] if self.options and self.links else ""
 
 
-LIST_ITEM_RE = re.compile(r"^\s*(?:[-•*◦]|\d+[.)])\s+")
+LIST_ITEM_RE = note_rules.LIST_ITEM_RE
 THEME_RE = re.compile(r"^\s*\**([^:*]{2,40}?)\**\s*:\s+\S")
 SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z*❓🔴⚠⏸🚀✅\"'])")
 CMD_NOTE = "The command is in the thread."
@@ -355,11 +355,6 @@ def _summary(parts: list[str]) -> str:
     return " ".join(SENTENCE_SPLIT.split(text)[:SUMMARY_MAX]) if text else ""
 
 
-def _norm(t: str) -> list[str]:
-    """The words of a text, in any order: does the body already say all of it?"""
-    return sorted(re.findall(r"[a-z0-9]+", (t or "").lower()))
-
-
 def from_text(intent: str, sender: str = "", *, status: str | None = None, headline: str | None = None,
               points: list[str] | None = None, details: str | None = None, options: list[str] | None = None,
               link: str = "", shaped: dict | None = None) -> Note:
@@ -392,7 +387,7 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
             head, body = next(((b, body[:i] + body[i + 1:]) for i, b in enumerate(body) if b), ("", body))
         st = norm_status(status) or ("ask" if options else worst([status_of(head)] + [status_of(b) for b in body if b] + labels))
         extra = points[SUMMARY_MAX:]
-        whole = details if details is not None else _beyond(intent, [headline] + points)
+        whole = details if details is not None else note_thread.beyond(intent, [headline] + points)
         if extra and not all(x in whole for x in extra):
             whole = "\n".join(x for x in [whole] + extra if x)  # the points the body had no room for
         if had_cmd:  # the body says the command is in the thread: make sure it is
@@ -446,15 +441,6 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
     # The thread carries only what the note did not say; nothing new, no thread (owner, 2026-11-13)
     note.details = note_thread.beyond(note.details, [head, summary, asks], [u for u, _ in note.links])
     return note
-
-
-def _beyond(intent: str, said: list[str]) -> str:
-    """What the agent's text says that its headline and points do not: that, and only that, is
-    Details. The same words twice — the body, then the body again in the thread — is noise."""
-    said_words = set(_norm(" ".join(said)))
-    lines = [ln for ln in (intent or "").splitlines() if ln.strip()]
-    rest = [ln for ln in lines if not set(_norm(note_rules.take_links(ln)[0])) <= said_words]
-    return "\n".join(rest) if rest else ""
 
 
 def _label(label: str) -> str:
