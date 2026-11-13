@@ -52,7 +52,6 @@ TURNS_KEPT = 8
 CANDIDATES = 6
 TIMEOUT_S = 120
 ACTION_PREFIX = "solo_factory_"
-NOT_FACTORY = {"factory": False}   # the judge's own "not about the factory", told apart from no answer
 DEFAULT_JUDGE = ('{claude} -p --model opus --output-format text --tools "" --strict-mcp-config '
                  '--no-session-persistence')
 
@@ -286,10 +285,15 @@ def _post_json(url: str, payload: dict) -> dict:
 
 # --- the judge -----------------------------------------------------------------------------------------------
 
+def not_factory(v: dict | None) -> bool:
+    """The judge's own "not about the factory", told apart from None (no answer)."""
+    return isinstance(v, dict) and v.get("factory") is False
+
+
 def judge(conf: dict, *, text: str, sender: str, owner: str, is_owner: bool, turns: list[dict],
           candidates: list[dict], run=subprocess.run) -> dict | None:
-    """The model's verdict; NOT_FACTORY when the model says it is not about factory work; None when the model
-    could not say. Either way that is not a verdict to act on: the message takes Solo's normal path."""
+    """The model's verdict; a not_factory() one when the model says it is not about factory work; None when
+    the model could not say. Either way that is not a verdict to act on: the message takes Solo's normal path."""
     cmd = conf.get("judge_cmd") or DEFAULT_JUDGE.format(claude=shlex.quote(config.env("CLAUDE_BIN", "claude")))
     mark = staff_intake.fence()
     prompt = PROMPT.format(
@@ -310,7 +314,8 @@ def judge(conf: dict, *, text: str, sender: str, owner: str, is_owner: bool, tur
     except ValueError:
         return None
     if isinstance(v, dict) and v.get("factory") is False:
-        return NOT_FACTORY
+        # a fresh verdict each time, keeping any correction said alongside the "thanks"
+        return {"factory": False, "correction": " ".join(str(v.get("correction") or "").split())}
     if not isinstance(v, dict) or v.get("factory") is not True or v.get("verb") not in READS + WRITES:
         return None
     ids = {t["id"] for t in candidates}
@@ -414,18 +419,21 @@ class Conversation:
         v = judge(self.conf, text=text, sender=user, owner=self.owner, is_owner=is_owner,
                   turns=th.get("turns") or [], candidates=cands, run=self.judge_run)
         pend = th.get("pending") or {}
-        if v is NOT_FACTORY and th.get("bound") and is_owner:
-            self._outcome(key, th, user)
+        if not_factory(v) and th.get("bound") and is_owner:
+            if v["correction"]:
+                channel_choice.record_correction(user, v["correction"], th.get("piece"))
             _add_turn(key, user, text)
             if pend.get("kind") == "ask":
+                # no outcome yet: the ask is not answered, and its answer later records how long it took
                 # chit-chat under an open question is neither its answer nor lost: the question is shown again
                 opts = " / ".join(pend.get("options") or [])
                 return key, Reply("warn", f"Still waiting for your answer{': ' + opts if opts else ''}.",
                                   ["Press a button, or reply with the answer in words."])
             # "thanks" under a factory note that asks nothing: not an instruction to its task, and not an
             # answer for the note's ask path either. Taken, and marked as seen.
+            self._outcome(key, th, user)
             return key, ACKNOWLEDGED
-        if v is NOT_FACTORY:
+        if not_factory(v):
             v = None
         if v is None and th.get("bound") and is_owner:
             # a judge that could not say: the reply goes back to its task rather than be lost
@@ -442,7 +450,8 @@ class Conversation:
         if not v.get("task") and th.get("bound") and v["verb"] in ("answer", "instruct"):
             v["task"] = th["bound"]
         reply = self._do(key, v, user=user, text=text, mine=mine, cands=cands, link=_link(channel, ts))
-        if v["verb"] == "answer" and pend.get("kind") == "ask" and v.get("task") == pend.get("task") and took(reply):
+        if (v["verb"] == "answer" and pend.get("kind") == "ask" and v.get("task") == pend.get("task")
+                and took(reply) and thread(key).get("pending") == pend):   # not a question _do just asked
             _update(key, pending=None)   # answered in words: the question is closed, as a press closes it
         _update(key, principal=th.get("principal") or user)
         _add_turn(key, "solo", reply.headline)

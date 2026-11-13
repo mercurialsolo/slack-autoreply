@@ -273,6 +273,33 @@ check("open ask: an answer in words reaches the task", fac.did("task", "answer",
 got = chat.message(channel=DM, ts="1700000012.000700", thread_ts=push3, user=OWNER, text="thanks!")
 check("open ask: once answered in words, the question is closed and a thanks is only acknowledged",
       got and got[1] is F.ACKNOWLEDGED and len(fac.did("task", "answer")) == n_answer + 1, (got, fac.calls[-3:]))
+# Review round 3: an open ask's chit-chat records no outcome; a correction said with a thanks is kept;
+# an answer in words keeps the question the factory asks next.
+push4 = "1700000012.000800"
+F.bind(F.thread_key(DM, push4), "t_ccc33333", principal=OWNER, title="Ship or hold, again?", options=["Ship it", "Hold"])
+p4 = F.thread(F.thread_key(DM, push4))["piece"]
+chat.message(channel=DM, ts="1700000012.000810", thread_ts=push4, user=OWNER, text="thanks!")
+check("open ask: chit-chat does not count as the ask being answered",
+      not any(e["type"] == "outcome" and e["piece"] == p4 for e in C.events(OWNER)))
+push5 = "1700000012.000900"
+F.bind(F.thread_key(DM, push5), "t_bbb22222", principal=OWNER, title="Ranking is amber")
+jud.say["too long, just a line"] = {"factory": False, "correction": "too long, just a line next time"}
+got = chat.message(channel=DM, ts="1700000012.000910", thread_ts=push5, user=OWNER,
+                   text="thanks, but too long, just a line next time")
+check("push thread: a correction said with a thanks is kept for the chooser",
+      got and got[1] is F.ACKNOWLEDGED and any(e["type"] == "correction" and "just a line" in e["said"]
+                                               for e in C.events(OWNER)), got)
+c3 = F.Conversation(conf, owner=OWNER, run=fac, judge_run=jud, chooser=lambda p: "")
+c3.factory.converse = lambda payload: {"reply": {"status": "ask", "headline": "Which region first?",
+                                                 "options": ["EU", "US"]}}
+push6 = "1700000012.001000"
+F.bind(F.thread_key(DM, push6), "t_ccc33333", principal=OWNER, title="Ship where?", options=["Ship it", "Hold"])
+jud.say["ship it after lunch"] = {"factory": True, "verb": "answer", "text": "ship it after lunch"}
+got = c3.message(channel=DM, ts="1700000012.001010", thread_ts=push6, user=OWNER, text="ship it after lunch")
+check("open ask: an answer in words keeps the question the factory asks next",
+      got and got[1].headline == "Which region first?"
+      and (F.thread(F.thread_key(DM, push6)).get("pending") or {}).get("options") == ["EU", "US"],
+      F.thread(F.thread_key(DM, push6)).get("pending"))
 jud.say["revert to last week's weights"] = "FAIL"
 say("revert to last week's weights", ts="1700000012.000300", thread_ts=push2)
 check("push thread: when the judge cannot say, the reply still reaches the task",
