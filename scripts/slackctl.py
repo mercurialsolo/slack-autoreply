@@ -3235,6 +3235,13 @@ class Daemon(Slack):
         except Exception:  # noqa: BLE001 - never a guess, never a crash: the normal path takes it
             log.exception("factory chat failed")
             return False
+        if reply is factory_converse.ACKNOWLEDGED:
+            log.info("factory chat: %s acknowledged a factory note, nothing forwarded", sender)
+            try:   # seen, and nothing done: a misread instruction is visible as not acted on
+                self.bot.reactions_add(channel=channel, timestamp=ev.get("ts"), name="eyes")
+            except Exception:  # noqa: BLE001 - a missing reaction loses nothing
+                log.warning("factory chat: could not mark %s as seen", ev.get("ts"))
+            return True
         if is_owner and ev.get("thread_ts") and factory_converse.took(reply):
             self._factory_answered(ev["thread_ts"], text, sender, typed=True)
         try:
@@ -3260,8 +3267,9 @@ class Daemon(Slack):
                 return
             if factory_converse.took(reply):
                 self._factory_answered(ts, value, user, typed=False)
-            chat.route(key, user, reply)
-            factory_converse.deliver(reply, key, self._factory_post(channel), buttons=owner_buttons())
+            choice = chat.route(key, user, reply)
+            factory_converse.deliver(reply, key, self._factory_post(channel), choice.get("modality", "structured_text"),
+                                     buttons=owner_buttons())
         except Exception:  # noqa: BLE001
             log.exception("factory press failed")
 

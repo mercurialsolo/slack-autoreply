@@ -73,6 +73,8 @@ What each verb does:
   submit    a new task (title, brief, kind)        answer    answer the question a task asked
   instruct  tell a running task something          cancel    stop a task
 
+In a thread under a factory note, a reply that answers the note's question or tells its task something is
+factory work (answer or instruct). Thanks, ok, emoji, acknowledgements and chit-chat are not: factory false.
 "the other one", "that", "it" refer to the thread's tasks. If it is unclear which task, leave task empty
 and give the words to search by in query. Name a task only from the list above.
 If the sender also says how they want to be told ("send me that on Slack", "show me", "too long", "call me"),
@@ -224,6 +226,7 @@ def bind(key: str, task: str, *, principal: str, title: str = "", options: list[
                                                      "why": "factory push note"},
                                          kind="ask" if options else kind, content=content or title, where="slack")
     _add_tasks(key, [{"id": task, "title": title}])
+    _add_turn(key, "factory", f"{task}: {content or title}")   # the judge reads replies under it in context
     _update(key, principal=principal, bound=task, piece=piece, sent_at=time.time(),
             pending={"kind": "ask", "task": task, "options": list(options)} if options else None)
 
@@ -282,10 +285,15 @@ def _post_json(url: str, payload: dict) -> dict:
 
 # --- the judge -----------------------------------------------------------------------------------------------
 
+def not_factory(v: dict | None) -> bool:
+    """The judge's own "not about the factory", told apart from None (no answer)."""
+    return isinstance(v, dict) and v.get("factory") is False
+
+
 def judge(conf: dict, *, text: str, sender: str, owner: str, is_owner: bool, turns: list[dict],
           candidates: list[dict], run=subprocess.run) -> dict | None:
-    """The model's verdict, or None when it is not about factory work or the model could not say (the
-    message then takes Solo's normal path — never a guess)."""
+    """The model's verdict; a not_factory() one when the model says it is not about factory work; None when
+    the model could not say. Either way that is not a verdict to act on: the message takes Solo's normal path."""
     cmd = conf.get("judge_cmd") or DEFAULT_JUDGE.format(claude=shlex.quote(config.env("CLAUDE_BIN", "claude")))
     mark = staff_intake.fence()
     prompt = PROMPT.format(
@@ -305,6 +313,9 @@ def judge(conf: dict, *, text: str, sender: str, owner: str, is_owner: bool, tur
         v = json.loads(m.group(0)) if m else None
     except ValueError:
         return None
+    if not_factory(v):
+        # a fresh verdict each time, keeping any correction said alongside the "thanks"
+        return {"factory": False, "correction": " ".join(str(v.get("correction") or "").split())}
     if not isinstance(v, dict) or v.get("factory") is not True or v.get("verb") not in READS + WRITES:
         return None
     ids = {t["id"] for t in candidates}
@@ -331,6 +342,11 @@ class Reply:
     options: list[str] = field(default_factory=list)
     labels: list[str] = field(default_factory=list)   # button words when the option value is an id
     ask: str = ""
+    reask: bool = False   # an open question shown again: the question's own piece keeps its outcome
+
+
+# "thanks" under a factory note: taken by the conversation, nothing forwarded, nothing posted.
+ACKNOWLEDGED = Reply("info", "")
 
 
 def render(reply: Reply, key: str, modality: str = "structured_text", buttons: bool = True) -> dict:
@@ -403,9 +419,26 @@ class Conversation:
         cands = self._candidates(th, text, mine)
         v = judge(self.conf, text=text, sender=user, owner=self.owner, is_owner=is_owner,
                   turns=th.get("turns") or [], candidates=cands, run=self.judge_run)
+        pend = th.get("pending") or {}
+        if not_factory(v) and th.get("bound") and is_owner:
+            if v["correction"]:
+                channel_choice.record_correction(user, v["correction"], th.get("piece"))
+            _add_turn(key, user, text)
+            if pend:
+                # no outcome yet: the question is not answered, and its answer later records how long it took.
+                # Chit-chat under any open question (ask, confirm, pick, reply) is neither its answer nor
+                # lost: the question is shown again, as a re-ask that leaves the question's piece in place
+                opts = " / ".join(pend.get("options") or [])
+                return key, Reply("warn", f"Still waiting for your answer{': ' + opts if opts else ''}.",
+                                  ["Press a button, or reply with the answer in words."], reask=True)
+            # "thanks" under a factory note that asks nothing: not an instruction to its task, and not an
+            # answer for the note's ask path either. Taken, and marked as seen.
+            self._outcome(key, th, user)
+            return key, ACKNOWLEDGED
+        if not_factory(v):
+            v = None
         if v is None and th.get("bound") and is_owner:
-            # a reply under a factory note goes back to its task, whatever the judge made of it
-            pend = th.get("pending") or {}
+            # a judge that could not say: the reply goes back to its task rather than be lost
             v = {"verb": "answer" if pend.get("kind") == "ask" else "instruct", "task": th["bound"], "text": text,
                  "query": "", "correction": ""}
         if v is None:
@@ -419,6 +452,9 @@ class Conversation:
         if not v.get("task") and th.get("bound") and v["verb"] in ("answer", "instruct"):
             v["task"] = th["bound"]
         reply = self._do(key, v, user=user, text=text, mine=mine, cands=cands, link=_link(channel, ts))
+        if (v["verb"] == "answer" and pend.get("kind") == "ask" and v.get("task") == pend.get("task")
+                and took(reply) and thread(key).get("pending") == pend):   # not a question _do just asked
+            _update(key, pending=None)   # answered in words: the question is closed, as a press closes it
         _update(key, principal=th.get("principal") or user)
         _add_turn(key, "solo", reply.headline)
         return key, reply
@@ -452,9 +488,13 @@ class Conversation:
     def route(self, key: str, user: str, reply: Reply) -> dict:
         """The model's channel/modality choice for this reply, recorded with what was delivered. The person
         is in this Slack thread now, so Slack is where it lands; the modality shapes the rendering."""
+        if reply.reask:   # the open question's piece and send time stay, so its answer is measured from it
+            return {"channel": "slack", "modality": "structured_text"}
         kind = "confirm" if reply.options and set(reply.options) == {"Yes", "No"} else "ask" if reply.options else "update"
+        action = ("press a button" if reply.options else
+                  "read a headline and a few points" if reply.points else "read a headline")
         choice = channel_choice.choose(user, kind=kind, content=reply.headline, urgency=3 if reply.options else 2,
-                                       action="press a button" if reply.options else "read it",
+                                       action=action,
                                        where="in this Slack thread, writing to Solo now", model=self.chooser,
                                        available=("slack",),
                                        default={"channel": "slack", "modality": "structured_text"})
@@ -657,8 +697,9 @@ def _own_tasks(user: str) -> dict:
 
 
 def took(reply: Reply) -> bool:
-    """Whether the factory took what the owner said: not refused, not a choice that had closed."""
-    return reply.status not in ("failed", "warn") and reply.headline != CLOSED
+    """Whether the factory took what the owner said: not refused, not a choice that had closed, not a
+    "thanks" that was only acknowledged."""
+    return reply.status not in ("failed", "warn") and reply.headline != CLOSED and reply is not ACKNOWLEDGED
 
 
 def typed_choice(pend: dict, text: str) -> str | None:
