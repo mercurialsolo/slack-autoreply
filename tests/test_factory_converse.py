@@ -245,9 +245,18 @@ check("push thread: a reply goes back to that task", fac.did("task", "instruct",
 check("push thread: the judge saw the push note it replies to", "factory: t_bbb22222: Ranking is red" in jud.prompts[-1],
       jud.prompts[-1][-600:])
 n_instruct = len(fac.did("task", "instruct"))
-got = say("thanks!", ts="1700000012.000200", thread_ts=push2)
-check("push thread: a bare thanks is not forwarded to the task",
-      got[0] is None and len(fac.did("task", "instruct")) == n_instruct, fac.calls[-3:])
+got = chat.message(channel=DM, ts="1700000012.000200", thread_ts=push2, user=OWNER, text="thanks!")
+check("push thread: a bare thanks is taken quietly, not forwarded to the task",
+      got and got[1] is F.ACKNOWLEDGED and not F.took(got[1]) and len(fac.did("task", "instruct")) == n_instruct,
+      (got, fac.calls[-3:]))
+check("not factory outside a bound thread is still left to Solo",
+      chat.message(channel=DM, ts="1700000012.000250", thread_ts=None, user=OWNER, text="thanks!") is None)
+push3 = "1700000012.000400"
+F.bind(F.thread_key(DM, push3), "t_ccc33333", principal=OWNER, title="Ship or hold?", options=["Ship it", "Hold"])
+jud.say["go ahead once the docs land"] = {"factory": False}
+say("go ahead once the docs land", ts="1700000012.000500", thread_ts=push3)
+check("open ask: a reply the judge calls chit-chat still reaches the task as its answer",
+      fac.did("task", "answer", "t_ccc33333", "go ahead once the docs land"), fac.calls[-3:])
 jud.say["revert to last week's weights"] = "FAIL"
 say("revert to last week's weights", ts="1700000012.000300", thread_ts=push2)
 check("push thread: when the judge cannot say, the reply still reaches the task",
@@ -329,9 +338,22 @@ check("chooser: the held choice runs out", len(calls) == 3, len(calls))
 C.record_correction(STAFF, "too long, just a line")
 C.choose(STAFF, kind="update", content="after the correction", model=counted)
 check("chooser: a correction asks the model again at once", len(calls) == 4, len(calls))
+check("chooser: and the model hears it before the nightly pass", "too long, just a line" in calls[-1], calls[-1][-400:])
 C.learn(STAFF)
 C.choose(STAFF, kind="update", content="after learning", model=counted)
 check("chooser: a newly learnt profile asks the model again", len(calls) == 5, len(calls))
+C.choose(STAFF, kind="update", content="held", model=counted)
+store = json.loads((HOME / C.PROFILES).read_text())
+store[STAFF]["learnt_at"] = "2099-01-01T00:00:00Z"   # the nightly pass, in its own process
+(HOME / C.PROFILES).write_text(json.dumps(store))
+C.choose(STAFF, kind="update", content="after another process learnt", model=counted)
+check("chooser: a profile learnt by another process is read at once", len(calls) == 6, len(calls))
+C.choose(STAFF, kind="update", content="other model", model=lambda p: counted(p))
+check("chooser: another model is its own choice", len(calls) == 7, len(calls))
+clock[0] += C.CHOICE_TTL_S + 1
+C.choose(STAFF, kind="ask", content="late", model=counted)
+check("chooser: run-out choices are dropped", all(clock[0] - at < C.CHOICE_TTL_S for at, _ in C._choices.values()),
+      len(C._choices))
 n = len(calls)
 C.choose(STAFF, kind="confirm", content="x", model=lambda p: calls.append(p) or "nonsense")
 C.choose(STAFF, kind="confirm", content="x", model=lambda p: calls.append(p) or "nonsense")
@@ -379,10 +401,28 @@ ts, _ = slackctl.deliver_to_owner(console, item, "Ship 2.4 now or hold for the d
 asks = slackctl.State().read().get("asks") or {}
 check("push: recorded as an ask and bound to its task", asks.get(ts, {}).get("item") == "say-push-1"
       and F.thread(F.thread_key(DM, ts)).get("bound") == "t_ccc33333", asks)
+shapes, real_deliver = [], F.deliver
+stub.__dict__["_factory_chat"].chooser = lambda p: '{"channel": "slack", "modality": "short_text"}'
+F.deliver = lambda reply, key, post, modality="structured_text", **k: (shapes.append(modality),
+                                                                         real_deliver(reply, key, post, modality, **k))[1]
 D.on_factory_press(stub, DM, ts, OWNER, {"action_id": "solo_answer_1", "value": "Hold"})
+F.deliver = real_deliver
+check("press: the reply takes the chooser's modality", shapes == ["short_text"], shapes)
 check("push: the press answered the task and is kept for `solo answer`",
       fac.did("task", "answer", "t_ccc33333", "Hold") and slackctl.load_item("say-push-1").get("answer", {}).get("choice") == "Hold",
       slackctl.load_item("say-push-1"))
+
+item = {"id": "say-push-3", "factory_task": "t_bbb22222", "origin": "agent:release",
+        "note": {"status": "ok", "headline": "Ranking fix is live."}}
+slackctl.save_item(item)
+ts3, _ = slackctl.deliver_to_owner(console, item, "Ranking fix is live.")
+n_posts, n_instruct = len(bot.posts), len(fac.did("task", "instruct"))
+jud.say["thanks, nice"] = {"factory": False}
+ok = D.on_factory_chat(stub, {"user": OWNER, "channel": DM, "ts": "1700000025.000100", "thread_ts": ts3,
+                              "text": "thanks, nice"})
+check("console: a thanks under a factory note is taken, nothing posted, nothing forwarded, no answer recorded",
+      ok is True and len(bot.posts) == n_posts and len(fac.did("task", "instruct")) == n_instruct
+      and not slackctl.load_item("say-push-3").get("answer"), (ok, bot.posts[n_posts:], slackctl.load_item("say-push-3")))
 
 # 11. Review round 2: the factory's own choices go back to it; every piece gets its outcome; chat off binds nothing.
 import channel_choice  # noqa: E402

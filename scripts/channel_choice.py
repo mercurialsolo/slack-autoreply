@@ -211,6 +211,14 @@ def _model(prompt: str, run=subprocess.run) -> str:
     return p.stdout or ""
 
 
+def _said_since(person: str, prof: dict) -> str:
+    """Corrections the nightly pass has not folded in yet: a person who said "too long" is heard now. Times
+    are to the second, so one made in the second of learning is repeated rather than risk dropping it."""
+    since = prof.get("learnt_at") or ""
+    said = [e.get("said", "") for e in events(person) if e.get("type") == "correction" and e.get("at", "") >= since]
+    return "".join(f"\n  said since (not learnt yet): \"{s}\"" for s in said[-3:])
+
+
 def choose(person: str, *, kind: str, content: str, urgency: int = 3, action: str = "read it",
            where: str = "unknown", model=None, default: dict | None = None,
            available: tuple[str, ...] | None = None) -> dict:
@@ -222,15 +230,19 @@ def choose(person: str, *, kind: str, content: str, urgency: int = 3, action: st
     prof = profile(person)
     # a newly learnt profile (the nightly pass runs in its own process) is a new key, so it is read at once
     held_key = (person, prof.get("learnt_at"), kind, urgency, action, where, channels,
-                json.dumps(default or {}, sort_keys=True))
+                json.dumps(default or {}, sort_keys=True), model)
+    now = _clock()
     with _choices_lock:
+        for k in [k for k, (at, _) in _choices.items() if now - at >= CHOICE_TTL_S]:
+            del _choices[k]
         held = _choices.get(held_key)
-    if held and _clock() - held[0] < CHOICE_TTL_S:
+    if held:
         return dict(held[1])
     fallback = dict(default or {"channel": "slack", "modality": "structured_text"}, why="the chooser did not answer")
     prompt = PROMPT.format(person=person, channels=", ".join(channels), modalities=", ".join(MODALITIES),
                            kind=kind, urgency=urgency, action=action, where=where,
-                           content=" ".join(content.split())[:400], profile=profile_text(prof))
+                           content=" ".join(content.split())[:400],
+                           profile=profile_text(prof) + _said_since(person, prof))
     try:
         out = (model or _model)(prompt)
         m = re.search(r"\{.*\}", out or "", re.S)
@@ -241,7 +253,7 @@ def choose(person: str, *, kind: str, content: str, urgency: int = 3, action: st
         return fallback
     got = {"channel": v["channel"], "modality": v["modality"], "why": str(v.get("why") or "")[:200]}
     with _choices_lock:
-        _choices[held_key] = (_clock(), got)   # only a real answer is held; a fallback asks again next time
+        _choices[held_key] = (now, got)   # only a real answer is held; a fallback asks again next time
     return dict(got)
 
 

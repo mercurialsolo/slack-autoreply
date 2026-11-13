@@ -339,6 +339,10 @@ class Reply:
     ask: str = ""
 
 
+# "thanks" under a factory note: taken by the conversation, nothing forwarded, nothing posted.
+ACKNOWLEDGED = Reply("info", "")
+
+
 def render(reply: Reply, key: str, modality: str = "structured_text", buttons: bool = True) -> dict:
     """{text, blocks, details} under the owner-note rules. A short_text modality keeps the headline and
     the buttons and moves the bullets to the thread; buttons carry the thread key so a press finds it. With
@@ -409,11 +413,16 @@ class Conversation:
         cands = self._candidates(th, text, mine)
         v = judge(self.conf, text=text, sender=user, owner=self.owner, is_owner=is_owner,
                   turns=th.get("turns") or [], candidates=cands, run=self.judge_run)
+        pend = th.get("pending") or {}
+        if v is NOT_FACTORY and th.get("bound") and is_owner and pend.get("kind") != "ask":
+            # "thanks" under a factory note that asks nothing: not an instruction to its task, and not an
+            # answer for the note's ask path either. Taken, and left at that.
+            return key, ACKNOWLEDGED
         if v is NOT_FACTORY:
-            return None   # "thanks" under a factory note is not an instruction to its task
+            v = None
         if v is None and th.get("bound") and is_owner:
-            # the judge could not say: a reply under a factory note goes back to its task rather than be lost
-            pend = th.get("pending") or {}
+            # an open question's thread, or a judge that could not say: the reply goes back to its task
+            # rather than be lost
             v = {"verb": "answer" if pend.get("kind") == "ask" else "instruct", "task": th["bound"], "text": text,
                  "query": "", "correction": ""}
         if v is None:
@@ -461,8 +470,10 @@ class Conversation:
         """The model's channel/modality choice for this reply, recorded with what was delivered. The person
         is in this Slack thread now, so Slack is where it lands; the modality shapes the rendering."""
         kind = "confirm" if reply.options and set(reply.options) == {"Yes", "No"} else "ask" if reply.options else "update"
+        action = ("press a button" if reply.options else
+                  f"read a headline and {len(reply.points)} points" if reply.points else "read a headline")
         choice = channel_choice.choose(user, kind=kind, content=reply.headline, urgency=3 if reply.options else 2,
-                                       action="press a button" if reply.options else "read it",
+                                       action=action,
                                        where="in this Slack thread, writing to Solo now", model=self.chooser,
                                        available=("slack",),
                                        default={"channel": "slack", "modality": "structured_text"})
@@ -665,8 +676,9 @@ def _own_tasks(user: str) -> dict:
 
 
 def took(reply: Reply) -> bool:
-    """Whether the factory took what the owner said: not refused, not a choice that had closed."""
-    return reply.status not in ("failed", "warn") and reply.headline != CLOSED
+    """Whether the factory took what the owner said: not refused, not a choice that had closed, not a
+    "thanks" that was only acknowledged."""
+    return reply.status not in ("failed", "warn") and reply.headline != CLOSED and reply is not ACKNOWLEDGED
 
 
 def typed_choice(pend: dict, text: str) -> str | None:

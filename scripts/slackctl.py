@@ -3235,6 +3235,9 @@ class Daemon(Slack):
         except Exception:  # noqa: BLE001 - never a guess, never a crash: the normal path takes it
             log.exception("factory chat failed")
             return False
+        if reply is factory_converse.ACKNOWLEDGED:
+            log.info("factory chat: %s acknowledged a factory note, nothing forwarded", sender)
+            return True
         if is_owner and ev.get("thread_ts") and factory_converse.took(reply):
             self._factory_answered(ev["thread_ts"], text, sender, typed=True)
         try:
