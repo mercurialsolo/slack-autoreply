@@ -26,6 +26,7 @@ The channel chooser's command, when not the default, is CHANNEL_CHOOSER_CMD in t
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -139,8 +140,38 @@ def thread(key: str) -> dict:
     return _load().get(key) or {}
 
 
-# Socket Mode hands events to worker threads: every load-modify-save of the store holds this.
-_LOCK = threading.RLock()
+class _StoreLock:
+    """Socket Mode hands events to worker threads, and `solo say` (another process) binds threads too: every
+    load-modify-save of the store holds this — a re-entrant thread lock, then an flock on a sidecar file."""
+
+    def __init__(self) -> None:
+        self._rlock = threading.RLock()
+        self._depth = 0
+        self._fh = None
+
+    def __enter__(self):
+        self._rlock.acquire()
+        self._depth += 1
+        if self._depth == 1:
+            try:
+                self._fh = open(config.p(f"{STORE}.lock"), "a")
+                fcntl.flock(self._fh, fcntl.LOCK_EX)
+            except OSError:
+                self._fh = None   # no lock file, no cross-process lock: the thread lock still holds
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._depth -= 1
+        if self._depth == 0 and self._fh is not None:
+            try:
+                fcntl.flock(self._fh, fcntl.LOCK_UN)
+            finally:
+                self._fh.close()
+                self._fh = None
+        self._rlock.release()
+
+
+_LOCK = _StoreLock()
 
 
 def _update(key: str, **change) -> dict:
@@ -288,6 +319,9 @@ def judge(conf: dict, *, text: str, sender: str, owner: str, is_owner: bool, tur
 
 # --- the reply -----------------------------------------------------------------------------------------------
 
+CLOSED = "That choice is no longer open."
+
+
 @dataclass
 class Reply:
     status: str
@@ -395,7 +429,7 @@ class Conversation:
         if user not in (self.owner, th.get("principal")):
             return None
         if not pend or value not in pend.get("options", []):
-            return Reply("info", "That choice is no longer open.")
+            return Reply("info", CLOSED)
         self._outcome(key, th, user)
         _update(key, pending=None)
         mine = None if user == self.owner else self.own_tasks(user)
@@ -406,6 +440,9 @@ class Conversation:
         if pend["kind"] == "pick":
             return self._do(key, {**pend["verdict"], "task": value}, user=user, text=pend.get("text", ""),
                             mine=mine, cands=th.get("tasks") or [], link="")
+        if pend["kind"] == "reply":
+            return (self._converse(key, pend["verdict"], user=user, text=value, read_only=mine is not None)
+                    or Reply("warn", "The factory did not answer that choice.", ["Try it again in a moment."]))
         if pend["kind"] == "ask":
             return self._write(key, {"verb": "answer", "task": pend["task"], "text": value}, confirmed=True)
         return None
@@ -448,7 +485,7 @@ class Conversation:
         return out[:CANDIDATES * 3]
 
     def _outcome(self, key: str, th: dict, user: str) -> None:
-        if th.get("piece") and not th.get("piece_answered"):
+        if th.get("piece") and th.get("piece_answered") != th["piece"]:   # once per piece, every piece
             channel_choice.record_outcome(user, th["piece"], answered=True,
                                           latency_s=round(time.time() - th.get("sent_at", time.time()), 1),
                                           asked_again=False)
@@ -509,7 +546,8 @@ class Conversation:
             _update(key, pending={"kind": "confirm", "task": v.get("task") or "", "options": opts,
                                   "verdict": {**v, "via": "converse", "text": text}})
         elif opts:
-            _update(key, pending={"kind": "pick", "task": "", "options": opts, "verdict": v, "text": text})
+            # the factory's own choices: the one pressed goes back to the factory as the next turn
+            _update(key, pending={"kind": "reply", "task": v.get("task") or "", "options": opts, "verdict": v})
         return Reply(r.get("status") or "info", str(r.get("headline") or "The factory answered."),
                      [str(p) for p in r.get("points") or []], str(r.get("details") or ""), opts,
                      ask=str(r.get("ask") or ""))
@@ -616,6 +654,11 @@ def _own_tasks(user: str) -> dict:
     """A non-owner's tasks: what staff_intake raised for them, by its task id."""
     return {r["task_id"]: {"id": r["task_id"], "title": r.get("title") or "", "state": r.get("state") or ""}
             for r in staff_intake.rows().values() if r.get("sender") == user and r.get("task_id")}
+
+
+def took(reply: Reply) -> bool:
+    """Whether the factory took what the owner said: not refused, not a choice that had closed."""
+    return reply.status not in ("failed", "warn") and reply.headline != CLOSED
 
 
 def typed_choice(pend: dict, text: str) -> str | None:

@@ -341,4 +341,53 @@ check("push: the press answered the task and is kept for `solo answer`",
       fac.did("task", "answer", "t_ccc33333", "Hold") and slackctl.load_item("say-push-1").get("answer", {}).get("choice") == "Hold",
       slackctl.load_item("say-push-1"))
 
+# 11. Review round 2: the factory's own choices go back to it; every piece gets its outcome; chat off binds nothing.
+import channel_choice  # noqa: E402
+
+c = F.Conversation(conf, owner=OWNER, run=fac, judge_run=jud, chooser=lambda p: "")
+said_to_factory = []
+answers = [{"reply": {"status": "ask", "headline": "Which environment?", "options": ["staging", "prod"]}},
+           {"reply": {"status": "ask", "headline": "Now or after the batch?", "options": ["Now", "Later"]}},
+           {"reply": {"status": "ok", "headline": "Deploying to staging now."}}]
+c.factory.converse = lambda payload: (said_to_factory.append(payload), answers[len(said_to_factory) - 1])[1]
+k = F.thread_key(DM, "1700000030.000100")
+r1 = c._converse(k, {"verb": "instruct", "task": "t_aaa11111", "text": "deploy it"}, user=OWNER, text="deploy it",
+                 read_only=False)
+c.route(k, OWNER, r1)
+p1 = F.thread(k)["piece"]
+n_answer = len(fac.did("task", "answer"))
+r2 = c.press(key=k, value="staging", user=OWNER)
+check("converse choice: the press goes back to the factory as the next turn, not as a task id",
+      said_to_factory[-1]["text"] == "staging" and said_to_factory[-1]["intent"]["task"] == "t_aaa11111"
+      and r2.headline == "Now or after the batch?" and len(fac.did("task", "answer")) == n_answer, said_to_factory)
+c.route(k, OWNER, r2)
+p2 = F.thread(k)["piece"]
+r3 = c.press(key=k, value="Now", user=OWNER)
+outs = {e["piece"] for e in channel_choice.events(OWNER) if e.get("type") == "outcome"}
+check("channel: every piece in a thread gets its own outcome", p1 != p2 and {p1, p2} <= outs and r3.status == "ok",
+      (p1, p2, outs))
+check("took: a closed choice or a refusal is not an answer", not F.took(c.press(key=k, value="Now", user=OWNER))
+      and not F.took(F.Reply("failed", "no")) and F.took(r3))
+
+conf_file = HOME / F.CONF_PATH
+saved_conf = conf_file.read_text()
+conf_file.unlink()
+item = {"id": "say-push-2", "factory_task": "t_bbb22222", "origin": "agent:release",
+        "note": {"status": "ok", "headline": "Ranking fix is live."}}
+slackctl.save_item(item)
+ts2, _ = slackctl.deliver_to_owner(console, item, "Ranking fix is live.")
+check("chat off: a factory push is not bound, and an informational one asks nothing",
+      not F.thread(F.thread_key(DM, ts2)).get("bound") and ts2 not in (slackctl.State().read().get("asks") or {}))
+conf_file.write_text(saved_conf)
+
+stub.__dict__["_factory_chat"] = F.Conversation(F.load_conf(), owner=OWNER, run=fac, judge_run=jud,
+                                                chooser=lambda p: "", own_tasks=lambda u: own.get(u, {}))
+stub._factory_post = lambda ch: (lambda *a, **k: 1 / 0)
+jud.say["login copy request"] = {"factory": True, "verb": "status", "task": "t_ddd44444"}
+n_status = len(fac.did("task", "status", "t_ddd44444"))
+check("non-owner: a reply that cannot be posted leaves the message to staff_intake", D.on_factory_chat(
+    stub, {"user": STAFF, "channel": "CSTAFF", "ts": "1700000031.000100",
+           "text": f"<@{OWNER}> how is my login copy request?"}) is False
+      and len(fac.did("task", "status", "t_ddd44444")) > n_status)
+
 print(f"\n{passed} passed")

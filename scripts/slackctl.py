@@ -1384,7 +1384,8 @@ def deliver_to_owner(slack: Slack, item: dict, text: str) -> tuple[str, list[str
         # is kept on the item, for `solo answer <say-id>`.
         ts = slack.console_post(r["text"], blocks=r["blocks"])
         slack._ping(r["text"])  # noqa: SLF001
-        if ts and item.get("factory_task"):
+        chat_on = bool(item.get("factory_task")) and bool(factory_converse.load_conf())
+        if ts and chat_on:   # factory chat off: no binding, so a reply or press takes the normal ask path
             factory_converse.bind(factory_converse.thread_key(slack.console, ts), item["factory_task"],
                                   principal=slack.me, title=note.headline, options=note.options,
                                   content=note.headline)
@@ -1393,7 +1394,7 @@ def deliver_to_owner(slack: Slack, item: dict, text: str) -> tuple[str, list[str
             asks[ts] = {"item": item["id"], "at": now_iso()}
             for old in sorted(asks, key=lambda k: asks[k].get("at", ""))[:-200]:
                 asks.pop(old, None)
-        if ts:
+        if ts and (note.options or chat_on):   # an informational push with chat off asks nothing
             State().update(remember)
     else:
         key = item.get("group") or sender
@@ -3150,7 +3151,7 @@ class Daemon(Slack):
             aid = act.get("action_id") or ""
             if aid.startswith(factory_converse.ACTION_PREFIX) or (
                     aid.startswith("solo_answer_") and aid != "solo_answer_link" and channel
-                    and factory_converse.bound(factory_converse.thread_key(channel, ts))):
+                    and factory_converse.load_conf() and factory_converse.bound(factory_converse.thread_key(channel, ts))):
                 self.on_factory_press(channel, ts, user, act)
                 return
             if not aid.startswith("solo_answer_") or aid == "solo_answer_link":
@@ -3234,6 +3235,8 @@ class Daemon(Slack):
         except Exception:  # noqa: BLE001 - never a guess, never a crash: the normal path takes it
             log.exception("factory chat failed")
             return False
+        if is_owner and ev.get("thread_ts") and factory_converse.took(reply):
+            self._factory_answered(ev["thread_ts"], text, sender, typed=True)
         try:
             choice = chat.route(key, sender, reply)
             factory_converse.deliver(reply, key, self._factory_post(channel), choice.get("modality", "structured_text"),
@@ -3241,6 +3244,7 @@ class Daemon(Slack):
             log.info("factory chat: %s -> %s", sender, reply.headline[:100])
         except Exception:  # noqa: BLE001 - the factory already acted: say so in the log, never twice in Slack
             log.warning("factory chat: answered %s but could not post it", sender, exc_info=True)
+            return is_owner   # someone else's question was read-only: let staff_intake have it
         return True
 
     def on_factory_press(self, channel: str, ts: str, user: str, act: dict) -> None:
@@ -3254,7 +3258,8 @@ class Daemon(Slack):
             if reply is None:
                 log.warning("factory button pressed by %s, who may not — ignored", user)
                 return
-            self._factory_answered(ts, value, user, typed=False)
+            if factory_converse.took(reply):
+                self._factory_answered(ts, value, user, typed=False)
             chat.route(key, user, reply)
             factory_converse.deliver(reply, key, self._factory_post(channel), buttons=owner_buttons())
         except Exception:  # noqa: BLE001
@@ -3295,9 +3300,11 @@ class Daemon(Slack):
         reply = None
         try:
             ask = ((self.state.read().get("asks") or {}).get(thread) or {}) if in_thread else {}
-            if in_thread and factory_converse.load_conf() and factory_converse.bound(
-                    factory_converse.thread_key(self.bot_dm, ev["ts"], thread)) and self.on_factory_chat(ev):
-                self._factory_answered(thread, said, self.me, typed=True)  # goes back to its task (factory_converse)
+            chat_on = bool(factory_converse.load_conf())
+            bound = in_thread and chat_on and bool(factory_converse.bound(
+                factory_converse.thread_key(self.bot_dm, ev["ts"], thread)))
+            if bound and self.on_factory_chat(ev):
+                pass   # goes back to its task (factory_converse), and is kept on the note it answers
             elif ask.get("item") and item_path(ask["item"]).exists() and not load_item(ask["item"]).get("answer"):
                 # A typed reply under an ask is its answer — the only way to give one while the
                 # buttons wait for Interactivity, and as good as a press once they are on.
@@ -3352,7 +3359,7 @@ class Daemon(Slack):
                     reply = (f"MODE is set in .env and read at startup, so I can't change it from here. "
                              f"On the machine running me: `solo ssh` then edit MODE={want} and `solo restart`. "
                              f"To stop me right now: `pause`.")
-            elif factory_converse.load_conf() and self.on_factory_chat(ev):
+            elif chat_on and not bound and self.on_factory_chat(ev):
                 pass   # about factory work: answered in the thread by factory_converse
             else:
                 # Not a command: the owner correcting how Solo writes. Keep it verbatim where
