@@ -52,8 +52,8 @@ class FakeFactory:
         self.calls, self.briefs, self.next_id = [], [], "t_eee55555"
 
     def __call__(self, argv, input=None, **kw):
-        args = argv[1:]
-        self.calls.append(args)
+        self.calls.append(argv[1:])
+        args = [a for a in argv[1:] if a != "--"]   # free text goes after "--"; read it the way argparse does
         out = ""
         if args[:2] == ["task", "find"]:
             q = args[-1].lower()
@@ -78,7 +78,7 @@ class FakeFactory:
         return subprocess.CompletedProcess(argv, 0, out, "")
 
     def did(self, *prefix):
-        return [c for c in self.calls if c[:len(prefix)] == list(prefix)]
+        return [c for c in self.calls if [a for a in c if a != "--"][:len(prefix)] == list(prefix)]
 
 
 class FakeJudge:
@@ -197,6 +197,17 @@ jud.say["cancel the search"] = {"factory": True, "verb": "cancel", "task": "t_bb
 _, reply, posts = say("cancel the search ranking task", ts="1700000005.000100")
 reply = press(posts[0], "No")
 check("cancel: No leaves the task alone", not fac.did("task", "cancel", "t_bbb22222") and "Left" in reply.headline)
+n_judge = len(jud.prompts)
+jud.say["cancel the release notes"] = {"factory": True, "verb": "cancel", "task": "t_ccc33333"}
+_, reply, posts = say("cancel the release notes task", ts="1700000005.000200")
+_, reply, _ = say("yes", ts="1700000005.000300", thread_ts="1700000005.000200")
+check("cancel: a typed yes is the confirm, not a new message for the model",
+      fac.did("task", "cancel", "t_ccc33333") and "Cancelled" in reply.headline and len(jud.prompts) == n_judge + 1,
+      (fac.calls[-2:], reply))
+check("cli: free text goes after --, never read as a flag", all("--" in c for c in fac.did("task", "cancel"))
+      and all("--" in c for c in fac.did("task", "find")), fac.did("task", "cancel"))
+check("new task: submitted through staff_intake, with its kind", "--kind" in sub[0], sub)
+check("bound: a thread with turns is the factory's", F.bound(F.thread_key(DM, "1700000005.000200")))
 
 # 5. A thread follow-up: "and the other one?" means the thread's other task.
 jud.say["login things"] = {"factory": True, "verb": "list", "query": "login"}
@@ -244,6 +255,10 @@ jud.say["new report"] = {"factory": True, "verb": "submit", "title": "x"}
 check("non-owner: a new request too", say("new report: export is broken", user=STAFF, ts="1700000016.000100",
                                           channel="DSTAFF")[0] is None)
 
+n_judge = len(jud.prompts)
+check("non-owner with no tasks: no model call at all", say("how is my thing going?", user=OTHER, ts="1700000016.000200",
+                                                          channel="COTHER")[0] is None and len(jud.prompts) == n_judge)
+
 # 8. The learnt channel choice: choice, outcome and correction recorded; the profile changes the next choice.
 ev = C.events(OWNER)
 choices = [e for e in ev if e["type"] == "choice"]
@@ -273,6 +288,11 @@ check("channel: the nightly pass builds a profile in the store", prof.get("by_ro
 again = C.choose(OWNER, kind="update", content="2.4 shipped", urgency=2, model=model)
 check("channel: the learnt profile changes the next choice", again["channel"] == "sms"
       and again["modality"] == "short_text", again)
+seen = []
+only = C.choose(OWNER, kind="update", content="x", available=("slack",),
+                model=lambda p: seen.append(p) or '{"channel": "sms", "modality": "short_text"}')
+check("channel: only what the caller can send on is offered or taken", only["channel"] == "slack"
+      and "Channels: slack." in seen[0], (only, seen[0][:200]))
 check("channel: a model that fails keeps the default", C.choose(OWNER, kind="ask", content="x",
                                                                 model=lambda p: "nonsense")["channel"] == "slack")
 
@@ -283,7 +303,9 @@ import slackctl  # noqa: E402
 
 bot = FakeSlack()
 stub = type("Stub", (), {})()
-stub.__dict__.update(me=OWNER, bot=bot, bot_dm=DM, name_of=lambda u: u, _allowed=lambda *a: True)
+stub.__dict__.update(me=OWNER, bot=bot, bot_dm=DM, name_of=lambda u: u, _allowed=lambda *a: True,
+                     state=slackctl.State())
+stub._factory_answered = lambda *a, **k: D._factory_answered(stub, *a, **k)
 D = slackctl.Daemon
 stub.factory_chat = lambda: D.factory_chat(stub)
 stub._factory_post = lambda ch: D._factory_post(stub, ch)
@@ -297,5 +319,26 @@ check("daemon: an owner message outside the console is not taken", not D.on_fact
     stub, {"user": OWNER, "channel": "CGENERAL", "ts": "1700000021.000100", "text": "how is the login timeout fix going?"}))
 D.on_factory_press(stub, DM, push_ts, OWNER, {"action_id": "solo_answer_1", "value": "Hold"})
 check("daemon: a press on a closed ask is answered, not re-sent", "no longer open" in bot.posts[-1]["text"], bot.posts[-1])
+
+check("daemon: a staff DM to the owner is not answered by the bot, which is not in it", not D.on_factory_chat(
+    stub, {"user": STAFF, "channel": "DSTAFF", "channel_type": "im", "ts": "1700000022.000100",
+           "text": f"<@{OWNER}> how is my login copy request?"}))
+
+# 10. A factory push through deliver_to_owner is an ask record too: the owner's press lands on the item.
+os.environ["NOTE_SHAPER"] = "off"
+console = type("Console", (), {})()
+console.__dict__.update(console=DM, me=OWNER, _ping=lambda t: None, mention_id=lambda h: None,
+                        console_post=lambda text, blocks=None, thread_ts=None: bot.chat_postMessage(DM, text, thread_ts, blocks)["ts"])
+item = {"id": "say-push-1", "factory_task": "t_ccc33333", "origin": "agent:release",
+        "note": {"status": "ask", "headline": "Ship 2.4 now or hold?", "options": ["Ship it", "Hold"]}}
+slackctl.save_item(item)
+ts, _ = slackctl.deliver_to_owner(console, item, "Ship 2.4 now or hold for the docs?")
+asks = slackctl.State().read().get("asks") or {}
+check("push: recorded as an ask and bound to its task", asks.get(ts, {}).get("item") == "say-push-1"
+      and F.thread(F.thread_key(DM, ts)).get("bound") == "t_ccc33333", asks)
+D.on_factory_press(stub, DM, ts, OWNER, {"action_id": "solo_answer_1", "value": "Hold"})
+check("push: the press answered the task and is kept for `solo answer`",
+      fac.did("task", "answer", "t_ccc33333", "Hold") and slackctl.load_item("say-push-1").get("answer", {}).get("choice") == "Hold",
+      slackctl.load_item("say-push-1"))
 
 print(f"\n{passed} passed")

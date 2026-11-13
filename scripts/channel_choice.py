@@ -186,18 +186,24 @@ def profile_text(p: dict) -> str:
 
 def _model(prompt: str, run=subprocess.run) -> str:
     cmd = config.env("CHANNEL_CHOOSER_CMD") or DEFAULT_CHOOSER.format(claude=shlex.quote(config.env("CLAUDE_BIN", "claude")))
-    p = run(shlex.split(cmd), input=prompt, capture_output=True, text=True, timeout=TIMEOUT_S)
+    import staff_intake   # lazily: its reader env (no secrets) is the one place that knows what to strip
+    p = run(shlex.split(cmd), input=prompt, capture_output=True, text=True, timeout=TIMEOUT_S,
+            env=staff_intake.reader_env())
     if p.returncode != 0:
         raise RuntimeError(f"the chooser exited {p.returncode}")
     return p.stdout or ""
 
 
 def choose(person: str, *, kind: str, content: str, urgency: int = 3, action: str = "read it",
-           where: str = "unknown", model=None, default: dict | None = None) -> dict:
+           where: str = "unknown", model=None, default: dict | None = None,
+           available: tuple[str, ...] | None = None) -> dict:
     """{channel, modality, why}. The model decides; the person's profile is its context. When the model
-    cannot answer, the `default` the caller is already in (a Slack thread, say) stands — never a table."""
+    cannot answer, the `default` the caller is already in (a Slack thread, say) stands — never a table.
+    `available` is the channels the caller can actually send on: the model chooses among those only, so
+    what is recorded as chosen is what went out."""
+    channels = tuple(c for c in (available or CHANNELS) if c in CHANNELS) or CHANNELS
     fallback = dict(default or {"channel": "slack", "modality": "structured_text"}, why="the chooser did not answer")
-    prompt = PROMPT.format(person=person, channels=", ".join(CHANNELS), modalities=", ".join(MODALITIES),
+    prompt = PROMPT.format(person=person, channels=", ".join(channels), modalities=", ".join(MODALITIES),
                            kind=kind, urgency=urgency, action=action, where=where,
                            content=" ".join(content.split())[:400], profile=profile_text(profile(person)))
     try:
@@ -206,7 +212,7 @@ def choose(person: str, *, kind: str, content: str, urgency: int = 3, action: st
         v = json.loads(m.group(0)) if m else {}
     except (RuntimeError, ValueError, OSError, subprocess.SubprocessError):
         return fallback
-    if not isinstance(v, dict) or v.get("channel") not in CHANNELS or v.get("modality") not in MODALITIES:
+    if not isinstance(v, dict) or v.get("channel") not in channels or v.get("modality") not in MODALITIES:
         return fallback
     return {"channel": v["channel"], "modality": v["modality"], "why": str(v.get("why") or "")[:200]}
 
