@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **The writer leases its Claude account from the factory pool.** The owner, 17 Nov: Solo was out of
+  credits and sent nothing, though the mini's `apiKeyHelper` had been fixed. An env token
+  (ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN) outranks `apiKeyHelper` and `writer_env` kept it, and
+  the helper caches one account for five minutes. Now each writer run and each `solo ask` takes
+  `cluster pool lease solo-reply --reserved` (week-full, 5h-full and cooling accounts are skipped), passes
+  that account as `--settings` apiKeyHelper with the env tokens dropped, and on a 429 releases it
+  `limit_hit` and tries the next one. `writer_auth.py`; `WRITER_POOL=off` keeps the old behaviour.
+- **A 429 is its own health class.** `rate_limited` raises the "Solo cannot draft" alert naming the
+  fix, with no rerun on the same login. `solo doctor` prints which auth the writer bills.
 - **Factory chat in Slack.** A model reads the owner's DMs to Solo (and other people's DMs or mentions)
   and, when one is about factory work, runs it. It can show a status, list tasks, say what was released,
   show the waiting asks, start a new task, answer an ask, instruct a task, or cancel one. It uses

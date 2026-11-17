@@ -48,6 +48,7 @@ ENV = {
     "HOME": str(HOME), "AUTOREPLY_HOME": str(STATE), "REPLY_DELAY_MIN": "0", "REPLY_DELAY_MAX": "0", "OBSERVE_HOURS": "0",
     "CLAUDE_BIN": str(FAKE_CLAUDE), "CONTEXT_DIRS": str(HOME / "proj"), "MODE": "learn", "LOG_LEVEL": "WARNING",
     "NOTE_SHAPER": "off",  # the fake claude would answer a shaping prompt by acting
+    "WRITER_POOL": "off",  # this host may have the cluster CLI: never lease a real account from a test
 }
 for k in ("SLACK_USER_TOKEN", "SLACK_APP_TOKEN", "ANTHROPIC_API_KEY", "TYPESAFE_API_KEY"):
     os.environ.pop(k, None)
@@ -2310,7 +2311,8 @@ try:
 
     # the classes, as data: every one names a fix, and the blocking ones are found before a model call
     check("every failure class names its fix and its heal",
-          set(S.WRITER_FAILURES) == {"plugin_missing", "logged_out", "credential_expiring", "nonzero_exit", "empty_result"}
+          set(S.WRITER_FAILURES) == {"plugin_missing", "logged_out", "credential_expiring", "nonzero_exit", "empty_result",
+                                      "rate_limited"}
           and all(v["fix"] and "heal" in v and "blocks" in v for v in S.WRITER_FAILURES.values()))
     _missing = {"type": "result", "subtype": "success", "is_error": False,
                 "result": "/solo:slack-autoreply isn't available in this session"}
@@ -2319,7 +2321,15 @@ try:
     check("logged_out", S.classify_run(DOWN, "") == "logged_out")
     check("nonzero_exit: no result and an exit code, or an is_error result",
           S.classify_run(None, "exit 1: boom") == "nonzero_exit"
-          and S.classify_run({"type": "result", "is_error": True, "result": "You've hit your weekly limit"}, "") == "nonzero_exit")
+          and S.classify_run({"type": "result", "is_error": True, "result": "API Error: 500"}, "") == "nonzero_exit")
+    # 17 Nov: every compose came back 429 and the alert said only "nonzero exit". A rate limit is
+    # its own class, with no heal (a rerun on the same login waits again) and a fix naming the pool.
+    check("rate_limited: a usage limit or a 429, from the result or from stderr",
+          S.classify_run({"type": "result", "is_error": True, "result": "You've hit your weekly limit"}, "") == "rate_limited"
+          and S.classify_run(None, 'exit 1: API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}') == "rate_limited"
+          and S.WRITER_FAILURES["rate_limited"]["heal"] is None and "pool" in S.WRITER_FAILURES["rate_limited"]["fix"])
+    check("…but a draft that mentions a usage limit, and used tools, is not one",
+          S.classify_run({"type": "result", "is_error": False, "result": "their API has a usage limit"}, "", ["Bash"], None) is None)
     check("empty_result: no result and nothing said, or success with no tools and no decision",
           S.classify_run(None, "") == "empty_result" and S.classify_run(UP, "", [], False) == "empty_result")
     check("a run that decided is not a failure", S.classify_run(UP, "", ["Bash"], True) is None)
@@ -2458,7 +2468,7 @@ try:
     check("logged_out: no model call, no heal attempt", not _calls("-p") and not _calls("plugin"))
     check("…one alert naming /login", len(_wn) == 2 and "cannot draft" in _wn[0] and "claude /login" in _wn[0], str(_wn))
 
-    # nonzero_exit: one fresh rerun, never a loop
+    # rate_limited: no rerun on the same login (the pool already failed over), one alert naming the fix
     _writer_case()
     d.state.update(lambda x: x.update(health={"ok": True}))
     _lim2 = TMP / "limit2"; _lim2.write_text("x"); os.environ["FAKE_LIMIT"] = str(_lim2)
@@ -2466,8 +2476,10 @@ try:
         _wn.clear(); _it = _compose_item(); d.handle_with_claude(dict(_it))
     finally:
         os.environ.pop("FAKE_LIMIT"); _lim2.unlink()
-    check("nonzero_exit: exactly one rerun, then it stops", len(_calls("-p")) == 2, str(_calls("-p")))
-    check("…and the writer is marked down once", len([n for n in _wn if "cannot draft" in n]) == 1, str(_wn))
+    check("rate_limited: no rerun on the same login", len(_calls("-p")) == 1, str(_calls("-p")))
+    check("…and the writer is marked down once, the alert naming the pool and the env token",
+          len([n for n in _wn if "cannot draft" in n]) == 1
+          and any("CLAUDE_CODE_OAUTH_TOKEN" in n and "cluster pool list" in n for n in _wn), str(_wn))
     d.state.update(lambda x: x.update(health={"ok": True}))
 
     # empty_result: a success that did nothing gets one fresh rerun
