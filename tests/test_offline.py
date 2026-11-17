@@ -35,7 +35,8 @@ if [ "$1 $2" = "plugin list" ]; then [ -f "${{FAKE_PLUGINS_FILE:-/nonexistent}}"
 if [ "$1 $2" = "plugin enable" ] || [ "$1 $2" = "plugin install" ]; then [ -f "${{FAKE_HEAL_TO:-/nonexistent}}" ] && cp "$FAKE_HEAL_TO" "$FAKE_PLUGINS_FILE"; exit 0; fi
 if [ "$1" = "-p" ] && [ -f "${{FAKE_PLUGINS_FILE:-/nonexistent}}" ] && ! grep -q '"enabled": true' "$FAKE_PLUGINS_FILE"; then echo '{{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0,"result":"/solo:slack-autoreply isn'"'"'t available in this session"}}'; exit 0; fi
 if [ -n "${{FAKE_FAIL_RESUME:-}}" ] && printf '%s ' "$@" | grep -q -- '--resume'; then echo "No conversation found" >&2; exit 1; fi
-if [ -f "${{FAKE_LIMIT:-/nonexistent}}" ]; then echo '{{"type":"result","subtype":"success","is_error":true,"num_turns":1,"total_cost_usd":0,"terminal_reason":"api_error","result":"You'"'"'ve hit your weekly limit · resets 12pm (America/Los_Angeles)"}}'; exit 1; fi
+if [ -f "${{FAKE_500:-/nonexistent}}" ]; then echo '{{"type":"result","subtype":"success","is_error":true,"num_turns":1,"total_cost_usd":0,"result":"API Error: 500 Internal server error"}}'; exit 1; fi
+if [ -f "${{FAKE_LIMIT:-/nonexistent}}" ] && ! {{ [ -n "${{FAKE_LIMIT_SPARE:-}}" ] && printf '%s ' "$@" | grep -q -- "$FAKE_LIMIT_SPARE"; }}; then echo '{{"type":"result","subtype":"success","is_error":true,"num_turns":1,"total_cost_usd":0,"terminal_reason":"api_error","result":"You'"'"'ve hit your weekly limit · resets 12pm (America/Los_Angeles)"}}'; exit 1; fi
 if [ -f "${{FAKE_SKIP_ONCE:-/nonexistent}}" ]; then rm -f "$FAKE_SKIP_ONCE"; printf '%s\\n' "$@" > "$FAKE_SKIP_ONCE.argv"; echo '{{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.0,"result":"nothing to do"}}'; exit 0; fi
 {sys.executable} {SCRIPTS}/slackctl.py act "$item" --action reply --text "yep, latest one is in Drive: https://x.io/deck\\nping me if the link doesn't open" --sources drive >/dev/null
 echo '{{"type":"system","subtype":"init","mcp_servers":[{{"name":"drive","status":"connected"}}]}}'
@@ -2480,6 +2481,50 @@ try:
     check("…and the writer is marked down once, the alert naming the pool and the env token",
           len([n for n in _wn if "cannot draft" in n]) == 1
           and any("CLAUDE_CODE_OAUTH_TOKEN" in n and "cluster pool list" in n for n in _wn), str(_wn))
+    d.state.update(lambda x: x.update(health={"ok": True}))
+
+    # nonzero_exit: one fresh rerun, then it stops
+    _writer_case()
+    _e500 = TMP / "e500"; _e500.write_text("x"); os.environ["FAKE_500"] = str(_e500)
+    try:
+        _it = _compose_item(); _t, _r, _e, _cls = S.compose(_it, d.state)
+    finally:
+        os.environ.pop("FAKE_500"); _e500.unlink()
+    check("nonzero_exit: exactly one rerun, then it stops", _cls == "nonzero_exit" and len(_calls("-p")) == 2,
+          f"{_cls} {_calls('-p')}")
+    d.state.update(lambda x: x.update(health={"ok": True}))
+
+    # The pool: a rate-limited account is released limit_hit and the draft runs on the next one
+    _pool_log = TMP / "pool-calls.jsonl"; _pool_n = TMP / "pool-next"
+    _fake_cluster = TMP / "fakecluster"
+    _fake_cluster.write_text(f"""#!{sys.executable}
+import json, os, sys
+a = sys.argv[1:]
+open({str(_pool_log)!r}, "a").write(json.dumps(a) + "\\n")
+if a[:2] == ["pool", "lease"]:
+    n = int(open({str(_pool_n)!r}).read()) if os.path.exists({str(_pool_n)!r}) else 1
+    open({str(_pool_n)!r}, "w").write(str(n + 1))
+    s = json.dumps({{"apiKeyHelper": f"cat /pool/pool-{{n}}/token"}})
+    print(json.dumps({{"label": f"pool-{{n}}", "lease_id": f"L{{n}}", "cli_args": ["--settings", s]}}))
+""")
+    _fake_cluster.chmod(0o755)
+    _writer_case()
+    _lim3 = TMP / "limit3"; _lim3.write_text("x")
+    os.environ.update(FAKE_LIMIT=str(_lim3), FAKE_LIMIT_SPARE="pool-2", WRITER_POOL="on",
+                      CLUSTER_BIN=str(_fake_cluster), CLAUDE_CODE_OAUTH_TOKEN="pinned")
+    try:
+        _it = _compose_item(); _t, _r, _e, _cls = S.compose(_it, d.state)
+    finally:
+        for _k in ("FAKE_LIMIT", "FAKE_LIMIT_SPARE", "CLUSTER_BIN", "CLAUDE_CODE_OAUTH_TOKEN"):
+            os.environ.pop(_k)
+        os.environ["WRITER_POOL"] = "off"; _lim3.unlink()
+    _p = _calls("-p")
+    _rel = [json.loads(l)[2:4] for l in _pool_log.read_text().splitlines() if '"release"' in l]
+    check("pool: a 429 on one account, the draft goes out on the next", _cls is None
+          and S.load_item(_it["id"]).get("decision") and len(_p) == 2, f"{_cls} {_p}")
+    check("…each run carries its account's apiKeyHelper, the second in a fresh session",
+          "pool-1/token" in _p[0] and "pool-2/token" in _p[1] and "--session-id" in _p[1])
+    check("…the full account goes back limit_hit, the good one ok", _rel == [["L1", "limit_hit"], ["L2", "ok"]], str(_rel))
     d.state.update(lambda x: x.update(health={"ok": True}))
 
     # empty_result: a success that did nothing gets one fresh rerun

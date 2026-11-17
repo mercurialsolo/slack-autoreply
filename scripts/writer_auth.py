@@ -49,8 +49,10 @@ HOLDER = "solo-reply"   # the pool's name for Solo's reply seats; `--reserved` l
 OVERRIDING_TOKENS = ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 
 # What a refused request looks like, from the API and from Claude Code's own wording.
-RATE_LIMIT_RE = re.compile(r"\b429\b|rate_limit_error|rate.limited|usage limit|hit your (?:\w+ )?limit|"
-                           r"extra usage is required", re.I)
+# Anchored to the error's own shape, so a draft that mentions "invoice 429" or a customer's API
+# being "rate limited" does not put a healthy account into cooldown.
+RATE_LIMIT_RE = re.compile(r"API Error:? 429|\(429\)|429 Too Many Requests|rate_limit_error|usage limit|"
+                           r"hit your (?:\w+ )?limit|extra usage is required", re.I)
 
 _local = threading.local()
 
@@ -122,6 +124,9 @@ def lease(minutes: int) -> Lease | None:
         helper = json.loads(args[args.index("--settings") + 1]).get("apiKeyHelper") if "--settings" in args else None
     except (ValueError, IndexError, AttributeError, TypeError):
         log.warning("writer pool: unreadable lease: %s", (p.stdout or "")[:200])
+        m = re.search(r'"lease_id"\s*:\s*"([^"]+)"', p.stdout or "")
+        if m:   # taken but unusable: hand it back rather than hold a reserved seat for nothing
+            release(Lease("?", m.group(1), ""), "failed", "unreadable lease output")
         return None
     if not r.get("lease_id"):
         return None
@@ -202,6 +207,8 @@ def run_leased(run: Callable[[], T], said: Callable[[T], str], minutes: int,
 def auth_source(env: dict | None = None) -> str:
     """Which credential a plain `claude -p` under `env` would use, for `solo doctor`. Never the value."""
     env = os.environ if env is None else env
+    if env.get("ANTHROPIC_API_KEY") and env.get("ANTHROPIC_AUTH_TOKEN"):
+        return "ANTHROPIC_AUTH_TOKEN from the environment (outranks the ANTHROPIC_API_KEY that DISPATCH_USE_API_KEY keeps)"
     if env.get("ANTHROPIC_API_KEY"):
         return "ANTHROPIC_API_KEY (DISPATCH_USE_API_KEY: billed to the API, no pool lease)"
     if enabled():

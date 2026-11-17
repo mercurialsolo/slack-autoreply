@@ -1905,8 +1905,11 @@ def writer_logged_in() -> tuple[bool, str]:
     file would have called a working machine broken. `auth status` said `authMethod: none` on the
     node while it was down and `loggedIn: true` once it was back.
 
-    It cannot see a rate limit, only the login. That is what the paid probe is for.
+    It cannot see a rate limit, only the login. That is what the paid probe is for. Under the
+    factory pool the host's own login is not what a draft runs on, so it is not checked.
     """
+    if writer_auth.enabled() and not CFG["dispatch_use_api_key"]:
+        return True, ""
     try:
         p = subprocess.run([CFG["claude_bin"], "auth", "status"], capture_output=True, text=True, timeout=30,
                            env=writer_env(), stdin=subprocess.DEVNULL)
@@ -2275,15 +2278,16 @@ def _run_claude_leased(item: dict, session: tuple[str, bool], prompt: str | None
     A rate-limited run leaves its prompt in the session with nothing after it, so the next account
     starts a fresh session (see `_run_claude_in_session`). Never once the writer has decided."""
     cur = [session]
+    runs = [0]
 
     def run():
+        if runs[0]:
+            cur[0] = (str(uuid.uuid4()), False)
+        runs[0] += 1
         return _run_claude_once(item, cur[0], prompt)
 
     def may_retry(_out) -> bool:
-        if _decided(item):
-            return False
-        cur[0] = (str(uuid.uuid4()), False)
-        return True
+        return not _decided(item)
 
     if CFG["dispatch_use_api_key"]:   # billed to the API key on purpose: no lease
         return (session, *_run_claude_once(item, session, prompt))
@@ -3793,7 +3797,8 @@ class Daemon(Slack):
             ok = cls is None
             self.state.update(lambda d: d.update(health={**(d.get("health") or {}), "last_liveness": now_iso()}))
             if ok and paid_due:
-                _, result, err = _run_claude_once({"id": "PROBE"}, (str(uuid.uuid4()), False), prompt=PROBE_PROMPT)
+                # Under a pool lease like a real draft, so it tests the account a draft would get.
+                _, _, result, err = _run_claude_leased({"id": "PROBE"}, (str(uuid.uuid4()), False), PROBE_PROMPT)
                 ok, why = writer_healthy(result, err)
                 cls = None if ok else classify_run(result, err)
                 self.credential_watch(result)
@@ -4519,6 +4524,13 @@ def cmd_where(a):
 
 
 
+def ask_said(p: subprocess.CompletedProcess) -> str:
+    """What `ask` said, when it may be a rate limit: a failed run, or a one-line answer (a usage
+    limit can come back with exit 0). A real answer is longer, and is not searched for one."""
+    out = (p.stdout or "").strip()
+    return f"{out} {p.stderr or ''}" if p.returncode != 0 else (out if len(out) < 200 and "\n" not in out else "")
+
+
 def cmd_ask(a):
     """An agent asks a question about Slack and gets an answer back on stdout.
 
@@ -4554,7 +4566,7 @@ def cmd_ask(a):
 
     try:
         r = (run() if CFG["dispatch_use_api_key"] else writer_auth.run_leased(
-            run, lambda p: f"{p.stdout or ''} {p.stderr or ''}" if p.returncode != 0 else "", lease_minutes()))
+            run, ask_said, lease_minutes()))
     except subprocess.TimeoutExpired:
         sys.exit(f"timed out after {CFG['claude_timeout']}s")
     out = (r.stdout or "").strip()

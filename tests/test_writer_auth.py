@@ -96,6 +96,15 @@ reset(mode="notoken")
 check("an account with no token file is handed straight back",
       W.lease(5) is None and calls("release") and calls("release")[0][2:] == ["L-pool-1", "ok"])
 
+reset()
+real = W._cluster
+W._cluster = lambda *a: (W.subprocess.CompletedProcess(a, 0, 'garbled {"lease_id": "L-x", oops', "")
+                         if a[0] == "lease" else real(*a))
+got = W.lease(5)
+W._cluster = real
+check("a lease that cannot be read is handed back, not held", got is None
+      and [c[2:4] for c in calls("release")] == [["L-x", "failed"]])
+
 # --- apply -------------------------------------------------------------------------------------
 reset()
 env = {"PATH": "/bin", "CLAUDE_CODE_OAUTH_TOKEN": "x", "ANTHROPIC_AUTH_TOKEN": "y", "ANTHROPIC_API_KEY": "z"}
@@ -155,9 +164,10 @@ check("a run that raises still hands its lease back", raised and calls("release"
 
 # --- rate limit wording ------------------------------------------------------------------------
 for text in (LIMIT, "Claude AI usage limit reached|1763400000", "You've hit your limit · resets 3pm",
-             "Extra usage is required to continue", "rate limited"):
+             "Extra usage is required to continue", "429 Too Many Requests"):
     check(f"a rate limit: {text[:40]}", W.is_rate_limited(text))
-for text in ("API Error: 500 overloaded", "Sent the draft to #general", "", "4290 messages"):
+for text in ("API Error: 500 overloaded", "Sent the draft to #general", "", "4290 messages",
+             "paid invoice 429 today", "their API is rate limited"):
     check(f"not a rate limit: {text[:40]!r}", not W.is_rate_limited(text))
 
 # --- auth_source -------------------------------------------------------------------------------
@@ -169,7 +179,9 @@ os.environ["WRITER_POOL"] = "off"
 check("doctor: with the pool off, an env token is named as the one fixed account",
       "ANTHROPIC_AUTH_TOKEN" in W.auth_source({"ANTHROPIC_AUTH_TOKEN": "t"})
       and "one fixed account" in W.auth_source({"CLAUDE_CODE_OAUTH_TOKEN": "t"}))
-check("doctor: the API key wins over everything", W.auth_source({"ANTHROPIC_API_KEY": "k"}).startswith("ANTHROPIC_API_KEY"))
+check("doctor: ANTHROPIC_AUTH_TOKEN outranks the API key DISPATCH_USE_API_KEY keeps",
+      W.auth_source({"ANTHROPIC_API_KEY": "k", "ANTHROPIC_AUTH_TOKEN": "t"}).startswith("ANTHROPIC_AUTH_TOKEN"))
+check("doctor: the API key alone is the API key", W.auth_source({"ANTHROPIC_API_KEY": "k"}).startswith("ANTHROPIC_API_KEY"))
 check("doctor: nothing in the env is the settings/login", "settings" in W.auth_source({}))
 
 shutil.rmtree(TMP, ignore_errors=True)
