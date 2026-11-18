@@ -158,9 +158,24 @@ def check_claude(r: Report):
     if os.environ.get("CLAUDE_CONFIG_DIR") and not CFG["writer_config_dir"]:
         r.add(WARN, f"CLAUDE_CONFIG_DIR={os.environ['CLAUDE_CONFIG_DIR']} is set in this shell",
               f"the daemon drops it and runs the writer under {slackctl.writer_config_dir()}; set WRITER_CLAUDE_CONFIG_DIR to pin another")
+    # Which account the writer bills. An env token outranks apiKeyHelper, so one left in .env pins a
+    # single account and the pool helper never runs (the 17 Nov 429s). Under a pool lease it is dropped.
+    import writer_auth
+    src = writer_auth.auth_source(env)
+    pinned = [k for k in writer_auth.OVERRIDING_TOKENS if env.get(k)]
+    if pinned and (not writer_auth.enabled() or env.get("ANTHROPIC_API_KEY")):
+        r.add(WARN, f"writer auth: {src}",
+              f"{', '.join(pinned)} pins one account; remove it from ~/.slack-autoreply/.env and the service env "
+              "unless that is the account you mean the writer to use")
+    else:
+        r.add(OK, f"writer auth: {src}")
+    def pong():
+        # Leased like the writer's runs, so doctor tests the account the writer would get.
+        cmd, penv = writer_auth.apply([path, "-p", "reply with exactly: pong", "--output-format", "json",
+                                       "--max-turns", "1"], env)
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=90, env=penv, cwd=str(config.STATE_DIR))
     try:
-        p = subprocess.run([path, "-p", "reply with exactly: pong", "--output-format", "json", "--max-turns", "1"],
-                           capture_output=True, text=True, timeout=90, env=env, cwd=str(config.STATE_DIR))
+        p = writer_auth.run_leased(pong, lambda q: f"{q.stdout}\n{q.stderr}", 3)
         out = p.stdout.strip()
         res = None
         try:

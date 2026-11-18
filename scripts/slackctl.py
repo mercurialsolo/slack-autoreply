@@ -49,6 +49,7 @@ import recall  # noqa: E402
 import staff_intake  # noqa: E402
 import factory_converse  # noqa: E402
 import voice  # noqa: E402
+import writer_auth  # noqa: E402
 from config import CFG, DELEGATE_REACTIONS, DROP_REACTIONS, OK_SUBTYPES, SEND_REACTIONS  # noqa: E402
 from followups import Followup, Followups, hold_deadline  # noqa: E402
 from learning import Ledger, is_bare_hold  # noqa: E402
@@ -1866,6 +1867,7 @@ def claude_command(item: dict, session: tuple[str, bool] | None = None, prompt: 
     env["AUTOREPLY_HOME"] = str(config.STATE_DIR)
     if item.get("sealed"):
         env["AUTOREPLY_SEALED"] = "1"
+    cmd, env = writer_auth.apply(cmd, env)   # a pool lease, when this thread holds one
     return cmd, env, cwd
 
 
@@ -1903,8 +1905,11 @@ def writer_logged_in() -> tuple[bool, str]:
     file would have called a working machine broken. `auth status` said `authMethod: none` on the
     node while it was down and `loggedIn: true` once it was back.
 
-    It cannot see a rate limit, only the login. That is what the paid probe is for.
+    It cannot see a rate limit, only the login. That is what the paid probe is for. Under the
+    factory pool the host's own login is not what a draft runs on, so it is not checked.
     """
+    if writer_auth.enabled() and not CFG["dispatch_use_api_key"]:
+        return True, ""
     try:
         p = subprocess.run([CFG["claude_bin"], "auth", "status"], capture_output=True, text=True, timeout=30,
                            env=writer_env(), stdin=subprocess.DEVNULL)
@@ -1994,6 +1999,15 @@ WRITER_FAILURES = {
         "heal": "fresh_session", "blocks": False,
         "fix": "the writer ran but never reached slackctl; `solo doctor` checks the plugin and its allow-list",
     },
+    # A 429 / usage limit. No heal here: `writer_auth.run_leased` already moved through the pool's
+    # accounts, and a rerun on the same login only spends the wait again.
+    "rate_limited": {
+        "heal": None, "blocks": False,
+        "fix": ("the writer's Claude account is out of credits. `solo doctor` names the auth it runs on: an "
+                "ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN in ~/.slack-autoreply/.env or the launchd env "
+                "pins one account and bypasses the pool, so remove it; otherwise `cluster pool list` shows "
+                "whether any pooled account has room"),
+    },
 }
 
 PLUGIN_MISSING_RE = re.compile(r"isn't available in this session|is not available in this session|"
@@ -2020,6 +2034,8 @@ def classify_run(result: dict | None, err: str = "", tools: list | None = None, 
             return "plugin_missing"
         if LOGGED_OUT_RE.search(said):
             return "logged_out"
+        if writer_auth.is_rate_limited(said):
+            return "rate_limited"
     if result is None:
         return "nonzero_exit" if (err or "").startswith(("exit ", "timeout", "claude binary not found")) else "empty_result"
     if result.get("is_error"):
@@ -2193,12 +2209,11 @@ def run_claude(item: dict, state: "State | None" = None, prompt: str | None = No
 
 def _run_claude_in_session(item: dict, state: "State", prompt: str | None, fresh: bool) -> tuple[list[str], dict | None, str]:
     session = (str(uuid.uuid4()), False) if fresh else pick_session(item, state)
-    tools, result, err = _run_claude_once(item, session, prompt)
+    session, tools, result, err = _run_claude_leased(item, session, prompt)
     if result is None and session[1] and not err.startswith("timeout") and not _decided(item):
         # Not after a timeout, or once the writer has decided: that run may have acted.
         log.warning("resume of session %s failed (%s) — starting a fresh one", session[0][:8], err[:120])
-        session = (str(uuid.uuid4()), False)
-        tools, result, err = _run_claude_once(item, session, prompt)
+        session, tools, result, err = _run_claude_leased(item, (str(uuid.uuid4()), False), prompt)
     key = session_key(item)
     answered = item_path(item["id"]).exists() and bool(load_item(item["id"]).get("decision"))
     if not answered:
@@ -2243,6 +2258,41 @@ def run_said(result: dict | None, err: str) -> str:
     """One line of what a run returned: the result text if any, else stderr, else its subtype."""
     text = ((result or {}).get("result") or "").strip().replace("\n", " ")
     return (text or err.strip() or (result or {}).get("subtype") or "no output")[:300]
+
+
+def lease_minutes() -> int:
+    """How long a writer's pool lease is held: the longest one run can take, plus slack."""
+    return CFG["claude_timeout"] // 60 + 2
+
+
+def bare_run_said(result: dict | None, err: str, tools: list | None) -> str:
+    """What a run said, when it failed the way a rate limit fails (no result, an error, no tools).
+
+    Empty for a run that worked, so a draft that talks about a "usage limit" is not a 429."""
+    return run_said(result, err) if result is None or result.get("is_error") or not tools else ""
+
+
+def _run_claude_leased(item: dict, session: tuple[str, bool], prompt: str | None) -> tuple[tuple[str, bool], list[str], dict | None, str]:
+    """`_run_claude_once` under a pool lease (writer_auth), on the next account after a 429.
+
+    A rate-limited run leaves its prompt in the session with nothing after it, so the next account
+    starts a fresh session (see `_run_claude_in_session`). Never once the writer has decided."""
+    cur = [session]
+    runs = [0]
+
+    def run():
+        if runs[0]:
+            cur[0] = (str(uuid.uuid4()), False)
+        runs[0] += 1
+        return _run_claude_once(item, cur[0], prompt)
+
+    def may_retry(_out) -> bool:
+        return not _decided(item)
+
+    if CFG["dispatch_use_api_key"]:   # billed to the API key on purpose: no lease
+        return (session, *_run_claude_once(item, session, prompt))
+    tools, result, err = writer_auth.run_leased(run, lambda o: bare_run_said(o[1], o[2], o[0]), lease_minutes(), may_retry)
+    return cur[0], tools, result, err
 
 
 def _run_claude_once(item: dict, session: tuple[str, bool], prompt: str | None = None) -> tuple[list[str], dict | None, str]:
@@ -3747,7 +3797,8 @@ class Daemon(Slack):
             ok = cls is None
             self.state.update(lambda d: d.update(health={**(d.get("health") or {}), "last_liveness": now_iso()}))
             if ok and paid_due:
-                _, result, err = _run_claude_once({"id": "PROBE"}, (str(uuid.uuid4()), False), prompt=PROBE_PROMPT)
+                # Under a pool lease like a real draft, so it tests the account a draft would get.
+                _, _, result, err = _run_claude_leased({"id": "PROBE"}, (str(uuid.uuid4()), False), PROBE_PROMPT)
                 ok, why = writer_healthy(result, err)
                 cls = None if ok else classify_run(result, err)
                 self.credential_watch(result)
@@ -4473,6 +4524,13 @@ def cmd_where(a):
 
 
 
+def ask_said(p: subprocess.CompletedProcess) -> str:
+    """What `ask` said, when it may be a rate limit: a failed run, or a one-line answer (a usage
+    limit can come back with exit 0). A real answer is longer, and is not searched for one."""
+    out = (p.stdout or "").strip()
+    return f"{out} {p.stderr or ''}" if p.returncode != 0 else (out if len(out) < 200 and "\n" not in out else "")
+
+
 def cmd_ask(a):
     """An agent asks a question about Slack and gets an answer back on stdout.
 
@@ -4498,11 +4556,17 @@ def cmd_ask(a):
     env = writer_env()
     env["AUTOREPLY_DISPATCH"] = "1"
     env["AUTOREPLY_HOME"] = str(config.STATE_DIR)
-    try:
+
+    def run():
+        c, e = writer_auth.apply(cmd, env)   # the pool lease `run_leased` holds, if any
         # stdin must be closed, not inherited: `claude -p` waits on it and then runs with a
         # degraded context in which the allowlist does not take, so every Bash call is denied.
-        r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True,
-                           stdin=subprocess.DEVNULL, timeout=CFG["claude_timeout"])
+        return subprocess.run(c, cwd=cwd, env=e, capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=CFG["claude_timeout"])
+
+    try:
+        r = (run() if CFG["dispatch_use_api_key"] else writer_auth.run_leased(
+            run, ask_said, lease_minutes()))
     except subprocess.TimeoutExpired:
         sys.exit(f"timed out after {CFG['claude_timeout']}s")
     out = (r.stdout or "").strip()
