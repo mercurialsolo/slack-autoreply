@@ -442,7 +442,7 @@ KEY_HEALTH = ("Box memory high: 53% of 63 GB used, swap 76%. Nothing was stopped
               "- VMs running (3): agentvm, hillsboro, helsinki")
 _kh = N.from_text(KEY_HEALTH, "key-health")
 golden("key-health memory note, no model: the note says the state", KEY_HEALTH,
-       "📨 Box memory high: 53% of 63 GB used, swap 76%.\n*Nothing* was stopped.\n_from key-health · details in the thread_",
+       "ℹ️ Box memory high: 53% of 63 GB used, swap 76%.\n*Nothing* was stopped.\n_from key-health · details in the thread_",
        sender="key-health")
 check("…its thread has only the lists the note left out, no sentence of the note again",
       _kh.details == KEY_HEALTH.split("\n", 1)[1] and "Box memory" not in _kh.details and "stopped" not in _kh.details, repr(_kh.details))

@@ -94,13 +94,13 @@ TRUNCATED_QUOTE_RE = re.compile(r"[\"“][^\"”\n]*(?:\.\.\.|…)[\"”]")
 ELLIPSIS_RE = re.compile(r"\s*(?:\.\.\.|…)")
 # Any leading pictograph (the factory starts its headlines with its own ✅ / 🔴 / ❓), once or twice:
 # the renderer adds exactly one icon of its own.
-EMOJI = "[\u2190-\u21ff\u2300-\u27bf\u2b00-\u2bff\U0001F000-\U0001FAFF]"
+EMOJI = "[\u2139\u2190-\u21ff\u2300-\u27bf\u2b00-\u2bff\U0001F000-\U0001FAFF]"
 ICON_RE = re.compile(r"^\s*(?:" + EMOJI + r"[\ufe0f\u200d]*\s*)+")
 # A status word the factory writes before its headline ("Done: …", "Needs your answer: …"): the icon
 # already says it. Taken off once, at the start only.
-STATUS_LABEL_RE = re.compile(r"^\s*(?:done|failed|failure|blocked|held|on hold|shipped|shipping|live|warning|"
+STATUS_LABEL_RE = re.compile(r"^\s*[*_~]*(?:done|failed|failure|blocked|held|on hold|shipped|shipping|live|warning|"
                              r"needs (?:your|an) (?:answer|call|decision|ok)|needs you|question|ask|fyi|info|cancelled|canceled|fix held)"
-                             r"(?: on [\w.-]+)?\s*[:\-–—]\s+", re.I)  # "Done on mini: …" (the factory's notify)
+                             r"(?: on [\w.-]+)?[*_~]*\s*[:\-–—][*_~]*\s+", re.I)  # "Done on mini: …" (the factory's notify), "*Done:*"
 # Labels a machine puts before a value ("Changelog: <url>", "Operator (budget): …"): the value is
 # what the owner reads.
 LABEL_RE = re.compile(r"^\s*(?:needs an answer(?: on [\w-]+)?|operator(?:\s*\([^)]*\))?|budget|burn(?: so far)?|"
