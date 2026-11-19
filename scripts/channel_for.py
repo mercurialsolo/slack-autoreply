@@ -20,7 +20,7 @@ import re
 
 OWNER = "**For:**"
 DRAFT = "**For (draft):**"
-_MARK = re.compile(r"\s*<!--\s*solo-draft:([0-9a-f]{8})\s*-->\s*$")
+_MARK = re.compile(r"\s*<!--\s*solo-draft:([0-9a-f]{8})\s*-->")
 
 
 def _sig(text: str) -> str:
@@ -31,12 +31,13 @@ def read(lines: list[str]) -> tuple[str, str]:
     """('owner' | 'draft' | '', text) for a dossier's lines. '' is a blank or missing line."""
     for l in lines:
         if l.startswith(OWNER):
-            text = l[len(OWNER):].strip()
+            # An owner who dropped "(draft)" may have left Solo's marker behind; it is not theirs.
+            text = _MARK.sub("", l[len(OWNER):]).strip()
             return ("owner", text) if text else ("", "")
         if l.startswith(DRAFT):
             rest = l[len(DRAFT):]
             m = _MARK.search(rest)
-            text = _MARK.sub("", rest).strip()
+            text = " ".join(_MARK.sub(" ", rest).split())
             if not text:
                 return "", ""
             # Edited text (or a removed marker) means the owner touched it, so it is theirs.
@@ -61,7 +62,7 @@ def draft(terms: list[str], recent: list[str]) -> str:
 
 
 def draft_line(text: str) -> str:
-    text = _plain(text, 220)
+    """The marked line for a `draft()` result."""
     return f"{DRAFT} {text} <!-- solo-draft:{_sig(text)} -->"
 
 
