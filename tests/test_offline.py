@@ -2373,12 +2373,13 @@ try:
 
     # …and the message is kept, not dropped: no per-message "Couldn't handle", retried once a limit lifts
     _hist_D = d.client.history.pop(D, None)   # earlier tests' owner messages would stand these down
+    d.recent.pop(D, None)   # earlier tests' sends to D would hold these back at max_per_hour
     _kept = S.load_item(_it["id"])
     check("rate_limited: the message is kept for retry, not failed",
           _kept["status"] == "retry_wait" and _kept["retry"]["attempts"] == 1 and _kept["retry"]["cls"] == "rate_limited",
           json.dumps(_kept.get("retry")))
     check("…no per-message 'Couldn't handle', the one alert says new messages are kept",
-          not any("Couldn't handle" in n for n in _wn) and any("Nothing is dropped" in n for n in _wn), str(_wn))
+          not any("Couldn't handle" in n for n in _wn) and any("kept and retried" in n for n in _wn), str(_wn))
     _writer_case(); _wn.clear()
     d.retry_inbound()
     check("…not retried before its time", not _calls("-p") and S.load_item(_it["id"])["status"] == "retry_wait")
@@ -2413,6 +2414,8 @@ try:
         _held = [p for p in d.client.posted[_n0:] if p[1] == S.inbound_retry.HOLDING_TEXT]
         check("…then sent once to the sender's conversation", len(_held) == 1 and _held[0][0] == D
               and S.load_item(_it2["id"])["retry"]["held"]["ts"] == _held[0][3], str(d.client.posted[_n0:]))
+        check("…and registered as Solo's own send, so its echo is not read as the owner replying",
+              _held and _held[0][3] in d.state.read()["sent"])
         _it3 = _compose_item(); _it3["customer"] = True
         S.inbound_retry.schedule(_it3, "rate_limited", "429", now=S.datetime(2000, 1, 1)); S.save_item(_it3)
         _it3 = S.load_item(_it3["id"]); _it3["retry"]["next_at"] = "2999-01-01T00:00:00"; S.save_item(_it3)
@@ -2435,6 +2438,23 @@ try:
     check("a kept message the sender has superseded stands down without a model call",
           not _calls("-p") and _k2["status"] == "done" and _k2["outcome"]["why"] == "superseded", json.dumps(_k2["outcome"]))
     _k3 = S.load_item(_it3["id"]); _k3["status"] = "done"; S.save_item(_k3)
+
+    # a restart while a retry was composing: the item left in "handling" goes back on the queue;
+    # a mangled item on the queue does not stall the rest
+    _k5 = _compose_item(); S.inbound_retry.schedule(_k5, "rate_limited", "429"); _k5["status"] = "handling"; S.save_item(_k5)
+    _bad = _compose_item(); _bad.update(status="retry_wait", retry={"first_at": "2000", "next_at": "2000-01-01"})
+    del _bad["channel"]; S.save_item(_bad)
+    _k5["retry"]["next_at"] = "2000-01-01T00:00:00"; _k5["retry"]["first_at"] = "2000-01-01T00:00:01"; S.save_item(_k5)
+    _hist_D = d.client.history.pop(D, None)
+    try:
+        d._retry_resumed = False; _writer_case(); d.retry_inbound()
+    finally:
+        if _hist_D is not None:
+            d.client.history[D] = _hist_D
+    check("restart: a retry left 'handling' is run again; a broken item beside it does not stop the pass",
+          len(_calls("-p")) == 1 and S.load_item(_k5["id"])["status"] not in ("handling", "retry_wait"),
+          json.dumps(S.load_item(_k5["id"]).get("outcome")))
+    _bad = S.load_item(_bad["id"]); _bad["status"] = "done"; S.save_item(_bad)
 
     # kept past INBOUND_RETRY_GIVE_UP_HOURS: fails the old way, with the per-message alert
     _lim2.write_text("x"); os.environ["FAKE_LIMIT"] = str(_lim2)

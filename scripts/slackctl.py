@@ -2386,6 +2386,7 @@ class Daemon(Slack):
         self.sem = threading.Semaphore(CFG["dispatch_parallel"])
         self._probe_lock = threading.Lock()   # tick is every 5 min, a probe may take longer
         self._retry_lock = threading.Lock()   # one pass over the kept messages at a time
+        self._retry_resumed = False
         self.chan_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
         self.lock = threading.Lock()
         self.seen: OrderedDict[str, bool] = OrderedDict()
@@ -3778,35 +3779,56 @@ class Daemon(Slack):
         if not self._retry_lock.acquire(blocking=False):
             return
         try:
+            if not self._retry_resumed:
+                # A retry the last process was composing when it stopped: nothing else will pick it up.
+                for it in list_items({"handling"}):
+                    if it.get("retry"):
+                        it["status"] = inbound_retry.STATUS
+                        save_item(it)
+                self._retry_resumed = True
             kept = list_items({inbound_retry.STATUS})
             if not kept or self.state.pause_info() is not None:
                 return
-            for item in kept:
-                if inbound_retry.holding_owed(item):
-                    self.send_holding(item)
-            for item in inbound_retry.due(kept):
-                item = load_item(item["id"])
-                if item.get("status") != inbound_retry.STATUS:
-                    continue
-                if self.stand_down_kept(item):
-                    continue
-                log.info("retry #%d of %s (%s, %s)", item["retry"]["attempts"] + 1, item["id"],
-                         item["sender_name"], describe_where(item))
-                item["context"] = self.transcript(item["channel"], item.get("thread_ts"), CFG["context_messages"])
-                save_item(item)
-                self.handle_with_claude(item)
+            due = {it["id"] for it in inbound_retry.due(kept)}
+            for item in sorted(kept, key=lambda it: (it.get("retry") or {}).get("first_at") or ""):
+                try:
+                    if self.retry_one(item, item["id"] in due) == "still out":
+                        due = set()   # the accounts are still full: the rest wait for their next turn
+                except (Exception, SystemExit) as e:  # noqa: BLE001 — one bad item must not stall the queue
+                    log.warning("retry of %s failed: %s", item.get("id"), e)
         finally:
             self._retry_lock.release()
+
+    def retry_one(self, item: dict, due: bool) -> str:
+        """One kept message: stand down, wait, hold, or run it again. Says which."""
+        if not (due or inbound_retry.holding_owed(item)):
+            return "wait"
+        if self.stand_down_kept(item):
+            return "stood down"
+        if not self._allowed(item["sender"], item["channel"]):
+            item["status"], item["outcome"] = "done", {"status": "skipped", "why": "allow/block"}
+            save_item(item)
+            return "stood down"
+        if (in_quiet_hours(CFG["quiet_hours"]) or (CFG["only_when_away"] and self.presence_active())
+                or self._over_limit(item["channel"])):
+            return "wait"   # the gates on_inbound applies; the message keeps until they open
+        if inbound_retry.holding_owed(item):
+            self.send_holding(item)
+        if not due:
+            return "wait"
+        item = load_item(item["id"])
+        log.info("retry #%d of %s (%s, %s)", item["retry"]["attempts"] + 1, item["id"],
+                 item["sender_name"], describe_where(item))
+        item["context"] = self.transcript(item["channel"], item.get("thread_ts"), CFG["context_messages"])
+        save_item(item)
+        self.handle_with_claude(item)
+        return "still out" if load_item(item["id"]).get("status") == inbound_retry.STATUS else "ran"
 
     def stand_down_kept(self, item: dict) -> bool:
         """A kept message the conversation has moved past: the owner answered, or the sender wrote again."""
         held = ((item.get("retry") or {}).get("held") or {}).get("ts")
-        try:
-            newer = [m for m in self.newer_messages(item["channel"], item.get("reply_thread_ts"), item["ts"])
-                     if m.get("ts") != held]
-        except Exception as e:  # noqa: BLE001 — Slack unreachable: try the message rather than lose it
-            log.warning("retry: could not read %s for newer messages (%s)", item["channel"], e)
-            return False
+        newer = [m for m in self.newer_messages(item["channel"], item.get("reply_thread_ts"), item["ts"])
+                 if m.get("ts") != held]
         why = ("you replied" if any(m.get("user") == self.me for m in newer)
                else "superseded" if any(m.get("user") == item["sender"] for m in newer) else None)
         if not why:
@@ -3821,12 +3843,16 @@ class Daemon(Slack):
         mode, why = self.ledger.effective_mode("hold", item["sender"], item["channel"], CFG["mode"])
         ts = ""
         if mode == "auto" and not item.get("simulated") and not item.get("customer"):
+            text = inbound_retry.HOLDING_TEXT
             try:
-                ts = self.post(item["channel"], inbound_retry.HOLDING_TEXT, item.get("reply_thread_ts"), split=False)
-                log.info("holding reply to %s (%s)", item["sender_name"], describe_where(item))
+                ts = self.post(item["channel"], text, item.get("reply_thread_ts"), split=False)
             except Exception as e:  # noqa: BLE001 — the retry still runs; try the holding reply next pass
                 log.warning("holding reply to %s failed: %s", item["sender_name"], e)
                 return
+            # Registered as Solo's, so its echo is not read as the owner typing (no correction, no follow-up close).
+            self.state.update(lambda d: d["sent"].__setitem__(ts, {"item": item["id"], "channel": item["channel"],
+                                                                    "at": now_iso(), "text": text}))
+            log.info("holding reply to %s (%s)", item["sender_name"], describe_where(item))
         else:
             log.info("no holding reply to %s (%s)", item["sender_name"], "a customer" if item.get("customer") else why)
         item = load_item(item["id"])
@@ -4096,7 +4122,7 @@ def cmd_status(a):
     print(f"voice: {'VOICE.md ok' if voice.load_notes() else 'VOICE.md empty'} · {len(voice.load_samples())} samples · "
           f"dossiers: {len(list(recall.PEOPLE_DIR.glob('*.md')))} people, {len(list(recall.CHANNELS_DIR.glob('*.md')))} channels · "
           f"sessions: {len(st.get('sessions', {}))} live")
-    print(f"queued items: {len(list_items({'queued'}))} · handling: {len(list_items({'handling'}))} · pending drafts: {len(st.get('pending', {}))} · open follow-ups: {len(fus.open())}")
+    print(f"queued items: {len(list_items({'queued'}))} · handling: {len(list_items({'handling'}))} · kept for retry: {len(list_items({inbound_retry.STATUS}))} · pending drafts: {len(st.get('pending', {}))} · open follow-ups: {len(fus.open())}")
     # Asked live, not read from state: the free check is instant, and the question "can it draft
     # right now" is the one that cost an ssh to answer.
     if CFG["dispatch"] == "claude":

@@ -51,6 +51,9 @@ check("…owed at 20 min", R.holding_owed(h, T0 + timedelta(minutes=20)))
 R.mark_held(h, "123.456", T0 + timedelta(minutes=20))
 check("…and only once", not R.holding_owed(h, T0 + timedelta(hours=2)) and h["retry"]["held"]["ts"] == "123.456")
 
+check("a mangled next_at counts as due, not as a crash",
+      [x["id"] for x in R.due([{"id": "m", "status": R.STATUS, "retry": {"next_at": "garbage"}}])] == ["m"])
+
 check("alert tail: names the holding reply for a kept class", "20 min" in (R.alert_tail("rate_limited") or ""))
 check("…none for a class that is not kept", R.alert_tail("logged_out") is None)
 os.environ["INBOUND_HOLD_AFTER_MIN"] = "0"

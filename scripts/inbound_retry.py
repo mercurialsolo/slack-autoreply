@@ -63,6 +63,14 @@ def _ts(dt: datetime) -> str:
     return dt.isoformat(timespec="seconds")
 
 
+def _at(s: str | None, default: datetime) -> datetime:
+    """A stored time; a missing or mangled one reads as `default` rather than stalling the queue."""
+    try:
+        return datetime.fromisoformat(s) if s else default
+    except (TypeError, ValueError):
+        return default
+
+
 def schedule(item: dict, cls: str | None, why: str, now: datetime | None = None) -> bool:
     """Keep `item` for another try. False when it cannot be kept: not a retryable class, or kept
     past INBOUND_RETRY_GIVE_UP_HOURS. On True the item is `retry_wait` with its next try due."""
@@ -70,7 +78,7 @@ def schedule(item: dict, cls: str | None, why: str, now: datetime | None = None)
         return False
     now = now or datetime.now()
     r = dict(item.get("retry") or {})
-    first = datetime.fromisoformat(r["first_at"]) if r.get("first_at") else now
+    first = _at(r.get("first_at"), now)
     if (now - first).total_seconds() >= give_up_s():
         return False
     r["attempts"] = int(r.get("attempts") or 0) + 1
@@ -86,7 +94,7 @@ def due(items: list[dict], now: datetime | None = None) -> list[dict]:
     """The kept items whose next try has come, oldest message first."""
     now = now or datetime.now()
     out = [it for it in items if it.get("status") == STATUS
-           and datetime.fromisoformat((it.get("retry") or {}).get("next_at") or _ts(now)) <= now]
+           and _at((it.get("retry") or {}).get("next_at"), now) <= now]
     return sorted(out, key=lambda it: (it.get("retry") or {}).get("first_at") or "")
 
 
@@ -96,7 +104,8 @@ def holding_owed(item: dict, now: datetime | None = None) -> bool:
     after = hold_after_s()
     if item.get("status") != STATUS or not after or r.get("held") or not r.get("first_at"):
         return False
-    return ((now or datetime.now()) - datetime.fromisoformat(r["first_at"])).total_seconds() >= after
+    now = now or datetime.now()
+    return (now - _at(r["first_at"], now)).total_seconds() >= after
 
 
 def mark_held(item: dict, ts: str, now: datetime | None = None) -> None:
@@ -109,4 +118,5 @@ def alert_tail(cls: str | None) -> str | None:
         return None
     hold = (f" anyone waiting more than {hold_after_s() / 60:.0f} min gets a short holding reply."
             if hold_after_s() else "")
-    return f"_new messages are kept and retried as accounts free up;{hold} Nothing is dropped._"
+    return (f"_new messages are kept and retried as accounts free up;{hold} One still waiting after "
+            f"{give_up_s() / 3600:.0f} h fails with its own alert._")
