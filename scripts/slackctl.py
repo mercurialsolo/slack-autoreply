@@ -40,6 +40,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import channel_for  # noqa: E402
 import config  # noqa: E402
 import linear  # noqa: E402
 import owner_note  # noqa: E402
@@ -4396,13 +4397,23 @@ def cmd_learn_channels(a):
         # re-learns everything else and must never clobber it — losing it silently degrades
         # routing to the keyword guessing it was written to replace.
         existing_for = ""
-        if path.exists():
-            for l in path.read_text(encoding="utf-8").splitlines():
-                if l.startswith("**For:**"):
-                    existing_for = l[len("**For:**"):].strip()
-                    break
+        old = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        for l in old:
+            if l.startswith("**For:**"):
+                existing_for = l[len("**For:**"):].strip()
+                break
+        # channel_for.read is what the router reads, so it settles which line is the owner's: a
+        # draft the owner edited is theirs now, and a stray draft marker is not part of it.
+        old_kind, old_text = channel_for.read(old)
+        existing_for = old_text if old_kind == "owner" else ""
+        # Nothing said what the channel is for: draft it from the traffic, marked as a draft, so
+        # reports can still be placed and the owner has a line to correct rather than write.
+        drafted = "" if (existing_for or purpose or topic) else channel_for.draft(
+            terms, [clean_text(m["text"], s.name_of) for m in human[:3]])
+        for_line = (channel_for.draft_line(drafted) if drafted
+                    else f"**For:** {existing_for or purpose or topic or ''}".rstrip())
         lines = [f"# #{name} ({cid})", ""]
-        lines.append(f"**For:** {existing_for or purpose or topic or ''}".rstrip())
+        lines.append(for_line)
         lines.append("<!-- `For:` is what the router reads. If Solo keeps putting the wrong thing here,"
                      " fix this line — it wins over everything learned below. -->")
         lines.append("")
@@ -4430,6 +4441,19 @@ def cmd_learn_channels(a):
         lines += ["", "<!-- Learned by `slackctl learn-channels`. Correct it by hand; it is not overwritten",
                   "     unless you re-run with --refresh. -->", ""]
         if path.exists() and not a.refresh:
+            # The rest of a kept dossier may be hand-corrected, so only a blank or Solo-drafted
+            # For: line is touched: a draft is refreshed on every learn, and gives way to a Slack
+            # purpose or topic once one is set.
+            # Slack's purpose goes in marked too: written as a plain **For:** it would read as the
+            # owner's line and never be refreshed again.
+            slack_for = drafted or purpose or topic
+            kept_line = channel_for.draft_line(slack_for) if slack_for else ""
+            if old_kind in ("", "draft") and kept_line and channel_for.read([kept_line]) != (old_kind, old_text):
+                path.write_text("\n".join(channel_for.replace(old, kept_line)) + "\n", encoding="utf-8")
+                print(f"  {i}/{len(chans)} #{name}: kept; For: line "
+                      + (("draft refreshed" if old_kind else "drafted") + " — review it in the dossier"
+                         if drafted else "taken from Slack's purpose/topic, marked as a draft to review"))
+                continue
             print(f"  {i}/{len(chans)} #{name}: kept (already has a dossier; --refresh to rewrite)")
             continue
         path.write_text("\n".join(lines), encoding="utf-8")
@@ -4461,11 +4485,12 @@ def channel_meta() -> dict[str, dict]:
 
         # `For:` is the owner's line and wins; everything else only characterises the traffic.
         parts = [name]
-        for_ = field("**For:")
+        for_kind, for_ = channel_for.read(text.splitlines())   # the owner's line, or Solo's draft
         if for_:
-            parts.append(for_)
+            # A draft is Solo's guess from the traffic, and the router is told so.
+            parts.append(f"(drafted from traffic) {for_}" if for_kind == "draft" else for_)
         terms = field("**Recurring terms:")
-        if terms:
+        if terms and for_kind != "draft":   # a draft already leads with them; keep "mostly:" in the 300
             parts.append(f"recurring topics: {terms}")
         who = field("**Who posts here")
         if who:
@@ -4477,6 +4502,7 @@ def channel_meta() -> dict[str, dict]:
             "status": act.split(" ")[0] if act else "unknown",
             "temporary": field("**Temporary:").startswith("yes"),
             "exposure": float((field("**Exposure:").split("/")[0] or 0) or 0),
+            "for_kind": for_kind,   # 'owner', 'draft', or '' (blank)
         }
     return out
 
@@ -4516,11 +4542,13 @@ def cmd_where(a):
     print(f"  because: {why}")
     if conf < CHANNEL_MIN_CONFIDENCE:
         print(f"  below {CHANNEL_MIN_CONFIDENCE:.2f} — Solo would ask you rather than place this")
-    blank = [f.stem for f in sorted(recall.CHANNELS_DIR.glob("*.md"))
-             if not next((l for l in f.read_text().splitlines() if l.startswith("**For:") and l.strip() != "**For:**"), None)]
-    if blank:
-        print(f"  {len(blank)} of {len(cat)} channels have no **For:** line yet — filling those in is what "
+    kinds = Counter(m["for_kind"] for m in channel_meta().values())
+    if kinds[""]:
+        print(f"  {kinds['']} of {sum(kinds.values())} channels have no **For:** line yet — filling those in is what "
               f"makes routing reliable; keywords alone are weak")
+    if kinds["draft"]:
+        print(f"  {kinds['draft']} drafts to review — **For (draft):** lines Solo wrote from the traffic; "
+              f"edit one (or drop \"(draft)\") to make it yours ({recall.CHANNELS_DIR})")
 
 
 
