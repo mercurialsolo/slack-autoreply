@@ -118,6 +118,8 @@ def parse(answer: str, source: str) -> dict | None:
 
 
 NEEDS_YOU = "needs you"
+FENCED_RE = re.compile(r"```.*?```", re.S)
+INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 FACT_TOKEN_RE = re.compile(r"https?://[^\s<>|]+|[^\s<>|]*\d[^\s<>|]*")
 
 
@@ -134,16 +136,23 @@ def sections(raw, source: str) -> str:
         raw_facts = s.get("facts")
         if not isinstance(raw_facts, list):  # a string would be read a character at a time
             return ""
-        facts = [re.sub(r"^(?:[•◦]|[-*](?=\s))\s*", "", str(f).strip()) for f in raw_facts if str(f).strip()]
+        facts = [re.sub(r"^(?:[•◦]|[-*](?=\s))\s*", "", str(f).strip()) for f in raw_facts]
+        facts = [f for f in facts if f]
         if title and facts:
             parts.append((title, facts))
-    parts.sort(key=lambda p: p[0].lower() == NEEDS_YOU)  # stable: only "Needs you" moves, to the end
-    text = "\n\n".join(f"*{t}*\n" + "\n".join("• " + f for f in fs) for t, fs in parts)
-    kept = set(_tokens(text))
-    if not parts or not all(t in kept or t in text for t in _tokens(source)):
+    if not parts:
         return ""
-    # a command or code the agent wrote is its exact words: a section that lost one loses the note's point
-    return text if all(m.group(0) in text for m in note_rules.CODE_RE.finditer(source)) else ""
+    chunks = [f"*{t}*\n" + "\n".join("• " + f for f in fs) for t, fs in parts if t.lower() != NEEDS_YOU]
+    # a raw record (a fenced block) is no one-line fact: it stays whole, in a section of its own
+    blocks = [b for b in FENCED_RE.findall(source) if b not in "\n".join(chunks)]
+    chunks += ["*Raw record*\n" + "\n".join(blocks)] if blocks else []
+    chunks += [f"*{t}*\n" + "\n".join("• " + f for f in fs) for t, fs in parts if t.lower() == NEEDS_YOU]  # last
+    text = "\n\n".join(chunks)
+    kept = set(_tokens(text))
+    if not all(t in kept or t in text for t in _tokens(source)):
+        return ""
+    # a command the agent wrote is its exact words: a section that lost one loses the note's point
+    return text if all(m.group(0) in text for m in INLINE_CODE_RE.finditer(FENCED_RE.sub("", source))) else ""
 
 
 def _tokens(text: str) -> list[str]:

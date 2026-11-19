@@ -105,7 +105,6 @@ def beyond(details: str, said: list[str], links: list[str] | tuple = ()) -> str:
     # pairs within one sentence: "Helsinki is green. Hillsboro failed." never says "Helsinki failed"
     said_pairs = set().union(*(_pairs(_seq(u)) for s in said for x in s.splitlines() for u in _units(x)))
     said_text = " ".join(said)
-    said_plain = {_plain(s) for s in said}
     said_urls = set(links).union(*(urls(s) for s in said))
     # a task id the note links to (its answer page) is said; one it does not is news
     linked = {w for u in said_urls for i in note_rules.TASK_ID_RE.findall(u) for w in _seq(i)}
@@ -121,25 +120,55 @@ def beyond(details: str, said: list[str], links: list[str] | tuple = ()) -> str:
 
     lines = (details or "").splitlines()
     kept: list[str] = []
+    title = None  # [its index in kept, "said" (a fact under it was dropped), "fresh" (one was kept)]
     for ln, fenced in zip(lines, _fences(lines)):
-        if SECTION_RE.match(ln) and _plain(ln) in said_plain:  # the headline again, set bold: said
-            continue
-        if fenced or not ln.strip() or (SECTION_RE.match(ln) and len(ln.split()) <= TITLE_WORDS):  # a section's title stays while a fact under it does
+        if not fenced and SECTION_RE.match(ln):  # a `*Section*` title: whole, it stays while a fact under it does
+            _close(kept, title)
+            title = [len(kept), False, False]
             kept.append(ln)
             continue
-        units = _units(ln)
+        if not fenced and not ln.strip():
+            if title and (title[1] or title[2]):  # a break after its facts ends what the title heads
+                _close(kept, title)
+                title = None
+            kept.append(ln)
+            continue
+        units = [] if fenced else _units(ln)
         fresh = [u for u in units if note_rules.COMMAND_RE.search(u) or new(u)]
-        if fresh:
-            kept.append(ln if LIST_ITEM_RE.match(ln) or len(fresh) == len(units) else " ".join(fresh).rstrip(" ;"))
+        if fenced or fresh:
+            kept.append(ln if fenced or LIST_ITEM_RE.match(ln) or len(fresh) == len(units) else " ".join(fresh).rstrip(" ;"))
+        if title:
+            title[2 if fenced or fresh else 1] = True
+    _close(kept, title)
     return _tidy(kept)
 
 
-TITLE_WORDS = 6  # a longer bold line is a sentence set bold, read as one
+def missing(text: str, details: str) -> str:
+    """The lines of `text` that `details` do not already say: a code block not in them whole, a
+    line whose words are new, a command line whose command they do not hold."""
+    if not (details or "").strip():
+        return (text or "").strip()
+    lines = (text or "").splitlines()
+    fenced, out, i = _fences(lines), [], 0
+    while i < len(lines):
+        if fenced[i]:
+            j = next((k for k in range(i, len(lines)) if not fenced[k]), len(lines))
+            if "\n".join(lines[i:j]).strip() not in details:
+                out += lines[i:j]
+            i = j
+            continue
+        ln, i = lines[i], i + 1
+        code = [m.group(0) for m in note_rules.CODE_RE.finditer(ln)]
+        if ln.strip() and ln.strip() not in details and (
+                any(c not in details for c in code) if code else beyond(ln, [details]).strip()):
+            out.append(ln)
+    return "\n".join(out).strip()
 
 
-def _plain(text: str) -> str:
-    """`text` without its marks, case or end punctuation: "*Goal sweep: done.*" is "goal sweep: done"."""
-    return re.sub(r"\s+", " ", text.strip().strip("*_ ").rstrip(".!?:").strip()).lower()
+def _close(kept: list[str], title) -> None:
+    """A section title whose facts were all said goes with them (marked "" here; `_tidy` drops the gap)."""
+    if title and title[1] and not title[2]:
+        kept[title[0]] = ""
 
 
 def _tidy(lines: list[str]) -> str:

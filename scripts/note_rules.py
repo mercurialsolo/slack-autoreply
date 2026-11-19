@@ -21,7 +21,8 @@ MAX_LINKS = 2
 BULLETS_MAX = 3  # the message's own "• " facts (owner, 2026-11-19); the full list stays in Details
 # Words only the agents use: a percentile (p50), an all-caps internal name (CALL-REVIEWs), a range of
 # check names (G1-G5). The owner reads the news in plain words; these stay in Details.
-JARGON_RE = re.compile(r"\bp(?:50|90|95|99)\b|\b[A-Z]{3,}[-_][A-Z]{3,}s?\b|\bG\d+\s?[-–]\s?G?\d+\b")
+JARGON_RE = re.compile(r"\b[pP](?:50|90|95|99)\b|\b[A-Z]{3,}-[A-Z]{3,}s?\b|\b[A-Z]{2,}_[A-Z0-9_]+\b"
+                       r"|\b[A-Z]\d+\s?[-–]\s?[A-Z]\d+\b|\bG\d+\s?[-–]\s?\d+\b")  # not US-EAST, CI-CD, Q3-2026
 RULE = (
     "Start with one short plain headline: what happened, not what was read or checked to find out. "
     "Then at most three short bullets, each one complete fact in plain words; never \"and N more\". "

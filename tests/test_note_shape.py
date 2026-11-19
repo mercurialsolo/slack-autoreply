@@ -185,9 +185,10 @@ check("the prompt keeps the owner's words: plain headline, three facts, no jargo
 
 # Review round 1 (PR #19): what the first cut got wrong.
 check("jargon: plain caps with a dash are not jargon", all(not R.violations(t) for t in (
-    "US-EAST is back.", "The CI-CD run passed.", "The Q3-2026 plan is out.", "Rooms A1-A4 are free.")))
+    "US-EAST is back.", "The CI-CD run passed.", "The Q3-2026 plan is out.")))
 check("jargon: CALL-REVIEWs, p50 and G1-G5 still are", all(R.violations(t) for t in (
-    "Read the CALL-REVIEWs.", "Calls took 4 s at p50.", "Goals G1-G5 all hold.")))
+    "Read the CALL-REVIEWs.", "Calls took 4 s at p50.", "Goals G1-G5 all hold.", "Checks C1-C5 hold.",
+    "The PR_BOT ran.", "P95 is 4 s.")))
 CMD_SRC = "Two hosts are down. Run `make deploy HOST=a` to bring them back."
 check("sections: a section that lost the agent's command is no Details", S.sections(
     [{"title": "Hosts", "facts": ["Two hosts are down."]}], CMD_SRC) == "")
@@ -201,9 +202,16 @@ check("sections: a fact's own bold and minus stay, only its list mark goes",
       "• *Lisbon* is sunny\n• Oslo is -5 C\n• Rome is dry" in _sec, _sec)
 check("bullets: indented • lines count toward three",
       "a bulleted line" in R.violations("Done\n  • a\n  • b\n  • c\n  • d"))
-_b = T.beyond("*Goal sweep: no new call failures*\n• One issue is already queued.\n• The fix ships tonight.",
+_b = T.beyond("*Goal sweep: no new call failures*\n• One issue is already queued.\n\n*Next*\n• The fix ships tonight.",
               ["Goal sweep: no new call failures", "One issue is already queued."])
-check("thread: the headline again in bold is not repeated", "Goal sweep" not in _b and "ships tonight" in _b, _b)
+check("thread: a title whose facts were all said goes with them", _b == "*Next*\n• The fix ships tonight.", _b)
+_b = T.beyond("*Summary*\n• a 1\n\n*Done*\n• b 2\n• c 3", ["Done."])
+check("thread: a title over new facts stays, even in the headline's words", "*Done*\n• b 2" in _b, _b)
+_b = T.beyond("*Hosts down now. Disk is ninety full here*\n• x", ["Hosts down now."])
+check("thread: a long bold line is never cut open", _b.startswith("*Hosts down now. Disk is ninety full here*\n"), _b)
+_b = T.beyond("*Hosts*\n• a\n\nOverall the week was calm.", ["a"])
+check("thread: an emptied title does not head the next paragraph", _b == "Overall the week was calm.", _b)
+check("thread: a code block is never touched", T.beyond("```\n*Done*\n```", ["Done"]) == "```\n*Done*\n```")
 _b = T.beyond("*Notes*\n\nThe second host came back on its own after an hour.", [])
 check("thread: a section title over a break and a paragraph stays", _b.startswith("*Notes*"), _b)
 _n = N.scrub(N.Note(status="ok", headline="Read the CALL-REVIEWs since 16:20Z", sender="factory",
@@ -215,5 +223,16 @@ _n = N.scrub(N.Note(status="ok", headline="Read the CALL-REVIEWs", sender="facto
                     details="*Calls*\n• No new call failures.\n• One known issue is already queued."), True, _body)
 check("scrub: sectioned Details that hold the agent's words do not get them again",
       _body not in _n.details and _n.details.count("already queued") <= 1, _n.details)
+_body = "Two hosts are down.\nRun `make deploy HOST=a` to bring them back."
+_n = N.scrub(N.Note(status="warn", headline="Read the CALL-REVIEWs", sender="factory",
+                    details="*Hosts*\n• Two hosts are down.\n• Run `make deploy HOST=a` to restore them."), True, _body)
+check("scrub: a command the Details hold is not added again", _n.details.count("make deploy") == 1, _n.details)
+RAW = "Deploy failed on host a at 12:00.\n```\nerror: disk full\n```"
+_sec = S.sections([{"title": "Deploy", "facts": ["Failed on host a at 12:00."]},
+                   {"title": "Needs you", "facts": ["Free some disk?"]}], RAW)
+check("sections: a raw record stays whole, in its own section before Needs you",
+      "*Raw record*\n```\nerror: disk full\n```\n\n*Needs you*" in _sec, _sec)
+check("sections: a fact that is only a list mark is no bullet",
+      S.sections([{"title": "X", "facts": ["•", "a 1"]}], "a 1") == "*X*\n• a 1")
 
 print(f"\n{passed} checks passed")

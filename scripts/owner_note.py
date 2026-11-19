@@ -592,8 +592,8 @@ def scrub(note: Note, buttons: bool = True, body: str = "") -> Note:
         note.options, note.links = [], []
     if body and (note.headline, note.summary, note.ask, note.options, note.points) != before:
         # a dropped part is never lost: what of the agent's words the (sectioned) Details do not already say
-        rest = note_thread.beyond(body.strip(), [note.details]) if note.details else body.strip()
-        if rest and rest not in note.details:
+        rest = note_thread.missing(body.strip(), note.details)
+        if rest:
             note.details = (note.details + "\n" if note.details else "") + rest
     # ...and what the scrubbed note still says is not said again in its thread (owner, 2026-11-13)
     note.details = note_thread.beyond(note.details, [note.headline, note.summary, note.ask, *note.points],
