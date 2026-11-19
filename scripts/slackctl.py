@@ -3857,7 +3857,12 @@ class Daemon(Slack):
         """A kept message the conversation has moved past: the owner answered, or the sender wrote again.
         Solo's own posts (holding replies, auto replies to other messages) are not the owner answering."""
         solo = set(self.state.read().get("sent", {}))
-        newer = [m for m in self.newer_messages(item["channel"], item.get("reply_thread_ts"), item["ts"])
+        # This item's own holding reply, by its ts on the item: `tick` drops `sent` entries after
+        # OBSERVE_HOURS, and a message can be kept far longer than that.
+        held = ((item.get("retry") or {}).get("held") or {}).get("ts")
+        if held:
+            solo.add(held)
+        newer =[m for m in self.newer_messages(item["channel"], item.get("reply_thread_ts"), item["ts"])
                  if m.get("ts") not in solo]
         why = ("you replied" if any(m.get("user") == self.me for m in newer)
                else "superseded" if any(m.get("user") == item["sender"] for m in newer) else None)

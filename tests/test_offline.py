@@ -2495,6 +2495,24 @@ try:
             d.client.history[D] = _hist_D
     _k8 = S.load_item(_k8["id"]); _k8["status"] = "done"; S.save_item(_k8)
 
+    # …nor once `tick` has aged its holding reply out of `sent` (OBSERVE_HOURS): a message can be kept for longer
+    _k9 = _compose_item(); S.inbound_retry.schedule(_k9, "rate_limited", "429")
+    S.inbound_retry.mark_held(_k9, "9999999999.000003"); S.save_item(_k9)
+    _hist_D = d.client.history.pop(D, None)
+    d.client.history[D] = [{"ts": "9999999999.000003", "user": d.me, "text": S.inbound_retry.HOLDING_TEXT, "subtype": None}]
+    _aged = (S.datetime.now() - S.timedelta(hours=S.CFG["observe_hours"] + 1)).isoformat(timespec="seconds")
+    d.state.update(lambda x: x["sent"].__setitem__("9999999999.000003", {"item": _k9["id"] + ".hold", "channel": D, "at": _aged, "text": "x"}))
+    try:
+        d.tick()
+        check("its own holding reply, aged out of `sent`, does not stand a kept message down",
+              "9999999999.000003" not in d.state.read()["sent"] and not d.stand_down_kept(S.load_item(_k9["id"]))
+              and S.load_item(_k9["id"])["status"] == "retry_wait", json.dumps(S.load_item(_k9["id"]).get("outcome")))
+    finally:
+        d.client.history.pop(D, None)
+        if _hist_D is not None:
+            d.client.history[D] = _hist_D
+    _k9 = S.load_item(_k9["id"]); _k9["status"] = "done"; S.save_item(_k9)
+
     # kept past INBOUND_RETRY_GIVE_UP_HOURS: fails the old way, with the per-message alert
     _lim2.write_text("x"); os.environ["FAKE_LIMIT"] = str(_lim2)
     try:
