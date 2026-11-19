@@ -66,7 +66,10 @@ def draft(terms: list[str], recent: list[str]) -> str:
 
 
 def draft_line(text: str) -> str:
-    """The marked line for a `draft()` result."""
+    """The marked line for a `draft()` result (or a Slack purpose/topic).
+    Whitespace is collapsed as `read` does, so a multi-line purpose stays one line and its
+    signature still matches."""
+    text = " ".join(text.split())
     return f"{DRAFT} {text} <!-- solo-draft:{_sig(text)} -->"
 
 
