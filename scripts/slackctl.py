@@ -4444,11 +4444,15 @@ def cmd_learn_channels(a):
             # The rest of a kept dossier may be hand-corrected, so only a blank or Solo-drafted
             # For: line is touched: a draft is refreshed on every learn, and gives way to a Slack
             # purpose or topic once one is set.
-            if old_kind in ("", "draft") and channel_for.read([for_line]) not in ((old_kind, old_text), ("", "")):
-                path.write_text("\n".join(channel_for.replace(old, for_line)) + "\n", encoding="utf-8")
+            # Slack's purpose goes in marked too: written as a plain **For:** it would read as the
+            # owner's line and never be refreshed again.
+            slack_for = drafted or purpose or topic
+            kept_line = channel_for.draft_line(slack_for) if slack_for else ""
+            if old_kind in ("", "draft") and kept_line and channel_for.read([kept_line]) != (old_kind, old_text):
+                path.write_text("\n".join(channel_for.replace(old, kept_line)) + "\n", encoding="utf-8")
                 print(f"  {i}/{len(chans)} #{name}: kept; For: line "
                       + (("draft refreshed" if old_kind else "drafted") + " — review it in the dossier"
-                         if drafted else "set from Slack's purpose/topic"))
+                         if drafted else "taken from Slack's purpose/topic, marked as a draft to review"))
                 continue
             print(f"  {i}/{len(chans)} #{name}: kept (already has a dossier; --refresh to rewrite)")
             continue
@@ -4486,7 +4490,7 @@ def channel_meta() -> dict[str, dict]:
             # A draft is Solo's guess from the traffic, and the router is told so.
             parts.append(f"(drafted from traffic) {for_}" if for_kind == "draft" else for_)
         terms = field("**Recurring terms:")
-        if terms:
+        if terms and for_kind != "draft":   # a draft already leads with them; keep "mostly:" in the 300
             parts.append(f"recurring topics: {terms}")
         who = field("**Who posts here")
         if who:

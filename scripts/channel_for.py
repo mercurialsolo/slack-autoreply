@@ -20,6 +20,7 @@ import re
 
 OWNER = "**For:**"
 DRAFT = "**For (draft):**"
+_QUOTES = str.maketrans("“”", '""')
 _MARK = re.compile(r"\s*<!--\s*solo-draft:([0-9a-f]{8})\s*-->")
 
 
@@ -46,19 +47,22 @@ def read(lines: list[str]) -> tuple[str, str]:
 
 
 def _plain(text: str, n: int) -> str:
-    text = " ".join(text.replace("<!--", "").replace("-->", "").split())
+    # "<" and ">" go entirely, so no nesting of traffic text can rebuild Solo's marker.
+    text = " ".join(text.replace("<", " ").replace(">", " ").split())
     return text if len(text) <= n else text[: n - 1].rstrip() + "…"
 
 
 def draft(terms: list[str], recent: list[str]) -> str:
-    """A For: draft from recurring terms and a few recent lines; '' when there is nothing to go on."""
+    """A For: draft from recurring terms and a few recent lines; '' when there is nothing to go on.
+    Each part is cut on its own, so the whole stays under ~220 chars with every quote closed."""
     parts = []
     if terms:
-        parts.append("recent traffic about " + ", ".join(terms[:6]))
-    eg = [f"“{_plain(t, 60)}”" for t in recent if t.strip()][:2]
+        parts.append(_plain("recent traffic about " + ", ".join(terms[:6]), 90))
+    # Curly quotes in the traffic become straight ones, so a cut never leaves Solo's quote open.
+    eg = [f"“{_plain(t.translate(_QUOTES), 55)}”" for t in recent if t.strip()][:2]
     if eg:
         parts.append("e.g. " + "; ".join(eg))
-    return _plain(" — ".join(parts), 220)
+    return " — ".join(parts)
 
 
 def draft_line(text: str) -> str:
