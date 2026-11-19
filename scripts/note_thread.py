@@ -21,6 +21,14 @@ import re
 import note_rules
 
 LIST_ITEM_RE = note_rules.LIST_ITEM_RE
+# A header: "Biggest:" or a `*Section*` heading. It stays while an item under it does (_tidy).
+HEADER_RE = re.compile(r"^\s*(?:\*[^*\n]{1,60}\*:?|[^•◦\-*\n].*:)\s*$")
+
+
+def _header(ln: str) -> bool:
+    return bool(HEADER_RE.match(ln)) and not LIST_ITEM_RE.match(ln)
+
+
 NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")  # a count or a size: which item it belongs to is a fact
 SENTENCE_SPLIT = note_rules.SENTENCE_SPLIT
 CLAUSE_SPLIT = re.compile(r"(?<=;)\s+")  # a clause after ";" is its own fact, unless it is a command's
@@ -120,7 +128,7 @@ def beyond(details: str, said: list[str], links: list[str] | tuple = ()) -> str:
     lines = (details or "").splitlines()
     kept: list[str] = []
     for ln, fenced in zip(lines, _fences(lines)):
-        if fenced or not ln.strip():
+        if fenced or not ln.strip() or _header(ln):  # a heading the note echoes still heads what is new
             kept.append(ln)
             continue
         units = _units(ln)
@@ -139,11 +147,11 @@ def _tidy(lines: list[str]) -> str:
         if fenced[i]:
             out.append(ln)
             continue
-        if ln.rstrip().endswith(":") and not LIST_ITEM_RE.match(ln):
+        if _header(ln):
             nxt = next((x for x in lines[i + 1:] if x.strip()), "")
             right = lines[i + 1] if i + 1 < len(lines) else ""
             heads = LIST_ITEM_RE.match(nxt) or nxt.lstrip().startswith("```")
-            if not heads and (not right.strip() or (right.rstrip().endswith(":") and not LIST_ITEM_RE.match(right))):
+            if not heads and (not right.strip() or _header(right)):
                 continue
         if not ln.strip() and (not out or not out[-1].strip()):
             continue

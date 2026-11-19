@@ -465,7 +465,12 @@ check("beyond: a sentence in other filler words is a repeat; a new number, name 
 check("beyond: a header with no item left is dropped; a code block stays whole, repeats and all",
       T.beyond("Biggest:\n- qemu 18.2 GB", ["Biggest qemu 18.2 GB"]) == ""
       and T.beyond("```\nNothing was stopped.\n```", ["Nothing was stopped."]) == "```\nNothing was stopped.\n```")
-_d = "- Biggest: qemu 18.2 GB\n- VMs running (3): agentvm, hillsboro\n```\nraw\n```"
+check("beyond: a *Section* heading the note echoes stays while an item under it is new; with none left it goes",
+      T.beyond("*Known issue*\n• Hillsboro greeting cut off: queued as t_5c2e10aa", ["One known issue already queued"])
+      == "*Known issue*\n• Hillsboro greeting cut off: queued as t_5c2e10aa"
+      and T.beyond("*Checked*\n• 14 calls checked, nothing new.\n\n*New*\n• canary 5/5", ["14 calls checked, nothing new."])
+      == "*New*\n• canary 5/5")
+_d ="- Biggest: qemu 18.2 GB\n- VMs running (3): agentvm, hillsboro\n```\nraw\n```"
 check("model_beyond keeps only the lines the model calls new, and code blocks",
       T.model_beyond(_d, "note", lambda p: '{"new": [1]}') == "- Biggest: qemu 18.2 GB\n```\nraw\n```")
 _seen = []
