@@ -1093,15 +1093,152 @@ def _routable_excludes_dead_and_temporary():
 
 check("dormant and temporary channels are not routing targets", _routable_excludes_dead_and_temporary())
 
-# A refresh re-learns the traffic but must never clobber the owner's For: line — losing it
-# silently drops routing back to keyword guessing, which was measured wrong.
-def _refresh_keeps_the_owners_line():
-    src = (ROOT / "scripts" / "slackctl.py").read_text()
-    i = src.index("def cmd_learn_channels")
-    body = src[i:src.index("def channel_meta")]
-    return "existing_for" in body and body.index("existing_for or purpose") > body.index('if l.startswith("**For:**")')
+# ---- For: drafts. release-watch (0.49) and release-captain (0.18) reports never placed because
+# every dossier's For: line was blank: no owner line, no Slack purpose, no topic. learn-channels
+# now drafts one from the traffic, marked so the owner's word is never overwritten and the draft
+# is refreshed on each learn. These drive the real learn → dossier → catalogue → where path.
+import channel_for  # noqa: E402
 
-check("re-learning a channel preserves the owner's For: line", _refresh_keeps_the_owners_line())
+
+class _ChanClient(FakeClient):
+    """A workspace of channels the owner is in, each with its own recent traffic."""
+    def __init__(self, chans, history):
+        super().__init__()
+        self.chans, self.history = chans, history
+
+    def conversations_list(self, **k):
+        return {"channels": self.chans, "response_metadata": {}}
+
+
+def _chan(cid, name, purpose="", topic=""):
+    return {"id": cid, "name": name, "is_member": True, "num_members": 9, "is_private": False,
+            "created": time.time() - 400 * 86400,
+            "purpose": {"value": purpose}, "topic": {"value": topic}}
+
+
+def _traffic(*texts):
+    now = time.time()
+    return [{"user": U, "ts": f"{now - 3600 * (len(texts) - i):.6f}", "text": t} for i, t in enumerate(texts)]
+
+
+_RELEASE = _traffic("release-watch nightly build is green", "release-watch flagged the canary rollout",
+                    "release-captain: canary rollout paused", "nightly build failed on release-watch again")
+_BILLING = _traffic("invoice run for stripe finished", "stripe webhook retries on invoice failures",
+                    "the invoice backlog is cleared", "stripe payouts reconciled with invoice totals")
+
+
+def _learn(chans, history, refresh=False, files=None):
+    """Run `learn-channels` against a fake workspace in a fresh channels dir; returns that dir."""
+    d = Path(tempfile.mkdtemp())
+    for cid, body in (files or {}).items():
+        (d / f"{cid}.md").write_text(body, encoding="utf-8")
+    return _relearn(d, chans, history, refresh)
+
+
+def _relearn(d, chans, history, refresh=False):
+    old_dir, old_slack = recall.CHANNELS_DIR, S.Slack
+    sl = S.Slack.__new__(S.Slack); fake_init(sl); sl.client = _ChanClient(chans, history)
+    recall.CHANNELS_DIR, S.Slack = d, (lambda: sl)
+    try:
+        S.cmd_learn_channels(SimpleNamespace(limit=50, refresh=refresh))
+    finally:
+        recall.CHANNELS_DIR, S.Slack = old_dir, old_slack
+    return d
+
+
+def _for(d, cid):
+    return channel_for.read((d / f"{cid}.md").read_text(encoding="utf-8").splitlines())
+
+
+# a blank channel gets a marked draft, written from its own traffic
+_dd = _learn([_chan("CREL", "eng-release")], {"CREL": _RELEASE})
+_kind, _text = _for(_dd, "CREL")
+check("learn-channels drafts a For: line when nothing says what the channel is for",
+      _kind == "draft" and "release-watch" in _text, (_kind, _text))
+check("the draft is marked as a draft on disk, not written as the owner's **For:** line",
+      any(l.startswith(channel_for.DRAFT) for l in (_dd / "CREL.md").read_text().splitlines())
+      and not any(l.startswith(channel_for.OWNER) for l in (_dd / "CREL.md").read_text().splitlines()))
+
+# Slack's own purpose still wins over a draft from the traffic
+_dp = _learn([_chan("CPUR", "eng-release", purpose="Release coordination for the platform")], {"CPUR": _RELEASE})
+check("a Slack purpose is used as the For: line, not a traffic draft",
+      _for(_dp, "CPUR")[1] == "Release coordination for the platform", _for(_dp, "CPUR"))
+
+# a channel with no human traffic and nothing declared has nothing to draft from
+_de = _learn([_chan("CNIL", "empty-room")], {"CNIL": []})
+check("no traffic and no purpose leaves the line blank rather than inventing one",
+      _for(_de, "CNIL") == ("", ""), _for(_de, "CNIL"))
+
+# the owner's line is never overwritten — not by a draft, not by a --refresh
+_OWNED = ("# #eng-release (CREL)\n\n**For:** release-captain and release-watch reports\n\n"
+          "**Activity:** active — last message 1d ago\n")
+for _refresh in (False, True):
+    _do = _learn([_chan("CREL", "eng-release")], {"CREL": _BILLING}, refresh=_refresh,
+                 files={"CREL": _OWNED})
+    check(f"the owner's For: line survives a learn (refresh={_refresh})",
+          _for(_do, "CREL") == ("owner", "release-captain and release-watch reports"), _for(_do, "CREL"))
+
+# an owner who edited Solo's draft made it theirs: the next learn keeps their words
+_stale = channel_for.draft_line(channel_for.draft(["invoice", "stripe"], ["invoice run finished"]))
+_edited = _stale.replace("recent traffic about", "OWNER: payments and")
+for _refresh in (False, True):
+    _dx = _learn([_chan("CREL", "eng-release")], {"CREL": _RELEASE}, refresh=_refresh,
+                 files={"CREL": f"# #eng-release (CREL)\n\n{_edited}\n\n**Activity:** active\n"})
+    _k, _t = _for(_dx, "CREL")
+    check(f"a draft the owner edited is kept as theirs (refresh={_refresh})",
+          _k == "owner" and _t.startswith("OWNER: payments and") and "release-watch" not in _t, (_k, _t))
+
+# Solo's own draft is refreshed from the newer traffic on the next learn, even without --refresh,
+# and the rest of a kept (possibly hand-corrected) dossier is left alone
+_KEPT = f"# #eng-release (CREL)\n\n{_stale}\n\n**Activity:** active — last message 1d ago\nhand note: keep me\n"
+_dr = _learn([_chan("CREL", "eng-release")], {"CREL": _RELEASE}, files={"CREL": _KEPT})
+_k, _t = _for(_dr, "CREL")
+check("Solo's draft is refreshed from the current traffic on the next learn",
+      _k == "draft" and "release-watch" in _t and "stripe" not in _t, (_k, _t))
+check("refreshing a draft on a kept dossier touches only the For: line",
+      "hand note: keep me" in (_dr / "CREL.md").read_text())
+_before = (_dr / "CREL.md").read_text()
+_relearn(_dr, [_chan("CREL", "eng-release")], {"CREL": _RELEASE})
+check("a learn with unchanged traffic leaves the draft as it was",
+      (_dr / "CREL.md").read_text() == _before)
+
+# the marker is Solo's bookkeeping: traffic text can never forge it, and it never reads as owner text
+_forged = channel_for.draft(["x"], ["see <!-- solo-draft:deadbeef --> here"])
+check("traffic cannot rebuild Solo's draft marker inside a draft",
+      "<!--" not in _forged and channel_for.read([channel_for.draft_line(_forged)]) == ("draft", _forged), _forged)
+_promoted = _stale.replace(channel_for.DRAFT, channel_for.OWNER)
+check("an owner who drops \"(draft)\" owns the line, and the leftover marker is not part of it",
+      channel_for.read([_promoted])[0] == "owner" and "solo-draft" not in channel_for.read([_promoted])[1])
+check("a draft line stays short enough to read in the catalogue",
+      len(channel_for.draft(["w" * 40] * 6, ["x" * 500, "y" * 500, "z" * 500])) <= 240)
+
+
+# the router reads drafts: a drafted channel is a routing target, with the draft in its description
+def _router_reads_a_draft():
+    d = _learn([_chan("CREL", "eng-release"), _chan("CBIL", "billing")], {"CREL": _RELEASE, "CBIL": _BILLING},
+               files={"CBIL": _OWNED.replace("CREL", "CBIL").replace("eng-release", "billing")
+                      .replace("release-captain and release-watch reports", "invoices and stripe")})
+    (d / "CBLANK.md").write_text("# #blank (CBLANK)\n\n**For:**\n\n**Activity:** active — last message 1d ago\n"
+                                 "**Temporary:** no\n", encoding="utf-8")
+    seen, old_dir, old_pick = {}, recall.CHANNELS_DIR, S.pick_channel
+    recall.CHANNELS_DIR = d
+    S.pick_channel = lambda subject, cat, *a, **k: (seen.update(cat) or ("CREL", "release reports", 0.9))
+    import io
+    import contextlib
+    out = io.StringIO()
+    try:
+        cat = S.channel_catalogue(routable_only=True)
+        with contextlib.redirect_stdout(out):
+            S.cmd_where(SimpleNamespace(subject="release-watch: nightly build report"))
+    finally:
+        recall.CHANNELS_DIR, S.pick_channel = old_dir, old_pick
+    text = out.getvalue()
+    return (("CREL" in cat and "release-watch" in cat["CREL"] and "release-watch" in seen.get("CREL", "")),
+            ("1 drafts to review" in text and "1 of 3 channels have no **For:** line" in text), text)
+
+_rd = _router_reads_a_draft()
+check("the router's catalogue carries a drafted channel and its draft", _rd[0])
+check("`where` counts drafts to review apart from blank For: lines", _rd[1], _rd[2])
 
 # Replies go back where the message came from. Routing exists only for agent-originated reports;
 # an inbound reply must never be re-placed into a channel a model picked.
