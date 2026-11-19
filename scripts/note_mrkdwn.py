@@ -23,12 +23,14 @@ BARE_URL_RE = re.compile(r"\bhttps?://[^\s<>|]+[^\s<>|.,;:!?)]")
 ARROW_RE = re.compile(r"[ \t]*(?:-{1,2}>|=>|⟶|➔)[ \t]*")
 BACK_ARROW_RE = re.compile(r"[ \t]*(?<![<!-])<-{1,2}(?![->\d])[ \t]*")
 EMOJI_RUN_RE = re.compile(r"(" + EMOJI + r"[️‍]*)(?:[ \t]*\1)+")
-MD_BOLD_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__")
+MD_BOLD_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*")  # "__x__" is a dunder name more often than bold
 HEADING_RE = re.compile(r"^\s*(?:#{1,6}\s+(.+?)\s*#*|\*{1,2}([^*\n]{2,60}?):?\*{1,2}:?|([A-Z][^.!?:\n]{1,40}):)\s*$")
 # "…and 3 more in the thread", "+2 more": a count of what is not said is not a fact.
-MORE_RE = re.compile(r"(?:^|[\s,;(]*(?:\.\.\.|…)?\s*)\b(?:and|plus|\+)?\s*\d+\s+(?:more|others?)\b(?:\s+(?:in|on|are in)\b[^.;)]*)?[.)]?\s*$", re.I)
+MORE_RE = re.compile(r"(?:^\W*|[\s,;(]*(?:\.\.\.|…)?\s*(?:\band\b|\bplus\b|\+)\s*|[\s,;(]*(?:\.\.\.|…)\s*)"
+                     r"\d+\s+(?:more|others?)\b(?:\s+(?:in|on|are in)\b[^.;)]*)?[.)]?\s*$", re.I)
 # Where one bullet holds a second message: an icon or a status label after a sentence or a ";".
 SUB_SPLIT_RE = re.compile(r"(?<=[.;!?])\s+(?=[*_]*(?:" + EMOJI + r"|(?:[A-Z][\w-]*(?:\s[\w-]+){0,2}):\s))")
+ENTITY_RE = re.compile(r"&(?:#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")  # "&region=" is text
 PARA_MAX = 200  # a Details line longer than this, with several sentences, is a list
 BULLETS_MAX = 3
 PROTECT = re.compile(CODE_RE.pattern + "|" + SLACK_TOKEN_RE.pattern + "|" + BARE_URL_RE.pattern, re.S)
@@ -51,7 +53,7 @@ def _restore(text: str, kept: list[str], tag: str = "\x00") -> str:
 def unescape(t: str) -> str:
     """Entities as the characters they stand for, however many times they were escaped (`&amp;gt;`)."""
     for _ in range(3):
-        u = html.unescape(t)
+        u = ENTITY_RE.sub(lambda m: html.unescape(m.group(0)), t)
         if u == t:
             break
         t = u
@@ -72,22 +74,18 @@ def dedup_emoji(t: str) -> str:
     return EMOJI_RUN_RE.sub(r"\1", t)
 
 
-def _balance(line: str, ch: str) -> str:
-    c = re.escape(ch)
-    pairs, kept = _protect(line, re.compile(rf"(?<![\w{c}]){c}(?=[^\s{c}])[^\n]*?(?<=[^\s{c}]){c}(?![\w{c}])"), "\x01")
-    # what is left of the marker is stray: one that opens or closes a word, never one inside a word
-    pairs = re.sub(rf"(?<!\w){c}+|{c}+(?!\w)", "", pairs) if ch != "_" else re.sub(rf"(?<![\w{c}]){c}+(?=\w)|(?<=\w){c}+(?![\w{c}])", "", pairs)
-    return _restore(pairs, kept, "\x01")
+BOLD_PAIR_RE = re.compile(r"(?<![\w*])\*(?=[^\s*])[^\n]*?(?<=[^\s*])\*(?![\w*])")
+# a "*" that opens or closes a word ("*Done:", "done*"); "2 * 3", "*.py" and "a*b" are not markup
+STRAY_STAR_RE = re.compile(r"(?<![\w*])\*+(?=[^\W\d_])|(?<=[^\W\d_])\*+(?![\w*])")
 
 
 def balance(t: str) -> str:
-    """No stray `*`, `_` or `~`: a marker without its pair, which Slack shows as a literal, goes."""
-    t = MD_BOLD_RE.sub(lambda m: f"*{m.group(1)}*" if m.group(1) else f"_{m.group(2)}_", t)
+    """No stray bold: a `*` that opens or closes a word without its pair, which Slack shows as a
+    literal, goes. `_` and `~` are left: they are snake_case, paths and "~5 min" far more often."""
     out = []
-    for line in t.split("\n"):
-        for ch in "*_~":
-            line = _balance(line, ch)
-        out.append(line)
+    for line in MD_BOLD_RE.sub(r"*\1*", t).split("\n"):
+        pairs, kept = _protect(line, BOLD_PAIR_RE, "\x01")
+        out.append(_restore(STRAY_STAR_RE.sub("", pairs), kept, "\x01"))
     return "\n".join(out)
 
 
@@ -107,7 +105,7 @@ def split_item(item: str) -> list[str]:
     out = []
     for part in SUB_SPLIT_RE.split(item.strip()):
         part = MORE_RE.sub("", part).strip(" ;,")
-        if re.search(r"[A-Za-z]", part):
+        if re.search(r"\w", part):
             out.append(part)
     return out
 
@@ -115,7 +113,7 @@ def split_item(item: str) -> list[str]:
 def bullets(items: list[str], cap: int | None = BULLETS_MAX) -> list[str]:
     """Items as complete facts: split where one held several, counts of the rest dropped, at most `cap`."""
     facts = [f for it in items for f in split_item(it or "")]
-    return facts[:cap] if cap else facts
+    return facts if cap is None else facts[:cap]
 
 
 def _sentences(line: str) -> list[str]:
@@ -142,7 +140,11 @@ def details(text: str) -> str:
             out.append("*" + inline(next(g for g in h.groups() if g)).strip("*_ ") + "*")
             continue
         if note_rules.LIST_ITEM_RE.match(line):
-            out.extend("• " + inline(f) for f in split_item(note_rules.LIST_ITEM_RE.sub("", line)))
+            num = re.match(r"\d+[.)]", line)
+            mark = (num.group(0) if num else ("◦" if raw[:1].isspace() else "•")) + " "
+            facts = split_item(note_rules.LIST_ITEM_RE.sub("", line))
+            indent = "    " if raw[:1].isspace() else ""
+            out.extend(indent + mark + inline(f) for f in ([" ".join(facts)] if num else facts))  # a step stays one step
             continue
         sents = _sentences(line)
         if len(line) > PARA_MAX and len(sents) > 1:

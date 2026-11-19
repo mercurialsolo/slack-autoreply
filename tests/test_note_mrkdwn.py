@@ -89,6 +89,13 @@ check("…but a real one still is", N.status_of("Two deploys failed on mini.") =
 check("the sender's leading icon is the status", N.sender_status("🔴 deploy broke") == "failed"
       and N.sender_status("⚠️ disk at 90%") == "warn" and N.sender_status("📨 a clip") == "info")
 check("a leading label is the status too", N.sender_status("*Done:* swept") == "ok")
+check("a later 🔴 line is not hidden by a first ✅",
+      N.from_text("✅ helsinki deployed v1.4\n🔴 hillsboro failed: disk full", "factory").status == "failed")
+check("…nor a failure after a Done: label", N.from_text("Done: shipped v2; hillsboro rollback failed", "f").status == "failed")
+check("…nor a failed point under a ✅ headline",
+      N.from_text("x", "f", headline="✅ Goal sweep finished", points=["hillsboro deploy failed"]).status == "failed")
+check("'no idea what failed' is a failure", N.status_of("No idea what failed on helsinki") == "failed")
+check("'never seen this error' is a failure", N.status_of("Never seen this error before on helsinki") == "failed")
 check("no icon, no label: no sender status", N.sender_status("Disk at 40%.") is None)
 
 # --- escaping and arrows ------------------------------------------------------------------------
@@ -108,13 +115,20 @@ check("an unclosed * goes", M.balance("*Done: nothing new") == "Done: nothing ne
 check("a closed *bold* stays", M.balance("it is *done* now") == "it is *done* now")
 check("markdown **bold** is Slack *bold*", M.balance("**Next** step") == "*Next* step")
 check("snake_case is not italics and is not touched", M.balance("set max_retry_count to 3") == "set max_retry_count to 3")
-check("a stray _ at a word edge goes", M.balance("_draft only") == "draft only", M.balance("_draft only"))
+for t in ["config lives in ~/.slack-autoreply/.env", "took ~5 min", "glob *.py files", "2 * 3 * 4 = 24",
+          "edit __init__.py now", "user_id and _private"]:
+    check(f"plain text is not markup: {t!r}", M.inline(t) == t, M.inline(t))
+check("'&region=' is text, not the ® entity", M.inline("x=1&region=eu") == "x=1&amp;region=eu", M.inline("x=1&region=eu"))
 
 # --- bullets ------------------------------------------------------------------------------------
 check("'and N more' is not a fact", M.bullets(["Box A is up", "…and 3 more in the thread"]) == ["Box A is up"],
       M.bullets(["Box A is up", "…and 3 more in the thread"]))
 check("a trailing 'and 2 more' comes off a fact", M.split_item("Box A is up, and 2 more") == ["Box A is up"],
       M.split_item("Box A is up, and 2 more"))
+for t in ["Waiting on 2 others", "helsinki needs 2 more"]:
+    check(f"a count that is the fact stays: {t!r}", M.split_item(t) == [t], M.split_item(t))
+check("a point that is just a number is still a fact", M.bullets(["42%", "99.9% → 99.2%"]) == ["42%", "99.9% → 99.2%"])
+check("cap=0 is no bullets", M.bullets(["a1", "b2"], cap=0) == [])
 check("at most 3 bullets", len(M.bullets(["a1", "b2", "c3", "d4", "e5"])) == 3)
 check("a bullet holding two messages is two facts",
       M.split_item("Checked 14 calls. ✅ Release-watch green.") == ["Checked 14 calls.", "✅ Release-watch green."],
@@ -124,6 +138,10 @@ check("explicit points that are counts never reach the note",
       "more in the thread" not in all_text(N.render(N.from_text(
           "Swept the boxes.", "factory", headline="Swept the boxes.",
           points=["Box A is fine.", "Box B is fine.", "and 4 more in the thread"]))))
+
+steps = M.details("Steps:\n1. stop the service\n2. run make install\n  - nested one")
+check("numbered steps keep their numbers, a nested item its nesting",
+      steps == "*Steps*\n1. stop the service\n2. run make install\n    ◦ nested one", steps)
 
 # --- code blocks in Details ---------------------------------------------------------------------
 fence = "```\n- a -> b\n**x**\n```"

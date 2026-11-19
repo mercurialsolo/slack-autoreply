@@ -95,15 +95,26 @@ VERB_STATUS = (("held", "held"), ("frozen", "held"), ("rolled back", "failed"), 
 
 
 # "no new failures", "0 failed", "without errors": the word is there, the failure is not.
-NEGATED_RE = re.compile(r"\b(?:no|zero|0|without|nothing|none|never)\s+(?:new\s+|more\s+|other\s+|open\s+)?(?:[\w-]+\s+){0,2}?"
+NEGATED_RE = re.compile(r"\b(?:no|zero|0|without|nothing|none)\s+(?:new\s+|more\s+|other\s+|open\s+)?(?:[\w-]+\s+)?"
                         r"(?:fail\w*|errors?|crash\w*|warn\w*|regress\w*|retr\w*|broke\w*)\b|"
                         r"\b(?:did ?n[o']t|didn't|not)\s+(?:fail|crash|break|regress)\b", re.I)
 
 
 def sender_status(text: str) -> str | None:
     """The status the sender put first, as an icon or a label ("✅ …", "Done: …"), or None."""
+    return _icon_status(text) or label_status(text)
+
+
+def line_statuses(text: str) -> list[str]:
+    """Each line's status: its own leading icon or label if it has one, else its words. The note's is
+    the worst of these, so a later "🔴 hillsboro failed" is never hidden by a first ✅."""
+    lines = (note_rules.LIST_ITEM_RE.sub("", ln) for ln in (text or "").split("\n") if ln.strip())
+    return [_icon_status(ln) or worst([label_status(ln), status_of(ln)]) for ln in lines]
+
+
+def _icon_status(text: str) -> str | None:
     m = re.match(r"\s*(" + note_rules.EMOJI + r")", text or "")
-    return ICON_STATUS.get(m.group(1)) if m else label_status(text)
+    return ICON_STATUS.get(m.group(1)) if m else None
 
 
 def status_of(text: str) -> str:
@@ -400,7 +411,7 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
         body = [more] + [c(p) for p in points[:SUMMARY_MAX]]
         if not head:  # the headline could not be cleaned: the first plain point stands in for it
             head, body = next(((b, body[:i] + body[i + 1:]) for i, b in enumerate(body) if b), ("", body))
-        st = norm_status(status) or ("ask" if options else sender_status(headline) or worst([status_of(head)] + [status_of(b) for b in body if b] + labels))
+        st = norm_status(status) or ("ask" if options else worst(line_statuses(headline) + [s for p in points for s in line_statuses(p)] + labels))
         extra = points[SUMMARY_MAX:]
         whole = details if details is not None else intent  # pruned once, against the note as shown
         if extra and not all(x in whole for x in extra):
@@ -437,7 +448,6 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
         ask_i = max((i for i, x in enumerate(cleaned) if x.endswith("?")), default=None)
         asks = cleaned[ask_i] if ask_i is not None else ""
         rest = [x for i, x in enumerate(cleaned) if i != ask_i]
-        statuses = [status_of(x) for x in cleaned] + labels
         if rest:
             rs = [status_of(x) for x in rest]
             lead = rs.index(worst(rs))
@@ -446,7 +456,7 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
             head, others, asks = asks, [], ""
         head, more = _split_long(head)
         body = [more] + others
-        st = norm_status(status) or ("ask" if options else sender_status(intent) or worst(statuses))
+        st = norm_status(status) or ("ask" if options else worst(line_statuses(intent) + labels))
         whole = details if details is not None else intent
     summary = _summary([b for b in body if b])
     if had_cmd and CMD_NOTE not in summary:
