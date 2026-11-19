@@ -44,7 +44,8 @@ scripts/voice.py         VOICE.md template, sample pulling/picking, continuous c
 scripts/recall.py        dossiers (people/, channels/), history, search, about
 scripts/config.py        paths + settings
 deploy/                  launchd plist, systemd unit, install-service.sh, release-pull.sh (tag → node)
-tests/test_offline.py    379 end-to-end checks with a fake Slack and a fake claude — no tokens needed
+tests/test_offline.py    end-to-end checks with a fake Slack and a fake claude — no tokens needed
+tests/test_offline_intake.py  the same, for engineering requests, SR investigations and staff intake
 LICENSE                  MIT
 docs/architecture.svg    the diagram above
 ```
@@ -67,9 +68,9 @@ Each step ends with how you know it worked.
 `AGENTS.md`, verifying each. Or from a clone, which installs the same plugin under
 `~/.claude/skills/solo`:
 ```
-./install.sh && python3 tests/test_offline.py
+./install.sh && python3 tests/test_offline.py && python3 tests/test_offline_intake.py
 ```
-Last line: `450 checks passed`. Either way the daemon runs from the plugin's own directory, so
+Each ends `N checks passed`. Either way the daemon runs from the plugin's own directory, so
 after `claude plugin update solo` run `/solo:deploy` again to re-point the service.
 
 **3. Slack app.** api.slack.com/apps → *Create New App* → *From a manifest* → paste `manifest.yaml`. Then:

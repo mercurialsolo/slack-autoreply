@@ -12,6 +12,7 @@ doctor:         ## preflight: tokens, scopes, claude login, skill, context dirs,
 
 test:           ## offline test suite (fake Slack, fake claude) — no tokens needed
 	$(PY) tests/test_offline.py
+	$(PY) tests/test_offline_intake.py
 	$(PY) tests/test_owner_note.py
 	$(PY) tests/test_attention.py
 	$(PY) tests/test_release_pull.py
@@ -20,6 +21,7 @@ test:           ## offline test suite (fake Slack, fake claude) — no tokens ne
 	$(PY) tests/test_writer_auth.py
 	$(PY) tests/test_note_mrkdwn.py
 	$(PY) tests/test_note_shape.py
+	$(PY) tests/test_inbound_retry.py
 
 setup:          ## interactive voice training in Claude Code
 	cd $(HOME) && claude "/solo:slack-autoreply setup"

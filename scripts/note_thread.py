@@ -21,7 +21,23 @@ import re
 import note_rules
 
 LIST_ITEM_RE = note_rules.LIST_ITEM_RE
-SECTION_RE = re.compile(r"^\*[^*\n]{1,60}(?<![.!?])\*\s*$")  # a `*Section*` title on its own line (note_shape, note_mrkdwn)
+# A section heading: `*Known issue*`, `**Release v0.812.0**`, `## Known issue` (note_mrkdwn makes
+# the last two the first). Never a sentence: `*Nothing was stopped.*` is a repeat like any other,
+# and a lone "#" is a shell comment, not a heading.
+SECTION_RE = re.compile(r"^\s*(?:#{2,6}\s+[^\n]{1,60}?(?<![.!?])\s*#*|\*{1,2}[^*\n]{1,60}?(?<![.!?]):?\*{1,2}:?)\s*$")
+
+
+def _section(ln: str) -> bool:
+    """A section heading heads everything up to the next one, so it stays while any of that does,
+    even when the note says its words; unless every fact before its first break was said (`_close`)."""
+    return bool(SECTION_RE.match(ln))
+
+
+def _header(ln: str) -> bool:
+    """A "Biggest:" header: it stays only with the items under it."""
+    return ln.rstrip().endswith(":") and not LIST_ITEM_RE.match(ln) and not _section(ln)
+
+
 NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")  # a count or a size: which item it belongs to is a fact
 SENTENCE_SPLIT = note_rules.SENTENCE_SPLIT
 CLAUSE_SPLIT = re.compile(r"(?<=;)\s+")  # a clause after ";" is its own fact, unless it is a command's
@@ -122,23 +138,25 @@ def beyond(details: str, said: list[str], links: list[str] | tuple = ()) -> str:
     kept: list[str] = []
     title = None  # [its index in kept, "said" (a fact under it was dropped), "fresh" (one was kept)]
     for ln, fenced in zip(lines, _fences(lines)):
-        if not fenced and SECTION_RE.match(ln):  # a `*Section*` title: whole, it stays while a fact under it does
+        if not fenced and _section(ln):  # a heading the note echoes still heads what is new
             _close(kept, title)
             title = [len(kept), False, False]
             kept.append(ln)
             continue
-        if not fenced and not ln.strip():
-            if title and (title[1] or title[2]):  # a break after its facts ends what the title heads
+        if fenced or not ln.strip():
+            if not fenced and title and (title[1] or title[2]):  # a break after its facts ends what the title heads
                 _close(kept, title)
                 title = None
+            elif fenced and title:
+                title[2] = True
             kept.append(ln)
             continue
-        units = [] if fenced else _units(ln)
+        units = _units(ln)
         fresh = [u for u in units if note_rules.COMMAND_RE.search(u) or new(u)]
-        if fenced or fresh:
-            kept.append(ln if fenced or LIST_ITEM_RE.match(ln) or len(fresh) == len(units) else " ".join(fresh).rstrip(" ;"))
+        if fresh:
+            kept.append(ln if LIST_ITEM_RE.match(ln) or len(fresh) == len(units) else " ".join(fresh).rstrip(" ;"))
         if title:
-            title[2 if fenced or fresh else 1] = True
+            title[2 if fresh else 1] = True
     _close(kept, title)
     return _tidy(kept)
 
@@ -166,7 +184,8 @@ def missing(text: str, details: str) -> str:
 
 
 def _close(kept: list[str], title) -> None:
-    """A section title whose facts were all said goes with them (marked "" here; `_tidy` drops the gap)."""
+    """A heading whose facts before the first break were all said goes with them, so it never heads
+    the next paragraph (marked "" here; `_tidy` drops the gap)."""
     if title and title[1] and not title[2]:
         kept[title[0]] = ""
 
@@ -180,28 +199,34 @@ def _tidy(lines: list[str]) -> str:
         if fenced[i]:
             out.append(ln)
             continue
-        if _head(ln):
+        if _header(ln):
             nxt = next((x for x in lines[i + 1:] if x.strip()), "")
             right = lines[i + 1] if i + 1 < len(lines) else ""
             heads = LIST_ITEM_RE.match(nxt) or nxt.lstrip().startswith("```")
-            titled = SECTION_RE.match(ln) and nxt and not _head(nxt)  # "*Title*", a break, then its paragraph
-            if not heads and not titled and (not right.strip() or _head(right)):
+            if not heads and (not right.strip() or _header(right)):
                 continue
         if not ln.strip() and (not out or not out[-1].strip()):
             continue
         out.append(ln)
-    return "\n".join(out).strip()
-
-
-def _head(ln: str) -> bool:
-    """A line that heads the items under it: "Biggest:" or a `*Section*` title."""
-    return bool((ln.rstrip().endswith(":") or SECTION_RE.match(ln)) and not LIST_ITEM_RE.match(ln))
+    # then, from the end: a section heading stays only with a line kept under it
+    fenced, content, keep = _fences(out), False, []
+    for ln, f in zip(reversed(out), reversed(fenced)):
+        if not f and _section(ln):
+            if not content:
+                if keep and not keep[-1].strip():
+                    keep.pop()  # its blank line goes with it
+                continue
+            content = False
+        elif ln.strip():
+            content = True
+        keep.append(ln)
+    return "\n".join(reversed(keep)).strip()
 
 
 def _intro(lines: list[str], i: int) -> bool:
     """A "Raw record:" line that heads the code block under it: part of the block."""
     nxt = next((x for x in lines[i + 1:] if x.strip()), "")
-    return lines[i].rstrip().endswith(":") and nxt.lstrip().startswith("```")
+    return _header(lines[i]) and nxt.lstrip().startswith("```")
 
 
 def model_beyond(details: str, note_text: str, call) -> str:
@@ -211,7 +236,9 @@ def model_beyond(details: str, note_text: str, call) -> str:
     lines = (details or "").splitlines()
     if not call or not any(ln.strip() for ln in lines):
         return details
-    fixed = [_kept(ln, f) or not ln.strip() or _intro(lines, i) for i, (ln, f) in enumerate(zip(lines, _fences(lines)))]
+    # a section heading is not offered: it stays while a line under it does (_tidy)
+    fixed = [_kept(ln, f) or not ln.strip() or _section(ln) or _intro(lines, i)
+             for i, (ln, f) in enumerate(zip(lines, _fences(lines)))]
     offer = [i for i, f in enumerate(fixed) if not f]
     if not offer:
         return details
