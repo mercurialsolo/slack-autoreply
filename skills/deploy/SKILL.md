@@ -2,7 +2,7 @@
 name: deploy
 description: Install, configure and start Solo on this machine by following its deployment runbook phase by phase. Use when the owner says "set up Solo", "deploy Solo", "install slack-autoreply", or after `claude plugin install solo`.
 disable-model-invocation: true
-allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/install.sh:*), Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/slackctl.py:*), Bash(${CLAUDE_PLUGIN_ROOT}/deploy/install-service.sh:*), Bash(python3 ${CLAUDE_PLUGIN_ROOT}/tests/test_offline.py:*), Read
+allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/install.sh:*), Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/slackctl.py:*), Bash(${CLAUDE_PLUGIN_ROOT}/deploy/install-service.sh:*), Bash(python3 ${CLAUDE_PLUGIN_ROOT}/tests/test_offline.py:*), Bash(python3 ${CLAUDE_PLUGIN_ROOT}/tests/test_offline_intake.py:*), Read
 ---
 
 # Deploy Solo

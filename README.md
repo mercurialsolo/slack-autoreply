@@ -70,7 +70,7 @@ Each step ends with how you know it worked.
 ```
 ./install.sh && python3 tests/test_offline.py && python3 tests/test_offline_intake.py
 ```
-Last lines: `490 checks passed`, then `165 checks passed`. Either way the daemon runs from the plugin's own directory, so
+Each ends `N checks passed`. Either way the daemon runs from the plugin's own directory, so
 after `claude plugin update solo` run `/solo:deploy` again to re-point the service.
 
 **3. Slack app.** api.slack.com/apps → *Create New App* → *From a manifest* → paste `manifest.yaml`. Then:

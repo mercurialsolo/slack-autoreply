@@ -7,13 +7,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
-import time
-from datetime import datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
@@ -56,10 +52,6 @@ os.environ.update(ENV)
 sys.path.insert(0, str(SCRIPTS))
 
 import slackctl as S  # noqa: E402
-import recall  # noqa: E402
-import triage  # noqa: E402
-import voice  # noqa: E402
-from followups import hold_deadline  # noqa: E402
 
 U, D, C = "UPRIYA01", "DPRIYA01", "CGROWTH1"
 U2, D2 = "UANA0001", "DANA0001"

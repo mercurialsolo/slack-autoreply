@@ -10,19 +10,14 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
 from types import SimpleNamespace
 
 import offline_harness as H  # noqa: E402  (sets the environment first)
 from offline_harness import (TMP, STATE, U, D, U2, NAMES, FakeClient, check)  # noqa: E402
 import slackctl as S  # noqa: E402
-import recall  # noqa: E402
 import triage  # noqa: E402
-import voice  # noqa: E402
-from followups import hold_deadline  # noqa: E402
 
 # The daemon as the earlier offline sections leave it: a bot DM, claude dispatch, a delegate peer
 # with no claudectl, and the colleagues it has met.
