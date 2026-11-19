@@ -97,6 +97,13 @@ check("…nor a failed point under a ✅ headline",
 check("'no idea what failed' is a failure", N.status_of("No idea what failed on helsinki") == "failed")
 check("'never seen this error' is a failure", N.status_of("Never seen this error before on helsinki") == "failed")
 check("no icon, no label: no sender status", N.sender_status("Disk at 40%.") is None)
+check("a command or a link in the note does not set its icon",
+      N.from_text("✅ Done: v2.3 is live on hillsboro.\nTo undo: `dev/rollback.sh 2.3`", "f").status == "ok"
+      and N.from_text("Merged #2708. CI run: https://github.com/o/r/actions/runs/1/failed-jobs", "f").status == "ok")
+check("a zero counter in a list is not a failure",
+      N.from_text("Canary green on hillsboro, v2.3 is live.\n- passed: 655\n- failed: 0", "f").status == "ok")
+check("…but a non-zero one still is",
+      N.from_text("Canary green on hillsboro, v2.3 is live.\n- passed: 653\n- failed: 2", "f").status == "failed")
 
 # --- escaping and arrows ------------------------------------------------------------------------
 check("an entity already written is not escaped twice", M.escape("a &gt; b &amp;amp; c") == "a &gt; b &amp; c",

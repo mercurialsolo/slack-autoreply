@@ -97,7 +97,8 @@ VERB_STATUS = (("held", "held"), ("frozen", "held"), ("rolled back", "failed"), 
 # "no new failures", "0 failed", "without errors": the word is there, the failure is not.
 NEGATED_RE = re.compile(r"\b(?:no|zero|0|without|nothing|none)\s+(?:new\s+|more\s+|other\s+|open\s+)?(?:[\w-]+\s+)?"
                         r"(?:fail\w*|errors?|crash\w*|warn\w*|regress\w*|retr\w*|broke\w*)\b|"
-                        r"\b(?:did ?n[o']t|didn't|not)\s+(?:fail|crash|break|regress)\b", re.I)
+                        r"\b(?:did ?n[o']t|didn't|not)\s+(?:fail|crash|break|regress)\b|"
+                        r"\b(?:fail\w*|errors?|crash\w*|warn\w*|regress\w*|retr\w*)\s*[:=]\s*(?:0|none)\b(?![.,]\d)", re.I)  # "failed: 0"
 
 
 def sender_status(text: str) -> str | None:
@@ -108,8 +109,16 @@ def sender_status(text: str) -> str | None:
 def line_statuses(text: str) -> list[str]:
     """Each line's status: its own leading icon or label if it has one, else its words. The note's is
     the worst of these, so a later "🔴 hillsboro failed" is never hidden by a first ✅."""
-    lines = (note_rules.LIST_ITEM_RE.sub("", ln) for ln in (text or "").split("\n") if ln.strip())
-    return [_icon_status(ln) or worst([label_status(ln), status_of(ln)]) for ln in lines]
+    out = []
+    for ln in (text or "").split("\n"):
+        if not ln.strip():
+            continue
+        ln = note_rules.LIST_ITEM_RE.sub("", ln)
+        # a command or a link ("`dev/rollback.sh`", ".../failed-jobs") and a zero ("failed: 0") say
+        # nothing of how it went
+        words = NEGATED_RE.sub("", note_mrkdwn.PROTECT.sub(" ", ln))
+        out.append(_icon_status(ln) or worst([label_status(words), status_of(words)]))
+    return out
 
 
 def _icon_status(text: str) -> str | None:
