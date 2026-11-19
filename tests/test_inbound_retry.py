@@ -51,6 +51,10 @@ check("…owed at 20 min", R.holding_owed(h, T0 + timedelta(minutes=20)))
 R.mark_held(h, "123.456", T0 + timedelta(minutes=20))
 check("…and only once", not R.holding_owed(h, T0 + timedelta(hours=2)) and h["retry"]["held"]["ts"] == "123.456")
 
+check("expired: kept past the give-up age, whatever held it back",
+      R.expired({"status": R.STATUS, "retry": {"first_at": "2026-11-18T19:39:00"}}, T0)
+      and not R.expired({"status": R.STATUS, "retry": {"first_at": "2026-11-19T19:00:00"}}, T0))
+
 check("a mangled next_at counts as due, not as a crash",
       [x["id"] for x in R.due([{"id": "m", "status": R.STATUS, "retry": {"next_at": "garbage"}}])] == ["m"])
 

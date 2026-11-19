@@ -3783,8 +3783,7 @@ class Daemon(Slack):
                 # A retry the last process was composing when it stopped: nothing else will pick it up.
                 for it in list_items({"handling"}):
                     if it.get("retry"):
-                        it["status"] = inbound_retry.STATUS
-                        save_item(it)
+                        self._requeue(it)
                 self._retry_resumed = True
             kept = list_items({inbound_retry.STATUS})
             if not kept or self.state.pause_info() is not None:
@@ -3793,18 +3792,46 @@ class Daemon(Slack):
             for item in sorted(kept, key=lambda it: (it.get("retry") or {}).get("first_at") or ""):
                 try:
                     if self.retry_one(item, item["id"] in due) == "still out":
-                        due = set()   # the accounts are still full: the rest wait for their next turn
+                        # The accounts are still full: every kept message waits as long as this one
+                        # does, so the pool sees one try per backoff step, not one per message.
+                        nxt = load_item(item["id"])["retry"]["next_at"]
+                        for other in kept:
+                            if other["id"] in due and other["id"] != item["id"]:
+                                o = load_item(other["id"])
+                                if o.get("status") == inbound_retry.STATUS:
+                                    o["retry"]["next_at"] = max(nxt, o["retry"].get("next_at") or "")
+                                    save_item(o)
+                        due = set()
                 except (Exception, SystemExit) as e:  # noqa: BLE001 — one bad item must not stall the queue
                     log.warning("retry of %s failed: %s", item.get("id"), e)
+                    self._requeue(item)
         finally:
             self._retry_lock.release()
 
+    def _requeue(self, item: dict) -> None:
+        """A kept message a retry left half-done ("handling") goes back on the queue."""
+        try:
+            it = load_item(item["id"])
+            if it.get("status") == "handling" and it.get("retry"):
+                it["status"] = inbound_retry.STATUS
+                save_item(it)
+        except (Exception, SystemExit):  # noqa: BLE001
+            pass
+
     def retry_one(self, item: dict, due: bool) -> str:
-        """One kept message: stand down, wait, hold, or run it again. Says which."""
+        """One kept message: give up, stand down, wait, hold, or run it again. Says which."""
+        if inbound_retry.expired(item):
+            # Kept past INBOUND_RETRY_GIVE_UP_HOURS however it was held back: fail the old way, said once.
+            item["status"] = "failed"
+            item["outcome"] = {**(item.get("outcome") or {}), "status": "failed",
+                               "why": f"kept {inbound_retry.give_up_s() / 3600:.0f} h without a free account"}
+            save_item(item)
+            self.notify(f"⚠️ Couldn't handle a message from *{item['sender_name']}* ({describe_where(item)}): "
+                        f"{item['outcome']['why']}\n{quote(item['text'][:300])}"
+                        + (f"\n{item['permalink']}" if item.get("permalink") else ""))
+            return "gave up"
         if not (due or inbound_retry.holding_owed(item)):
             return "wait"
-        if self.stand_down_kept(item):
-            return "stood down"
         if not self._allowed(item["sender"], item["channel"]):
             item["status"], item["outcome"] = "done", {"status": "skipped", "why": "allow/block"}
             save_item(item)
@@ -3812,6 +3839,8 @@ class Daemon(Slack):
         if (in_quiet_hours(CFG["quiet_hours"]) or (CFG["only_when_away"] and self.presence_active())
                 or self._over_limit(item["channel"])):
             return "wait"   # the gates on_inbound applies; the message keeps until they open
+        if self.stand_down_kept(item):
+            return "stood down"
         if inbound_retry.holding_owed(item):
             self.send_holding(item)
         if not due:
@@ -3825,10 +3854,11 @@ class Daemon(Slack):
         return "still out" if load_item(item["id"]).get("status") == inbound_retry.STATUS else "ran"
 
     def stand_down_kept(self, item: dict) -> bool:
-        """A kept message the conversation has moved past: the owner answered, or the sender wrote again."""
-        held = ((item.get("retry") or {}).get("held") or {}).get("ts")
+        """A kept message the conversation has moved past: the owner answered, or the sender wrote again.
+        Solo's own posts (holding replies, auto replies to other messages) are not the owner answering."""
+        solo = set(self.state.read().get("sent", {}))
         newer = [m for m in self.newer_messages(item["channel"], item.get("reply_thread_ts"), item["ts"])
-                 if m.get("ts") != held]
+                 if m.get("ts") not in solo]
         why = ("you replied" if any(m.get("user") == self.me for m in newer)
                else "superseded" if any(m.get("user") == item["sender"] for m in newer) else None)
         if not why:
@@ -3839,22 +3869,28 @@ class Daemon(Slack):
         return True
 
     def send_holding(self, item: dict) -> None:
-        """The plain holding reply, once, where Solo may send to this person unreviewed; else nothing."""
+        """The plain holding reply, once, where Solo would answer this message unreviewed; else nothing."""
         mode, why = self.ledger.effective_mode("hold", item["sender"], item["channel"], CFG["mode"])
+        route = (item.get("triage") or {}).get("route")
         ts = ""
-        if mode == "auto" and not item.get("simulated") and not item.get("customer"):
+        if (mode == "auto" and route in (None, "reply", "hold")
+                and not item.get("simulated") and not item.get("customer")):
             text = inbound_retry.HOLDING_TEXT
             try:
                 ts = self.post(item["channel"], text, item.get("reply_thread_ts"), split=False)
             except Exception as e:  # noqa: BLE001 — the retry still runs; try the holding reply next pass
                 log.warning("holding reply to %s failed: %s", item["sender_name"], e)
                 return
-            # Registered as Solo's, so its echo is not read as the owner typing (no correction, no follow-up close).
-            self.state.update(lambda d: d["sent"].__setitem__(ts, {"item": item["id"], "channel": item["channel"],
+            self._count(item["channel"])
+            # Registered as Solo's send so its echo is not read as the owner typing. Under its own
+            # key, not the item's: an edit, delete or clean age of this canned line says nothing
+            # about the writer's reply to the item.
+            self.state.update(lambda d: d["sent"].__setitem__(ts, {"item": f"{item['id']}.hold", "channel": item["channel"],
                                                                     "at": now_iso(), "text": text}))
             log.info("holding reply to %s (%s)", item["sender_name"], describe_where(item))
         else:
-            log.info("no holding reply to %s (%s)", item["sender_name"], "a customer" if item.get("customer") else why)
+            log.info("no holding reply to %s (%s)", item["sender_name"],
+                     "a customer" if item.get("customer") else f"route {route}" if route not in (None, "reply", "hold") else why)
         item = load_item(item["id"])
         inbound_retry.mark_held(item, ts)
         save_item(item)

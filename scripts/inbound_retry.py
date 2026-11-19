@@ -98,6 +98,15 @@ def due(items: list[dict], now: datetime | None = None) -> list[dict]:
     return sorted(out, key=lambda it: (it.get("retry") or {}).get("first_at") or "")
 
 
+def expired(item: dict, now: datetime | None = None) -> bool:
+    """A kept message older than INBOUND_RETRY_GIVE_UP_HOURS, whatever held it back."""
+    first = (item.get("retry") or {}).get("first_at")
+    if item.get("status") != STATUS or not first:
+        return False
+    now = now or datetime.now()
+    return (now - _at(first, now)).total_seconds() >= give_up_s()
+
+
 def holding_owed(item: dict, now: datetime | None = None) -> bool:
     """A kept message whose sender has waited INBOUND_HOLD_AFTER_MIN and has not been told yet."""
     r = item.get("retry") or {}
@@ -116,7 +125,7 @@ def alert_tail(cls: str | None) -> str | None:
     """What the owner's "Solo cannot draft" alert says happens to new messages, for a kept class."""
     if cls not in RETRYABLE:
         return None
-    hold = (f" anyone waiting more than {hold_after_s() / 60:.0f} min gets a short holding reply."
-            if hold_after_s() else "")
+    hold = (f" where Solo sends unreviewed, anyone waiting more than {hold_after_s() / 60:.0f} min "
+            "gets a short holding reply." if hold_after_s() else "")
     return (f"_new messages are kept and retried as accounts free up;{hold} One still waiting after "
             f"{give_up_s() / 3600:.0f} h fails with its own alert._")
