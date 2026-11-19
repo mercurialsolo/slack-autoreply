@@ -21,13 +21,17 @@ import json
 import re
 from dataclasses import dataclass, field
 
+import note_mrkdwn
 import note_rules
 import note_thread
 from note_rules import COMMAND_RE
 
 # Most severe first: a message that is several things takes the icon of the worst.
 STATUSES = ("ask", "failed", "warn", "held", "shipping", "ok", "info")
-ICONS = {"ask": "❓", "failed": "🔴", "warn": "⚠️", "held": "⏸️", "shipping": "🚀", "ok": "✅", "info": "📨"}
+ICONS = {"ask": "❓", "failed": "🔴", "warn": "⚠️", "held": "⏸️", "shipping": "🚀", "ok": "✅", "info": "ℹ️"}
+# The sender's own leading icon says its status: "✅ No new failures" is ok, whatever its words match.
+ICON_STATUS = {**{v.rstrip("\ufe0f"): k for k, v in ICONS.items()}, "📨": "info", "❌": "failed", "🟢": "ok",
+               "🟡": "warn", "🟠": "warn", "✔": "ok", "☑": "ok", "⛔": "failed", "📣": "info"}
 ALIASES = {
     "needs-you": "ask", "question": "ask", "decide": "ask",
     "red": "failed", "fail": "failed", "rollback": "failed", "rolled-back": "failed", "error": "failed",
@@ -90,9 +94,42 @@ VERB_STATUS = (("held", "held"), ("frozen", "held"), ("rolled back", "failed"), 
                ("shipping", "shipping"), ("shipped", "ok"), ("deployed", "ok"), ("live", "ok"), ("green", "ok"))
 
 
+# "no new failures", "0 failed", "without errors": the word is there, the failure is not.
+NEGATED_RE = re.compile(r"\b(?:no|zero|0|without|nothing|none)\s+(?:new\s+|more\s+|other\s+|open\s+)?(?:[\w-]+\s+)?"
+                        r"(?:fail\w*|errors?|crash\w*|warn\w*|regress\w*|retr\w*|broke\w*)\b|"
+                        r"\b(?:did ?n[o']t|didn't|not)\s+(?:fail|crash|break|regress)\b|"
+                        r"\b(?:fail\w*|errors?|crash\w*|warn\w*|regress\w*|retr\w*)\s*[:=]\s*(?:0|none)\b(?![.,]\d)", re.I)  # "failed: 0"
+
+
+def sender_status(text: str) -> str | None:
+    """The status the sender put first, as an icon or a label ("✅ …", "Done: …"), or None."""
+    return _icon_status(text) or label_status(text)
+
+
+def line_statuses(text: str) -> list[str]:
+    """Each line's status: its own leading icon or label if it has one, else its words. The note's is
+    the worst of these, so a later "🔴 hillsboro failed" is never hidden by a first ✅."""
+    out = []
+    for ln in (text or "").split("\n"):
+        if not ln.strip():
+            continue
+        ln = note_rules.LIST_ITEM_RE.sub("", ln)
+        # a command or a link ("`dev/rollback.sh`", ".../failed-jobs") and a zero ("failed: 0") say
+        # nothing of how it went
+        words = NEGATED_RE.sub("", note_mrkdwn.PROTECT.sub(" ", ln))
+        out.append(_icon_status(ln) or worst([label_status(words), status_of(words)]))
+    return out
+
+
+def _icon_status(text: str) -> str | None:
+    m = re.match(r"\s*(" + note_rules.EMOJI + r")", text or "")
+    return ICON_STATUS.get(m.group(1)) if m else None
+
+
 def status_of(text: str) -> str:
     """What the words say happened: the box's own verb first ("Helsinki held at …" is held, whatever
     its reason mentions), then the most severe status anywhere in them, or info when there is none."""
+    text = NEGATED_RE.sub("", text or "")
     m = re.match(r"\W*(?:[\w ]{0,20}:\s*)?(?!(?:Not|Live|Now|The|It|This)\b)[A-Z][a-z]{2,}\s+(held|frozen|rolled back|red|shipping|shipped|deployed|live|green)\b", text or "")
     if m:
         return dict(VERB_STATUS)[m.group(1)]
@@ -110,7 +147,7 @@ LABEL_STATUS = (("needs", "ask"), ("question", "ask"), ("ask", "ask"), ("fail", 
 def label_status(piece: str) -> str | None:
     """What the status word lead_off takes off says ("Blocked: …" is held), or None when there is none."""
     m = note_rules.STATUS_LABEL_RE.match(note_rules.ICON_RE.sub("", piece or ""))
-    word = m.group(0).lower().strip() if m else ""
+    word = m.group(0).lower().strip(" *_~") if m else ""
     return next((st for w, st in LABEL_STATUS if word.startswith(w)), None)
 
 
@@ -196,15 +233,13 @@ def humanize(text: str) -> str:
     return _restore(t, kept)
 
 
-def _escape(t: str) -> str:
-    """Slack's three control characters, as entities (an entity already written stays as it is)."""
-    return re.sub(r"&(?!(?:amp|lt|gt);)", "&amp;", t).replace("<", "&lt;").replace(">", "&gt;")
+_escape = note_mrkdwn.escape  # Slack's three control characters, escaped once; "->" an arrow
 
 
 def emphasize(text: str) -> str:
     """mrkdwn bold for the box and the version — the two things the eye looks for."""
     t, kept = _protect(text)
-    t = _escape(t)
+    t = note_mrkdwn.plain(t)  # entities, arrows, one icon, no stray markup: before the bold below
     if not COMMAND_RE.search(text):
         t = BOX_RE.sub(lambda m: m.group(0) if m.group(1) in WORDS_STOP else f"*{m.group(1)}*", t)
         t = VERSION_RE.sub(r"*\1*", t)
@@ -380,12 +415,12 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
 
     asks = ""
     if headline:
-        points = [p.strip() for p in (points or []) if p and p.strip()]
+        points = note_mrkdwn.bullets([p.strip() for p in (points or []) if p and p.strip()], cap=None)
         head, more = _split_long(c(headline))
         body = [more] + [c(p) for p in points[:SUMMARY_MAX]]
         if not head:  # the headline could not be cleaned: the first plain point stands in for it
             head, body = next(((b, body[:i] + body[i + 1:]) for i, b in enumerate(body) if b), ("", body))
-        st = norm_status(status) or ("ask" if options else worst([status_of(head)] + [status_of(b) for b in body if b] + labels))
+        st = norm_status(status) or ("ask" if options else worst(line_statuses(headline) + [s for p in points for s in line_statuses(p)] + labels))
         extra = points[SUMMARY_MAX:]
         whole = details if details is not None else intent  # pruned once, against the note as shown
         if extra and not all(x in whole for x in extra):
@@ -422,7 +457,6 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
         ask_i = max((i for i, x in enumerate(cleaned) if x.endswith("?")), default=None)
         asks = cleaned[ask_i] if ask_i is not None else ""
         rest = [x for i, x in enumerate(cleaned) if i != ask_i]
-        statuses = [status_of(x) for x in cleaned] + labels
         if rest:
             rs = [status_of(x) for x in rest]
             lead = rs.index(worst(rs))
@@ -431,7 +465,7 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
             head, others, asks = asks, [], ""
         head, more = _split_long(head)
         body = [more] + others
-        st = norm_status(status) or ("ask" if options else worst(statuses))
+        st = norm_status(status) or ("ask" if options else worst(line_statuses(intent) + labels))
         whole = details if details is not None else intent
     summary = _summary([b for b in body if b])
     if had_cmd and CMD_NOTE not in summary:
@@ -512,7 +546,7 @@ def render(note: Note, buttons: bool = True) -> dict:
                   {"type": "actions", "block_id": "solo_ask", "elements": elements}]
         if foot:
             blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": foot}]})
-    details = "🔎 *Details*\n" + note.details if note.details else ""
+    details = "🔎 *Details*\n" + note_mrkdwn.details(note.details) if note.details else ""
     return {"text": text, "blocks": blocks, "details": details}
 
 
@@ -529,7 +563,7 @@ def group_thread(note: Note, details: bool = True, named: bool = True) -> str:
     details are already in the thread."""
     parts = body_lines(note, buttons=False)[0 if not named else 1:]
     if details and note.details:
-        parts.append("🔎 *Details*\n" + note.details)
+        parts.append("🔎 *Details*\n" + note_mrkdwn.details(note.details))
     return "\n".join(parts)
 
 

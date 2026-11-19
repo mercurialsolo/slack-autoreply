@@ -1035,7 +1035,7 @@ _own_file = Path(S.config.STATE_DIR) / "outbox" / "clip.mp4"; _own_file.parent.m
 _ownf, _ownf_out, _ownf_posts, _ownf_ups, _ = _say_to_owner("the onboarding clip", files=[{"path": str(_own_file), "name": "clip.mp4", "size": 3}])
 check("a file for the owner goes straight to them too — the human it needed is the one it reaches",
       _ownf["outcome"]["status"] == "sent" and _ownf["outcome"].get("files") and len(_ownf_ups) == 1 and _ownf_ups[0]["channel"] == d.console, _ownf_out)
-check("…uploaded with the words, not posted beside them", _ownf_posts == [] and _ownf_ups[0]["initial_comment"].startswith("📨 The onboarding clip")
+check("…uploaded with the words, not posted beside them", _ownf_posts == [] and _ownf_ups[0]["initial_comment"].startswith("ℹ️ The onboarding clip")
       and "_from agentvm-mini_" in _ownf_ups[0]["initial_comment"], _ownf_ups)
 
 fc.upload_error = "missing_scope"
