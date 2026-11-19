@@ -21,7 +21,7 @@ MAX_LINKS = 2
 BULLETS_MAX = 3  # the message's own "• " facts (owner, 2026-11-19); the full list stays in Details
 # Words only the agents use: a percentile (p50), an all-caps internal name (CALL-REVIEWs), a range of
 # check names (G1-G5). The owner reads the news in plain words; these stay in Details.
-JARGON_RE = re.compile(r"\bp(?:50|90|95|99)\b|\b[A-Z]{2,}(?:[-_][A-Z]{2,})+s?\b|\b[A-Z]\d+\s?[-–]\s?[A-Z]?\d+\b")
+JARGON_RE = re.compile(r"\bp(?:50|90|95|99)\b|\b[A-Z]{3,}[-_][A-Z]{3,}s?\b|\bG\d+\s?[-–]\s?G?\d+\b")
 RULE = (
     "Start with one short plain headline: what happened, not what was read or checked to find out. "
     "Then at most three short bullets, each one complete fact in plain words; never \"and N more\". "
@@ -288,7 +288,7 @@ def violations(text: str) -> list[str]:
         bad.append("a task id")
     if URL_RE.search(SLACK_LINK_RE.sub("", text)):
         bad.append("a bare URL")
-    if re.search(r"^\s*[-*◦]\s", text, re.M) or len(re.findall(r"^• ", text, re.M)) > BULLETS_MAX:
+    if re.search(r"^\s*[-*◦]\s", text, re.M) or len(re.findall(r"^\s*• ", text, re.M)) > BULLETS_MAX:
         bad.append("a bulleted line")  # the message's own "• " facts, three at most (owner, 2026-11-19)
     if JARGON_RE.search(SLACK_LINK_RE.sub("", CODE_RE.sub("", text))):
         bad.append("agent jargon")

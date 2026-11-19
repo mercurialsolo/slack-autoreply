@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import note_rules as R  # noqa: E402
 import note_shape as S  # noqa: E402
+import note_thread as T  # noqa: E402
 import owner_note as N  # noqa: E402
 
 passed = 0
@@ -181,5 +182,38 @@ check("parse: an answer from before points and sections still reads",
           S.parse(json.dumps({"status": "ok", "headline": "h", "summary": "s"}), "x")))
 check("the prompt keeps the owner's words: plain headline, three facts, no jargon, Needs you last",
       all(w in S.PROMPT for w in ('"points"', '"sections"', "Needs you", "CALL-REVIEW", "never what was read")))
+
+# Review round 1 (PR #19): what the first cut got wrong.
+check("jargon: plain caps with a dash are not jargon", all(not R.violations(t) for t in (
+    "US-EAST is back.", "The CI-CD run passed.", "The Q3-2026 plan is out.", "Rooms A1-A4 are free.")))
+check("jargon: CALL-REVIEWs, p50 and G1-G5 still are", all(R.violations(t) for t in (
+    "Read the CALL-REVIEWs.", "Calls took 4 s at p50.", "Goals G1-G5 all hold.")))
+CMD_SRC = "Two hosts are down. Run `make deploy HOST=a` to bring them back."
+check("sections: a section that lost the agent's command is no Details", S.sections(
+    [{"title": "Hosts", "facts": ["Two hosts are down."]}], CMD_SRC) == "")
+check("sections: one that kept it reads", "`make deploy HOST=a`" in S.sections(
+    [{"title": "Hosts", "facts": ["Two hosts are down.", "Run `make deploy HOST=a` to bring them back."]}], CMD_SRC))
+check("sections: facts given as one string are no Details",
+      S.sections([{"title": "Hosts", "facts": "Two hosts are down."}], "Two hosts are down.") == "")
+_sec = S.sections([{"title": "Weather", "facts": ["*Lisbon* is sunny", "- Oslo is -5 C", "• Rome is dry"]}],
+                  "Lisbon is sunny, Oslo is -5 C, Rome is dry")
+check("sections: a fact's own bold and minus stay, only its list mark goes",
+      "• *Lisbon* is sunny\n• Oslo is -5 C\n• Rome is dry" in _sec, _sec)
+check("bullets: indented • lines count toward three",
+      "a bulleted line" in R.violations("Done\n  • a\n  • b\n  • c\n  • d"))
+_b = T.beyond("*Goal sweep: no new call failures*\n• One issue is already queued.\n• The fix ships tonight.",
+              ["Goal sweep: no new call failures", "One issue is already queued."])
+check("thread: the headline again in bold is not repeated", "Goal sweep" not in _b and "ships tonight" in _b, _b)
+_b = T.beyond("*Notes*\n\nThe second host came back on its own after an hour.", [])
+check("thread: a section title over a break and a paragraph stays", _b.startswith("*Notes*"), _b)
+_n = N.scrub(N.Note(status="ok", headline="Read the CALL-REVIEWs since 16:20Z", sender="factory",
+                    points=["No new call failures.", "One known issue is already queued."]))
+check("scrub: a point leads when the headline breaks the rule",
+      _n.headline == "No new call failures." and _n.points == ["One known issue is already queued."], (_n.headline, _n.points))
+_body = "No new call failures. One known issue is already queued."
+_n = N.scrub(N.Note(status="ok", headline="Read the CALL-REVIEWs", sender="factory",
+                    details="*Calls*\n• No new call failures.\n• One known issue is already queued."), True, _body)
+check("scrub: sectioned Details that hold the agent's words do not get them again",
+      _body not in _n.details and _n.details.count("already queued") <= 1, _n.details)
 
 print(f"\n{passed} checks passed")

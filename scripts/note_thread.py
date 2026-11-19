@@ -105,6 +105,7 @@ def beyond(details: str, said: list[str], links: list[str] | tuple = ()) -> str:
     # pairs within one sentence: "Helsinki is green. Hillsboro failed." never says "Helsinki failed"
     said_pairs = set().union(*(_pairs(_seq(u)) for s in said for x in s.splitlines() for u in _units(x)))
     said_text = " ".join(said)
+    said_plain = {_plain(s) for s in said}
     said_urls = set(links).union(*(urls(s) for s in said))
     # a task id the note links to (its answer page) is said; one it does not is news
     linked = {w for u in said_urls for i in note_rules.TASK_ID_RE.findall(u) for w in _seq(i)}
@@ -121,7 +122,9 @@ def beyond(details: str, said: list[str], links: list[str] | tuple = ()) -> str:
     lines = (details or "").splitlines()
     kept: list[str] = []
     for ln, fenced in zip(lines, _fences(lines)):
-        if fenced or not ln.strip() or SECTION_RE.match(ln):  # a section's title stays while a fact under it does
+        if SECTION_RE.match(ln) and _plain(ln) in said_plain:  # the headline again, set bold: said
+            continue
+        if fenced or not ln.strip() or (SECTION_RE.match(ln) and len(ln.split()) <= TITLE_WORDS):  # a section's title stays while a fact under it does
             kept.append(ln)
             continue
         units = _units(ln)
@@ -129,6 +132,14 @@ def beyond(details: str, said: list[str], links: list[str] | tuple = ()) -> str:
         if fresh:
             kept.append(ln if LIST_ITEM_RE.match(ln) or len(fresh) == len(units) else " ".join(fresh).rstrip(" ;"))
     return _tidy(kept)
+
+
+TITLE_WORDS = 6  # a longer bold line is a sentence set bold, read as one
+
+
+def _plain(text: str) -> str:
+    """`text` without its marks, case or end punctuation: "*Goal sweep: done.*" is "goal sweep: done"."""
+    return re.sub(r"\s+", " ", text.strip().strip("*_ ").rstrip(".!?:").strip()).lower()
 
 
 def _tidy(lines: list[str]) -> str:
@@ -144,7 +155,8 @@ def _tidy(lines: list[str]) -> str:
             nxt = next((x for x in lines[i + 1:] if x.strip()), "")
             right = lines[i + 1] if i + 1 < len(lines) else ""
             heads = LIST_ITEM_RE.match(nxt) or nxt.lstrip().startswith("```")
-            if not heads and (not right.strip() or _head(right)):
+            titled = SECTION_RE.match(ln) and nxt and not _head(nxt)  # "*Title*", a break, then its paragraph
+            if not heads and not titled and (not right.strip() or _head(right)):
                 continue
         if not ln.strip() and (not out or not out[-1].strip()):
             continue

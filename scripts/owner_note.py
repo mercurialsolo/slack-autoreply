@@ -580,7 +580,7 @@ def scrub(note: Note, buttons: bool = True, body: str = "") -> Note:
     def ok(t):
         return bool(t) and not note_rules.violations(t) and len(t) <= HEADLINE_MAX * 2
     before = (note.headline, note.summary, note.ask, list(note.options), list(note.points))
-    keep = [x for x in (note.headline, note.summary, note.ask) if ok(x)]
+    keep = [x for x in (note.headline, note.summary, note.ask, *note.points) if ok(x)]  # a point can lead too
     head = note.headline if ok(note.headline) else (keep.pop(0) if keep else _FALLBACK.get(note.status, "An update."))
     note.summary = note.summary if ok(note.summary) and note.summary != head else ""
     note.ask = note.ask if ok(note.ask) and note.ask != head else ""
@@ -590,8 +590,11 @@ def scrub(note: Note, buttons: bool = True, body: str = "") -> Note:
         note.summary, note.ask, note.points = "", "", []
     if note_rules.violations(render(note, buttons)["text"]):  # the choices' words do: Details has them
         note.options, note.links = [], []
-    if body and (note.headline, note.summary, note.ask, note.options, note.points) != before and body.strip() not in (note.details or ""):
-        note.details = (note.details + "\n" if note.details else "") + body.strip()  # a dropped part is never lost
+    if body and (note.headline, note.summary, note.ask, note.options, note.points) != before:
+        # a dropped part is never lost: what of the agent's words the (sectioned) Details do not already say
+        rest = note_thread.beyond(body.strip(), [note.details]) if note.details else body.strip()
+        if rest and rest not in note.details:
+            note.details = (note.details + "\n" if note.details else "") + rest
     # ...and what the scrubbed note still says is not said again in its thread (owner, 2026-11-13)
     note.details = note_thread.beyond(note.details, [note.headline, note.summary, note.ask, *note.points],
                                       [u for u, _ in note.links])

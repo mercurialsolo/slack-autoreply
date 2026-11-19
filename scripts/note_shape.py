@@ -131,13 +131,19 @@ def sections(raw, source: str) -> str:
         if not isinstance(s, dict):
             return ""
         title = str(s.get("title") or "").strip().strip("*_: ")
-        facts = [str(f).strip().lstrip("•-* ") for f in s.get("facts") or [] if str(f).strip()]
+        raw_facts = s.get("facts")
+        if not isinstance(raw_facts, list):  # a string would be read a character at a time
+            return ""
+        facts = [re.sub(r"^(?:[•◦]|[-*](?=\s))\s*", "", str(f).strip()) for f in raw_facts if str(f).strip()]
         if title and facts:
             parts.append((title, facts))
     parts.sort(key=lambda p: p[0].lower() == NEEDS_YOU)  # stable: only "Needs you" moves, to the end
     text = "\n\n".join(f"*{t}*\n" + "\n".join("• " + f for f in fs) for t, fs in parts)
     kept = set(_tokens(text))
-    return text if parts and all(t in kept or t in text for t in _tokens(source)) else ""
+    if not parts or not all(t in kept or t in text for t in _tokens(source)):
+        return ""
+    # a command or code the agent wrote is its exact words: a section that lost one loses the note's point
+    return text if all(m.group(0) in text for m in note_rules.CODE_RE.finditer(source)) else ""
 
 
 def _tokens(text: str) -> list[str]:
