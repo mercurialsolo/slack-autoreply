@@ -21,9 +21,10 @@ import re
 import note_rules
 
 LIST_ITEM_RE = note_rules.LIST_ITEM_RE
-# A section heading: `*Known issue*`, `**Known issue**`, `## Known issue` (note_mrkdwn makes the
-# last two the first). Never a sentence: `*Nothing was stopped.*` is a repeat like any other.
-SECTION_RE = re.compile(r"^\s*(?:#{1,6}\s+[^\n.!?]{1,60}?\s*#*|\*{1,2}[^*\n.!?]{1,60}?:?\*{1,2}:?)\s*$")
+# A section heading: `*Known issue*`, `**Release v0.812.0**`, `## Known issue` (note_mrkdwn makes
+# the last two the first). Never a sentence: `*Nothing was stopped.*` is a repeat like any other,
+# and a lone "#" is a shell comment, not a heading.
+SECTION_RE = re.compile(r"^\s*(?:#{2,6}\s+[^\n]{1,60}?(?<![.!?])\s*#*|\*{1,2}[^*\n]{1,60}?(?<![.!?]):?\*{1,2}:?)\s*$")
 
 
 def _section(ln: str) -> bool:
@@ -33,8 +34,8 @@ def _section(ln: str) -> bool:
 
 
 def _header(ln: str) -> bool:
-    """A header: a section heading or a line ending in ":" ("Biggest:"); it stays only with what it heads."""
-    return _section(ln) or (ln.rstrip().endswith(":") and not LIST_ITEM_RE.match(ln))
+    """A "Biggest:" header: it stays only with the items under it."""
+    return ln.rstrip().endswith(":") and not LIST_ITEM_RE.match(ln) and not _section(ln)
 
 
 NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")  # a count or a size: which item it belongs to is a fact
@@ -155,10 +156,7 @@ def _tidy(lines: list[str]) -> str:
         if fenced[i]:
             out.append(ln)
             continue
-        if _section(ln):
-            if not any(x.strip() and not _section(x) for x in _until_section(lines, i)):
-                continue
-        elif _header(ln):
+        if _header(ln):
             nxt = next((x for x in lines[i + 1:] if x.strip()), "")
             right = lines[i + 1] if i + 1 < len(lines) else ""
             heads = LIST_ITEM_RE.match(nxt) or nxt.lstrip().startswith("```")
@@ -167,14 +165,19 @@ def _tidy(lines: list[str]) -> str:
         if not ln.strip() and (not out or not out[-1].strip()):
             continue
         out.append(ln)
-    return "\n".join(out).strip()
-
-
-def _until_section(lines: list[str], i: int) -> list[str]:
-    """The lines under the section heading at `i`, up to the next section heading."""
-    rest = lines[i + 1:]
-    end = next((j for j, x in enumerate(rest) if _section(x)), len(rest))
-    return rest[:end]
+    # then, from the end: a section heading stays only with a line kept under it
+    fenced, content, keep = _fences(out), False, []
+    for ln, f in zip(reversed(out), reversed(fenced)):
+        if not f and _section(ln):
+            if not content:
+                if keep and not keep[-1].strip():
+                    keep.pop()  # its blank line goes with it
+                continue
+            content = False
+        elif ln.strip():
+            content = True
+        keep.append(ln)
+    return "\n".join(reversed(keep)).strip()
 
 
 def _intro(lines: list[str], i: int) -> bool:
@@ -191,7 +194,8 @@ def model_beyond(details: str, note_text: str, call) -> str:
     if not call or not any(ln.strip() for ln in lines):
         return details
     # a section heading is not offered: it stays while a line under it does (_tidy)
-    fixed = [_kept(ln, f) or not ln.strip() or _section(ln) or _intro(lines, i) for i, (ln, f) in enumerate(zip(lines, _fences(lines)))]
+    fixed = [_kept(ln, f) or not ln.strip() or _section(ln) or _intro(lines, i)
+             for i, (ln, f) in enumerate(zip(lines, _fences(lines)))]
     offer = [i for i, f in enumerate(fixed) if not f]
     if not offer:
         return details

@@ -476,6 +476,13 @@ check("beyond: a section heading stays over a sub-header; a ':' line or a bold s
       and T.beyond("Nothing was stopped. Top processes:\n- qemu 18 GB", ["Nothing was stopped."])
       == "Top processes:\n- qemu 18 GB"
       and T.beyond("*Nothing was stopped.*\nThe disk is at 80%.", ["Nothing was stopped."]) == "The disk is at 80%.")
+check("beyond: a heading whose sub-header lost every item goes too; a version in a heading is no sentence",
+      T.beyond("*Memory*\nTop processes:\n- qemu 18.2 GB\n\n*Disk*\n- 80% used on /var", ["qemu 18.2 GB"])
+      == "*Disk*\n- 80% used on /var"
+      and T.beyond("*Release v0.812.0*\n- canary 5/5 on helsinki", ["Release v0.812.0 promoted"])
+      == "*Release v0.812.0*\n- canary 5/5 on helsinki"
+      and T.beyond("Per site results:\n*Helsinki*\n- 3 passed", ["Release done"])
+      == "Per site results:\n*Helsinki*\n- 3 passed")
 check("model_beyond: a section heading is not the model's to drop; it goes only with all its lines",
       T.model_beyond("*Known issue*\n- Hillsboro cut off\n*Other*\n- x", "n", lambda p: '{"new": [1]}')
       == "*Known issue*\n- Hillsboro cut off"
