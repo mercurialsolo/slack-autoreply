@@ -220,7 +220,8 @@ What each part is for, with the 2026-11-19 goal-sweep note as the example of get
   `*Section*` heading per topic, one `•` per fact, short lines, and a last `*Needs you*` section only when something does. Ids, shas,
   counters and commands belong here. Never one long paragraph.
 - Write plain text: `->` is fine (it shows as an arrow), and you never escape `&`, `<` or `>`.
-  Do not wrap words in `*` or `_` yourself, and use one icon per line at most.
+  Do not wrap words in `*` or `_` yourself (a `*Section*` heading on its own line in the detail is
+  the one exception), and use one icon per line at most.
 
 The same goal-sweep note, as the job should send it:
 

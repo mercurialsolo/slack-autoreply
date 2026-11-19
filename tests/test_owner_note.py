@@ -470,7 +470,17 @@ check("beyond: a *Section* heading the note echoes stays while an item under it 
       == "*Known issue*\n• Hillsboro greeting cut off: queued as t_5c2e10aa"
       and T.beyond("*Checked*\n• 14 calls checked, nothing new.\n\n*New*\n• canary 5/5", ["14 calls checked, nothing new."])
       == "*New*\n• canary 5/5")
-_d ="- Biggest: qemu 18.2 GB\n- VMs running (3): agentvm, hillsboro\n```\nraw\n```"
+check("beyond: a section heading stays over a sub-header; a ':' line or a bold sentence is still checked for repeats",
+      T.beyond("*Memory*\nBiggest:\n- qemu 18.2 GB", ["Box is busy"]) == "*Memory*\nBiggest:\n- qemu 18.2 GB"
+      and T.beyond("**Known issue**\n- Hillsboro cut off", ["One known issue"]) == "**Known issue**\n- Hillsboro cut off"
+      and T.beyond("Nothing was stopped. Top processes:\n- qemu 18 GB", ["Nothing was stopped."])
+      == "Top processes:\n- qemu 18 GB"
+      and T.beyond("*Nothing was stopped.*\nThe disk is at 80%.", ["Nothing was stopped."]) == "The disk is at 80%.")
+check("model_beyond: a section heading is not the model's to drop; it goes only with all its lines",
+      T.model_beyond("*Known issue*\n- Hillsboro cut off\n*Other*\n- x", "n", lambda p: '{"new": [1]}')
+      == "*Known issue*\n- Hillsboro cut off"
+      and T.model_beyond("*Raw record*\n```\nx\n```\n- a", "n", lambda p: '{"new": []}') == "*Raw record*\n```\nx\n```")
+_d = "- Biggest: qemu 18.2 GB\n- VMs running (3): agentvm, hillsboro\n```\nraw\n```"
 check("model_beyond keeps only the lines the model calls new, and code blocks",
       T.model_beyond(_d, "note", lambda p: '{"new": [1]}') == "- Biggest: qemu 18.2 GB\n```\nraw\n```")
 _seen = []
