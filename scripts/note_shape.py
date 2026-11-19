@@ -111,7 +111,8 @@ def parse(answer: str, source: str) -> dict | None:
     for x in d.get("links") or []:
         if isinstance(x, dict) and str(x.get("url") or "") and str(x["url"]) in source:
             links.append((str(x["url"]), str(x.get("label") or "").strip()))
-    points = [str(p).strip() for p in d.get("points") or [] if isinstance(p, str) and p.strip()]
+    raw_points = d.get("points") if isinstance(d.get("points"), list) else []  # a string is no list of facts
+    points = [p.strip() for p in raw_points if isinstance(p, str) and p.strip()]
     return {"status": status, "headline": headline, "summary": str(d.get("summary") or "").strip(),
             "points": points[:owner_note.POINTS_MAX], "ask": str(d.get("ask") or "").strip(), "links": links,
             "details": sections(d.get("sections"), source)}
@@ -149,10 +150,16 @@ def sections(raw, source: str) -> str:
     chunks += [f"*{t}*\n" + "\n".join("• " + f for f in fs) for t, fs in parts if t.lower() == NEEDS_YOU]  # last
     text = "\n\n".join(chunks)
     kept = set(_tokens(text))
-    if not all(t in kept or t in text for t in _tokens(source)):
+    if not all(_kept(t, kept, text) for t in _tokens(source)):
         return ""
     # a command the agent wrote is its exact words: a section that lost one loses the note's point
     return text if all(m.group(0) in text for m in INLINE_CODE_RE.finditer(FENCED_RE.sub("", source))) else ""
+
+
+def _kept(token: str, kept: set, text: str) -> bool:
+    """`token` (a number, an id, a URL of the agent's) is in `text` as itself, not inside a longer one:
+    "5" is not kept by "15", "1.5" or "5,000" (a changed count is a lost fact)."""
+    return token in kept or bool(re.search(r"(?<![\w.])" + re.escape(token) + r"(?!\w|[.,]\d)", text))
 
 
 def _tokens(text: str) -> list[str]:

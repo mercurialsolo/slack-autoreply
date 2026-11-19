@@ -235,4 +235,13 @@ check("sections: a raw record stays whole, in its own section before Needs you",
 check("sections: a fact that is only a list mark is no bullet",
       S.sections([{"title": "X", "facts": ["•", "a 1"]}], "a 1") == "*X*\n• a 1")
 
+# Review (PR #19, t_0e2c5b9f): a changed count is a lost fact; points given as one string are no points.
+COUNT_SRC = "Only 5 of 15 checks passed on Lisbon at 16:20Z; v0.9.2 stays held."
+check("sections: a section that turned 5 of 15 into 15 is no Details", S.sections(
+    [{"title": "Checks", "facts": ["15 checks passed on Lisbon at 16:20Z.", "v0.9.2 stays held."]}], COUNT_SRC) == "")
+check("sections: one that kept 5 of 15 reads", "5 of 15" in S.sections(
+    [{"title": "Checks", "facts": ["Only 5 of 15 checks passed on Lisbon at 16:20Z.", "v0.9.2 stays held."]}], COUNT_SRC))
+check("parse: points given as one string are no points",
+      S.parse(json.dumps({**SWEEP_ANSWER, "points": "abc"}), SWEEP)["points"] == [])
+
 print(f"\n{passed} checks passed")
