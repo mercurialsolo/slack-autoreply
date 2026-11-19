@@ -125,9 +125,9 @@ check("a short plain note is just its headline, with no thread", N.render(N.from
 _eight = N.from_text(". ".join(f"Box{i} shipped v1.{i}" for i in range(8)), "x")
 check("a long run: two sentences under the headline, the rest in Details",
       _eight.summary.count(". ") <= 1 and "Box7" in _eight.details and "Box7" not in N.render(_eight)["text"])
-check("an agent's explicit shape wins over the rules",
+check("an agent's explicit shape wins over the rules, its points one bullet each (owner, 2026-11-19)",
       N.render(N.from_text("raw dump 1225ms", "x", status="held", headline="Lisbon held at v0.9", points=["waiting on the gate"]))["text"]
-      == "⏸️ *Lisbon* held at *v0.9*\nWaiting on the gate.\n_from x · details in the thread_")
+      == "⏸️ *Lisbon* held at *v0.9*\n• Waiting on the gate.\n_from x · details in the thread_")
 try:
     N.norm_status("purple")
     check("an unknown status is refused", False)
@@ -145,8 +145,9 @@ check("more than five choices are all buttons", [e["text"]["text"] for e in _man
 _long = N.render(N.from_text("x", "x", headline="Deploy " + "a " * 2000, options=["Yes", "No"]))
 check("a section never passes Slack's 3000 characters", len(_long["blocks"][0]["text"]["text"]) <= 3000)
 _pts = N.from_text("x", "x", headline="h", points=list("abcde"))
-check("explicit points: two sentences under the headline, the rest in Details",
-      _pts.summary == "A. B." and all(f"\n{c}" in _pts.details for c in "cde"), repr((_pts.summary, _pts.details)))
+check("explicit points: three bullets under the headline, the rest in Details",
+      _pts.points == ["A.", "B.", "C."] and not _pts.summary and all(f"\n{c}" in _pts.details for c in "de"),
+      repr((_pts.points, _pts.details)))
 check("ms on its own becomes seconds", N.humanize("took 1460 ms") == "took 1.5 s" and N.humanize("took 40 ms") == "took 40 ms")
 
 # The two notes of 2026-11-10 that set the rule, replayed through every way in.
@@ -373,7 +374,7 @@ check("a digest thread entry keeps the ask", "Board it" in N.group_thread(_a) an
 # factory notes: a link reaches the owner as a link, in whatever form the factory wrote it (owner, 2026-11-13:
 # "See this": the 00:06Z burn alert showed its link as source)
 _dash = "https://factory.staffai.workers.dev/#factory/ops"
-_burn = ("⚠️ Alert: The operator's burn rule\n*Burn* is past the limit. See it on the dashboard.\n"
+_burn = ("⚠️ Alert: The operator's burn rule\n• *Burn* is past the limit.\n• See it on the dashboard.\n"
          f"<{_dash}|Open the dashboard>\n_from factory · details in the thread_")
 for _form, _link in (("Slack", f"<{_dash}|Open the dashboard>"), ("escaped", f"&lt;{_dash}|Open the dashboard&gt;"),
                      ("Markdown", f"[Open the dashboard]({_dash})")):
@@ -393,12 +394,12 @@ check("an image is not a link", R.slack_links("![logo](https://a.b/l.png)") == "
 for _kind, _spec, _want in (
         ("canary", {"status": "warn", "headline": "Canary: staff-factory PR #3062's train did not go green",
                     "points": ["The merge-path PRs on staff-factory are held.", f"See it on the dashboard: <{_dash}|Open the dashboard>."]},
-         "⚠️ Canary: staff-factory PR #3062's train did not go green\nThe merge-path PRs on staff-factory are held. "
-         f"See it on the dashboard.\n<{_dash}|Open the dashboard>\n_from factory_"),
+         "⚠️ Canary: staff-factory PR #3062's train did not go green\n• The merge-path PRs on staff-factory are held.\n"
+         f"• See it on the dashboard.\n<{_dash}|Open the dashboard>\n_from factory_"),
         ("schedule recovered", {"status": "ok", "headline": "Recovered: schedule nightly-build",
                                 "points": ["The schedule nightly-build ran clean again.",
                                            f"See it on the dashboard: &lt;{_dash}|Open the dashboard&gt;."]},
-         "✅ Recovered: schedule nightly-build\nThe schedule nightly-build ran clean again. See it on the dashboard.\n"
+         "✅ Recovered: schedule nightly-build\n• The schedule nightly-build ran clean again.\n• See it on the dashboard.\n"
          f"<{_dash}|Open the dashboard>\n_from factory_")):
     _r = N.render(note_shape.build("", "factory", _spec, call=lambda p: None))
     check(f"the factory's {_kind} note renders its link as a link", _r["text"] == _want, f"--- got\n{_r['text']}\n--- want\n{_want}")

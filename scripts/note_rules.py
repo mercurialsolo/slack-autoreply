@@ -18,15 +18,19 @@ from __future__ import annotations
 import re
 
 MAX_LINKS = 2
+BULLETS_MAX = 3  # the message's own "• " facts (owner, 2026-11-19); the full list stays in Details
+# Words only the agents use: a percentile (p50), an all-caps internal name (CALL-REVIEWs), a range of
+# check names (G1-G5). The owner reads the news in plain words; these stay in Details.
+JARGON_RE = re.compile(r"\bp(?:50|90|95|99)\b|\b[A-Z]{2,}(?:[-_][A-Z]{2,})+s?\b|\b[A-Z]\d+\s?[-–]\s?[A-Z]?\d+\b")
 RULE = (
-    "Start with one or two short plain sentences: what happened and what it means. Then, only if "
-    "the owner has to decide something, one line asking it as a question with the choices in words "
-    "(\"one more round or stop it?\"). No task ids (t_…), shas, metric or field names, counters "
-    "(5/5, 274/1,200), file paths or CLI commands in the body — they stay in the Details thread. "
-    "Links are text links with a plain label (Answer here, What changed, Release page), one or two "
-    "at most; never a bare URL and never an id after a link. No bulleted lists: the two or three "
-    "things that matter go in a sentence and the full list stays in Details. Never cut a sentence "
-    "off with an ellipsis.")
+    "Start with one short plain headline: what happened, not what was read or checked to find out. "
+    "Then at most three short bullets, each one complete fact in plain words; never \"and N more\". "
+    "Then, only if the owner has to decide something, one line asking it as a question with the "
+    "choices in words (\"one more round or stop it?\"). No task ids (t_…), shas, metric or field "
+    "names, internal names or abbreviations (CALL-REVIEW, p50, G1-G5), counters (5/5, 274/1,200), "
+    "file paths or CLI commands in the message — they stay in the Details thread. Links are text "
+    "links with a plain label (Answer here, What changed, Release page), one or two at most; never "
+    "a bare URL and never an id after a link. Never cut a sentence off with an ellipsis.")
 
 URL = r"https?://[^\s<>|]+[^\s<>|.,;:!?)\]'\"]"
 URL_RE = re.compile(URL)
@@ -284,8 +288,10 @@ def violations(text: str) -> list[str]:
         bad.append("a task id")
     if URL_RE.search(SLACK_LINK_RE.sub("", text)):
         bad.append("a bare URL")
-    if re.search(r"^\s*[-•*]\s", text, re.M):
-        bad.append("a bulleted line")
+    if re.search(r"^\s*[-*◦]\s", text, re.M) or len(re.findall(r"^• ", text, re.M)) > BULLETS_MAX:
+        bad.append("a bulleted line")  # the message's own "• " facts, three at most (owner, 2026-11-19)
+    if JARGON_RE.search(SLACK_LINK_RE.sub("", CODE_RE.sub("", text))):
+        bad.append("agent jargon")
     if "…" in text or "..." in body:
         bad.append("an ellipsis")
     if len(SLACK_LINK_RE.findall(text)) > MAX_LINKS:

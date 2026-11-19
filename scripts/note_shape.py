@@ -33,13 +33,14 @@ PROMPT = """You turn an agent's status note into a short note its owner reads on
 The owner's rule: {rule}
 
 Reply with JSON only, no prose around it:
-{{"status": one of "ask" (the owner must decide), "failed" (rolled back, broken), "warn" (live with a problem), "held" (frozen, paused), "shipping" (in progress), "ok" (done, live, green), "info",
- "headline": one short plain sentence, the news (under 100 characters),
- "summary": one or two more short plain sentences: what it means, the two or three things that matter. "" if the headline says it all,
+{{"status": what happened, not the words used for it ("no new failures" is "ok"): one of "ask" (the owner must decide), "failed" (rolled back, broken), "warn" (live with a problem), "held" (frozen, paused), "shipping" (in progress), "ok" (done, live, green), "info",
+ "headline": one short plain sentence, what happened (under 100 characters): "Goal sweep: no new call failures", never what was read or checked ("Read the reviews since 16:20Z"),
+ "points": at most three short plain sentences, each one whole fact the owner cares about; [] if the headline says it all. Never "and 3 more",
  "ask": only when the owner must decide: one question with the choices in words ("Give it one more round, or stop it?"); otherwise "",
- "links": at most two of the URLs in the note, the ones the owner would open: [{{"url": exact URL as written, "label": two or three plain words such as "Answer here", "What changed", "Release page"}}]. An answer page always comes first when there is one.}}
+ "links": at most two of the URLs in the note, the ones the owner would open: [{{"url": exact URL as written, "label": two or three plain words such as "Answer here", "What changed", "Release page"}}]. An answer page always comes first when there is one,
+ "sections": the whole note for the thread, every fact in it: [{{"title": two or three words, "facts": ["one fact per item, ids, numbers and links kept exactly as written"]}}]. A last section titled "Needs you" only when the owner must do something.}}
 
-Keep version numbers and box or machine names (v0.771.0, Helsinki). Leave out task ids, shas, field names, counters and commands entirely: they stay in the full note, which the owner can open.
+Keep version numbers and box or machine names (v0.771.0, Helsinki) in the headline and points. Leave out of them task ids, shas, field names, counters, commands and the agents' own names and abbreviations (CALL-REVIEW, p50, G1-G5): say what they mean in plain words. They stay in the sections.
 
 The agent's note:
 <note>
@@ -110,8 +111,37 @@ def parse(answer: str, source: str) -> dict | None:
     for x in d.get("links") or []:
         if isinstance(x, dict) and str(x.get("url") or "") and str(x["url"]) in source:
             links.append((str(x["url"]), str(x.get("label") or "").strip()))
+    points = [str(p).strip() for p in d.get("points") or [] if isinstance(p, str) and p.strip()]
     return {"status": status, "headline": headline, "summary": str(d.get("summary") or "").strip(),
-            "ask": str(d.get("ask") or "").strip(), "links": links}
+            "points": points[:owner_note.POINTS_MAX], "ask": str(d.get("ask") or "").strip(), "links": links,
+            "details": sections(d.get("sections"), source)}
+
+
+NEEDS_YOU = "needs you"
+FACT_TOKEN_RE = re.compile(r"https?://[^\s<>|]+|[^\s<>|]*\d[^\s<>|]*")
+
+
+def sections(raw, source: str) -> str:
+    """The model's sections as the thread's text (`*Title*`, one `•` per fact, "Needs you" last),
+    or "" — the agent's own words then — when they lost an id, a number or a link the agent wrote."""
+    if not isinstance(raw, list):
+        return ""
+    parts = []
+    for s in raw:
+        if not isinstance(s, dict):
+            return ""
+        title = str(s.get("title") or "").strip().strip("*_: ")
+        facts = [str(f).strip().lstrip("•-* ") for f in s.get("facts") or [] if str(f).strip()]
+        if title and facts:
+            parts.append((title, facts))
+    parts.sort(key=lambda p: p[0].lower() == NEEDS_YOU)  # stable: only "Needs you" moves, to the end
+    text = "\n\n".join(f"*{t}*\n" + "\n".join("• " + f for f in fs) for t, fs in parts)
+    kept = set(_tokens(text))
+    return text if parts and all(t in kept or t in text for t in _tokens(source)) else ""
+
+
+def _tokens(text: str) -> list[str]:
+    return [m.group(0).strip(".,;:!?()[]*_`'\"") for m in FACT_TOKEN_RE.finditer(text or "")]
 
 
 def _resolve_call():
@@ -121,7 +151,7 @@ def _resolve_call():
 
 
 def shape(text: str, call=None, force: bool = False) -> dict | None:
-    """{status, headline, summary, ask, links} for a note, or None when the rules alone should read it.
+    """{status, headline, summary, points, ask, links, details} for a note, or None when the rules alone should read it.
 
     `call(prompt) -> str` is the model; tests pass their own. `force` asks even for a short or
     structured note — the rules already failed it. Never raises."""

@@ -21,6 +21,7 @@ import re
 import note_rules
 
 LIST_ITEM_RE = note_rules.LIST_ITEM_RE
+SECTION_RE = re.compile(r"^\*[^*\n]{1,60}(?<![.!?])\*\s*$")  # a `*Section*` title on its own line (note_shape, note_mrkdwn)
 NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")  # a count or a size: which item it belongs to is a fact
 SENTENCE_SPLIT = note_rules.SENTENCE_SPLIT
 CLAUSE_SPLIT = re.compile(r"(?<=;)\s+")  # a clause after ";" is its own fact, unless it is a command's
@@ -120,7 +121,7 @@ def beyond(details: str, said: list[str], links: list[str] | tuple = ()) -> str:
     lines = (details or "").splitlines()
     kept: list[str] = []
     for ln, fenced in zip(lines, _fences(lines)):
-        if fenced or not ln.strip():
+        if fenced or not ln.strip() or SECTION_RE.match(ln):  # a section's title stays while a fact under it does
             kept.append(ln)
             continue
         units = _units(ln)
@@ -139,16 +140,21 @@ def _tidy(lines: list[str]) -> str:
         if fenced[i]:
             out.append(ln)
             continue
-        if ln.rstrip().endswith(":") and not LIST_ITEM_RE.match(ln):
+        if _head(ln):
             nxt = next((x for x in lines[i + 1:] if x.strip()), "")
             right = lines[i + 1] if i + 1 < len(lines) else ""
             heads = LIST_ITEM_RE.match(nxt) or nxt.lstrip().startswith("```")
-            if not heads and (not right.strip() or (right.rstrip().endswith(":") and not LIST_ITEM_RE.match(right))):
+            if not heads and (not right.strip() or _head(right)):
                 continue
         if not ln.strip() and (not out or not out[-1].strip()):
             continue
         out.append(ln)
     return "\n".join(out).strip()
+
+
+def _head(ln: str) -> bool:
+    """A line that heads the items under it: "Biggest:" or a `*Section*` title."""
+    return bool((ln.rstrip().endswith(":") or SECTION_RE.match(ln)) and not LIST_ITEM_RE.match(ln))
 
 
 def _intro(lines: list[str], i: int) -> bool:
