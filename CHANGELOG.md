@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **A message no account had room for is kept and retried, not dropped.** 19 Nov 19:39Z: Matthew's DM
+  came back 429 on every account, the owner got "Couldn't handle a message from Matthew" with the raw
+  API error, and the message was never answered — Slack does not redeliver an acknowledged event. Now a
+  `rate_limited` failure leaves the item `retry_wait` on disk and the daemon retries it every minute it
+  is due (1, 2, 4 … 30 min), so a restart loses nothing. It stands down if the owner replied or the
+  sender wrote again. After 20 min waiting the sender gets "Seen this, will get back to you shortly."
+  (MODE=auto, never a customer). The owner sees the one "Solo cannot draft" alert, not a line per
+  message; after 24 h the message fails the old way. `inbound_retry.py`; knobs in `.env.example`.
 - **The writer leases its Claude account from the factory pool.** The owner, 17 Nov: Solo was out of
   credits and sent nothing, though the mini's `apiKeyHelper` had been fixed. An env token
   (ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN) outranks `apiKeyHelper` and `writer_env` kept it, and
