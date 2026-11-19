@@ -49,6 +49,7 @@ import outbound  # noqa: E402
 import recall  # noqa: E402
 import staff_intake  # noqa: E402
 import factory_converse  # noqa: E402
+import inbound_retry  # noqa: E402
 import voice  # noqa: E402
 import writer_auth  # noqa: E402
 from config import CFG, DELEGATE_REACTIONS, DROP_REACTIONS, OK_SUBTYPES, SEND_REACTIONS  # noqa: E402
@@ -2194,8 +2195,9 @@ def writer_alert(why: str, cls: str | None) -> str:
     """The one alert for a writer that cannot draft, naming the fix."""
     fix = WRITER_FAILURES.get(cls or "", {}).get("fix")
     return (f"⚠️ *Solo cannot draft* — {why}\n" + (f"*Fix:* {fix}\n" if fix else "")
-            + "_triage still runs and pending drafts can still be ✅'d, but every new "
-              "message will fail until this is fixed._")
+            + (inbound_retry.alert_tail(cls)
+               or "_triage still runs and pending drafts can still be ✅'d, but every new "
+                  "message will fail until this is fixed._"))
 
 
 def run_claude(item: dict, state: "State | None" = None, prompt: str | None = None, fresh: bool = False) -> tuple[list[str], dict | None, str]:
@@ -2383,6 +2385,8 @@ class Daemon(Slack):
         self.pool = ThreadPoolExecutor(max_workers=8)
         self.sem = threading.Semaphore(CFG["dispatch_parallel"])
         self._probe_lock = threading.Lock()   # tick is every 5 min, a probe may take longer
+        self._retry_lock = threading.Lock()   # one pass over the kept messages at a time
+        self._retry_resumed = False
         self.chan_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
         self.lock = threading.Lock()
         self.seen: OrderedDict[str, bool] = OrderedDict()
@@ -3573,6 +3577,14 @@ class Daemon(Slack):
             item["session"] = session
             decision = item.get("decision")
             cost = (result or {}).get("total_cost_usd")
+            if not decision and inbound_retry.schedule(item, cls, err or run_said(result, err)):
+                # No account had room. The message is kept and tried again (`retry_inbound`); the
+                # owner's one alert is the writer's "cannot draft" above, not a line per message.
+                item["run"] = {"tools": tools, "said": run_said(result, err), "retried": retried}
+                save_item(item)
+                log.warning("kept %s for retry #%d at %s (%s)", item["id"], item["retry"]["attempts"],
+                            item["retry"]["next_at"], cls)
+                return
             if not decision:
                 item["status"], item["outcome"] = "failed", {"status": "failed", "why": err or run_said(result, err)}
                 # Keep what the run returned, so a failure can be read afterwards instead of
@@ -3759,6 +3771,135 @@ class Daemon(Slack):
                     f"_that is what I got wrong and you fixed, still unread. run_ `solo review` "
                     f"_to fold it in; nothing here changes until you do._")
 
+    def retry_inbound(self) -> None:
+        """Run the kept messages (`inbound_retry`) whose next try is due, and owe nobody a long silence.
+
+        One pass at a time: a pass that is still composing makes the next minute's a no-op. The
+        items are on disk, so a restart picks up where the last process stopped."""
+        if not self._retry_lock.acquire(blocking=False):
+            return
+        try:
+            if not self._retry_resumed:
+                # A retry the last process was composing when it stopped: nothing else will pick it up.
+                for it in list_items({"handling"}):
+                    if it.get("retry"):
+                        self._requeue(it)
+                self._retry_resumed = True
+            kept = list_items({inbound_retry.STATUS})
+            if not kept or self.state.pause_info() is not None:
+                return
+            due = {it["id"] for it in inbound_retry.due(kept)}
+            for item in sorted(kept, key=lambda it: (it.get("retry") or {}).get("first_at") or ""):
+                try:
+                    if self.retry_one(item, item["id"] in due) == "still out":
+                        # The accounts are still full: every kept message waits as long as this one
+                        # does, so the pool sees one try per backoff step, not one per message.
+                        nxt = load_item(item["id"])["retry"]["next_at"]
+                        for other in kept:
+                            if other["id"] in due and other["id"] != item["id"]:
+                                o = load_item(other["id"])
+                                if o.get("status") == inbound_retry.STATUS:
+                                    o["retry"]["next_at"] = max(nxt, o["retry"].get("next_at") or "")
+                                    save_item(o)
+                        due = set()
+                except (Exception, SystemExit) as e:  # noqa: BLE001 — one bad item must not stall the queue
+                    log.warning("retry of %s failed: %s", item.get("id"), e)
+                    self._requeue(item)
+        finally:
+            self._retry_lock.release()
+
+    def _requeue(self, item: dict) -> None:
+        """A kept message a retry left half-done ("handling") goes back on the queue."""
+        try:
+            it = load_item(item["id"])
+            if it.get("status") == "handling" and it.get("retry"):
+                it["status"] = inbound_retry.STATUS
+                save_item(it)
+        except (Exception, SystemExit):  # noqa: BLE001
+            pass
+
+    def retry_one(self, item: dict, due: bool) -> str:
+        """One kept message: give up, stand down, wait, hold, or run it again. Says which."""
+        if inbound_retry.expired(item):
+            # Kept past INBOUND_RETRY_GIVE_UP_HOURS however it was held back: fail the old way, said once.
+            item["status"] = "failed"
+            item["outcome"] = {**(item.get("outcome") or {}), "status": "failed",
+                               "why": f"kept {inbound_retry.give_up_s() / 3600:.0f} h without a free account"}
+            save_item(item)
+            self.notify(f"⚠️ Couldn't handle a message from *{item['sender_name']}* ({describe_where(item)}): "
+                        f"{item['outcome']['why']}\n{quote(item['text'][:300])}"
+                        + (f"\n{item['permalink']}" if item.get("permalink") else ""))
+            return "gave up"
+        if not (due or inbound_retry.holding_owed(item)):
+            return "wait"
+        if not self._allowed(item["sender"], item["channel"]):
+            item["status"], item["outcome"] = "done", {"status": "skipped", "why": "allow/block"}
+            save_item(item)
+            return "stood down"
+        if (in_quiet_hours(CFG["quiet_hours"]) or (CFG["only_when_away"] and self.presence_active())
+                or self._over_limit(item["channel"])):
+            return "wait"   # the gates on_inbound applies; the message keeps until they open
+        if self.stand_down_kept(item):
+            return "stood down"
+        if inbound_retry.holding_owed(item):
+            self.send_holding(item)
+        if not due:
+            return "wait"
+        item = load_item(item["id"])
+        log.info("retry #%d of %s (%s, %s)", item["retry"]["attempts"] + 1, item["id"],
+                 item["sender_name"], describe_where(item))
+        item["context"] = self.transcript(item["channel"], item.get("thread_ts"), CFG["context_messages"])
+        save_item(item)
+        self.handle_with_claude(item)
+        return "still out" if load_item(item["id"]).get("status") == inbound_retry.STATUS else "ran"
+
+    def stand_down_kept(self, item: dict) -> bool:
+        """A kept message the conversation has moved past: the owner answered, or the sender wrote again.
+        Solo's own posts (holding replies, auto replies to other messages) are not the owner answering."""
+        solo = set(self.state.read().get("sent", {}))
+        # This item's own holding reply, by its ts on the item: `tick` drops `sent` entries after
+        # OBSERVE_HOURS, and a message can be kept far longer than that.
+        held = ((item.get("retry") or {}).get("held") or {}).get("ts")
+        if held:
+            solo.add(held)
+        newer =[m for m in self.newer_messages(item["channel"], item.get("reply_thread_ts"), item["ts"])
+                 if m.get("ts") not in solo]
+        why = ("you replied" if any(m.get("user") == self.me for m in newer)
+               else "superseded" if any(m.get("user") == item["sender"] for m in newer) else None)
+        if not why:
+            return False
+        item["status"], item["outcome"] = "done", {"status": "stood_down", "why": why}
+        save_item(item)
+        log.info("stand down kept %s — %s", item["id"], why)
+        return True
+
+    def send_holding(self, item: dict) -> None:
+        """The plain holding reply, once, where Solo would answer this message unreviewed; else nothing."""
+        mode, why = self.ledger.effective_mode("hold", item["sender"], item["channel"], CFG["mode"])
+        route = (item.get("triage") or {}).get("route")
+        ts = ""
+        if (mode == "auto" and route in (None, "reply", "hold")
+                and not item.get("simulated") and not item.get("customer")):
+            text = inbound_retry.HOLDING_TEXT
+            try:
+                ts = self.post(item["channel"], text, item.get("reply_thread_ts"), split=False)
+            except Exception as e:  # noqa: BLE001 — the retry still runs; try the holding reply next pass
+                log.warning("holding reply to %s failed: %s", item["sender_name"], e)
+                return
+            self._count(item["channel"])
+            # Registered as Solo's send so its echo is not read as the owner typing. Under its own
+            # key, not the item's: an edit, delete or clean age of this canned line says nothing
+            # about the writer's reply to the item.
+            self.state.update(lambda d: d["sent"].__setitem__(ts, {"item": f"{item['id']}.hold", "channel": item["channel"],
+                                                                    "at": now_iso(), "text": text}))
+            log.info("holding reply to %s (%s)", item["sender_name"], describe_where(item))
+        else:
+            log.info("no holding reply to %s (%s)", item["sender_name"],
+                     "a customer" if item.get("customer") else f"route {route}" if route not in (None, "reply", "hold") else why)
+        item = load_item(item["id"])
+        inbound_retry.mark_held(item, ts)
+        save_item(item)
+
     def probe_writer(self, force: bool = False) -> None:
         """Notice a dead writer before a message pays to discover it.
 
@@ -3901,9 +4042,13 @@ class Daemon(Slack):
             # Pin the plugin before the first message: heal once and alert now, not on a compose.
             self.probe_writer(force=True)
         try:
+            n = 0
             while True:
-                time.sleep(300)
-                self._submit(self.tick)
+                time.sleep(60)
+                n += 1
+                self._submit(self.retry_inbound)   # kept messages are due on a minute's scale
+                if n % 5 == 0:
+                    self._submit(self.tick)
         except KeyboardInterrupt:
             pass
         finally:
@@ -4018,7 +4163,7 @@ def cmd_status(a):
     print(f"voice: {'VOICE.md ok' if voice.load_notes() else 'VOICE.md empty'} · {len(voice.load_samples())} samples · "
           f"dossiers: {len(list(recall.PEOPLE_DIR.glob('*.md')))} people, {len(list(recall.CHANNELS_DIR.glob('*.md')))} channels · "
           f"sessions: {len(st.get('sessions', {}))} live")
-    print(f"queued items: {len(list_items({'queued'}))} · handling: {len(list_items({'handling'}))} · pending drafts: {len(st.get('pending', {}))} · open follow-ups: {len(fus.open())}")
+    print(f"queued items: {len(list_items({'queued'}))} · handling: {len(list_items({'handling'}))} · kept for retry: {len(list_items({inbound_retry.STATUS}))} · pending drafts: {len(st.get('pending', {}))} · open follow-ups: {len(fus.open())}")
     # Asked live, not read from state: the free check is instant, and the question "can it draft
     # right now" is the one that cost an ssh to answer.
     if CFG["dispatch"] == "claude":

@@ -2371,6 +2371,160 @@ try:
           and any("CLAUDE_CODE_OAUTH_TOKEN" in n and "cluster pool list" in n for n in _wn), str(_wn))
     d.state.update(lambda x: x.update(health={"ok": True}))
 
+    # …and the message is kept, not dropped: no per-message "Couldn't handle", retried once a limit lifts
+    _hist_D = d.client.history.pop(D, None)   # earlier tests' owner messages would stand these down
+    d.recent.pop(D, None)   # earlier tests' sends to D would hold these back at max_per_hour
+    _kept = S.load_item(_it["id"])
+    check("rate_limited: the message is kept for retry, not failed",
+          _kept["status"] == "retry_wait" and _kept["retry"]["attempts"] == 1 and _kept["retry"]["cls"] == "rate_limited",
+          json.dumps(_kept.get("retry")))
+    check("…no per-message 'Couldn't handle', the one alert says new messages are kept",
+          not any("Couldn't handle" in n for n in _wn) and any("kept and retried" in n for n in _wn), str(_wn))
+    _writer_case(); _wn.clear()
+    d.retry_inbound()
+    check("…not retried before its time", not _calls("-p") and S.load_item(_it["id"])["status"] == "retry_wait")
+    # a restart reads the queue from disk: make the next try due there, then run a pass
+    _kept["retry"]["next_at"] = "2000-01-01T00:00:00"; S.save_item(_kept)
+    d.retry_inbound()
+    _after = S.load_item(_it["id"])
+    check("…once due, the same message is drafted from the item on disk",
+          len(_calls("-p")) == 1 and _after["status"] != "retry_wait" and _after.get("decision"), json.dumps(_after.get("outcome")))
+
+    # still out on the retry: kept again with a longer wait, no second alert (the writer is already down)
+    _lim2.write_text("x"); os.environ["FAKE_LIMIT"] = str(_lim2)
+    try:
+        _writer_case(); _wn.clear(); _it2 = _compose_item(); d.handle_with_claude(dict(_it2))
+        _k2 = S.load_item(_it2["id"]); _k2["retry"]["next_at"] = "2000-01-01T00:00:00"; S.save_item(_k2)
+        d.retry_inbound()
+    finally:
+        os.environ.pop("FAKE_LIMIT"); _lim2.unlink()
+    _k2 = S.load_item(_it2["id"])
+    check("all accounts still out on the retry: kept, attempt 2, one owner alert in total",
+          _k2["status"] == "retry_wait" and _k2["retry"]["attempts"] == 2
+          and len([n for n in _wn if "cannot draft" in n]) == 1 and not any("Couldn't handle" in n for n in _wn), str(_wn))
+
+    # the holding reply: only once the sender has waited, once, where Solo may send unreviewed
+    _mode0 = S.CFG["mode"]; S.CFG["mode"] = "auto"
+    try:
+        _k2["retry"]["next_at"] = "2999-01-01T00:00:00"; S.save_item(_k2)
+        _n0 = len(d.client.posted); d.retry_inbound()
+        check("holding reply: not before INBOUND_HOLD_AFTER_MIN", len(d.client.posted) == _n0)
+        _k2 = S.load_item(_it2["id"]); _k2["retry"]["first_at"] = (S.datetime.now() - S.timedelta(hours=1)).isoformat(timespec="seconds"); S.save_item(_k2)
+        d.retry_inbound(); d.retry_inbound()
+        _held = [p for p in d.client.posted[_n0:] if p[1] == S.inbound_retry.HOLDING_TEXT]
+        check("…then sent once to the sender's conversation", len(_held) == 1 and _held[0][0] == D
+              and S.load_item(_it2["id"])["retry"]["held"]["ts"] == _held[0][3], str(d.client.posted[_n0:]))
+        check("…and registered as Solo's own send, so its echo is not read as the owner replying",
+              _held and _held[0][3] in d.state.read()["sent"])
+        _it3 = _compose_item(); _it3["customer"] = True
+        S.inbound_retry.schedule(_it3, "rate_limited", "429", now=S.datetime.now() - S.timedelta(hours=1)); S.save_item(_it3)
+        _it3 = S.load_item(_it3["id"]); _it3["retry"]["next_at"] = "2999-01-01T00:00:00"; S.save_item(_it3)
+        _n1 = len(d.client.posted); d.retry_inbound()
+        check("…never to a customer (their replies are always reviewed)", len(d.client.posted) == _n1
+              and S.load_item(_it3["id"])["retry"].get("held"))
+    finally:
+        S.CFG["mode"] = _mode0
+
+    # the conversation moved on: the sender wrote again, the kept message stands down
+    d.client.history[D] = [{"ts": "9999999999.000001", "user": U, "text": "never mind", "subtype": None}]
+    try:
+        _k2 = S.load_item(_it2["id"]); _k2["retry"]["next_at"] = "2000-01-01T00:00:00"; S.save_item(_k2)
+        _writer_case(); d.retry_inbound()
+    finally:
+        d.client.history.pop(D, None)
+        if _hist_D is not None:
+            d.client.history[D] = _hist_D
+    _k2 = S.load_item(_it2["id"])
+    check("a kept message the sender has superseded stands down without a model call",
+          not _calls("-p") and _k2["status"] == "done" and _k2["outcome"]["why"] == "superseded", json.dumps(_k2["outcome"]))
+    _k3 = S.load_item(_it3["id"]); _k3["status"] = "done"; S.save_item(_k3)
+
+    # a restart while a retry was composing: the item left in "handling" goes back on the queue;
+    # a mangled item on the queue does not stall the rest
+    _k5 = _compose_item(); S.inbound_retry.schedule(_k5, "rate_limited", "429"); _k5["status"] = "handling"; S.save_item(_k5)
+    _bad = _compose_item(); _bad.update(status="retry_wait", retry={"first_at": "2000", "next_at": "2000-01-01"})
+    del _bad["channel"]; S.save_item(_bad)
+    _k5["retry"]["next_at"] = "2000-01-01T00:00:00"; _k5["retry"]["first_at"] = (S.datetime.now() - S.timedelta(hours=1)).isoformat(timespec="seconds"); S.save_item(_k5)
+    _hist_D = d.client.history.pop(D, None)
+    try:
+        d._retry_resumed = False; _writer_case(); d.retry_inbound()
+    finally:
+        if _hist_D is not None:
+            d.client.history[D] = _hist_D
+    check("restart: a retry left 'handling' is run again; a broken item beside it does not stop the pass",
+          len(_calls("-p")) == 1 and S.load_item(_k5["id"])["status"] not in ("handling", "retry_wait"),
+          json.dumps(S.load_item(_k5["id"]).get("outcome")))
+    _bad = S.load_item(_bad["id"]); _bad["status"] = "done"; S.save_item(_bad)
+
+    # held back by a gate past the give-up age: it still fails, with the per-message alert
+    _k6 = _compose_item(); S.inbound_retry.schedule(_k6, "rate_limited", "429", now=S.datetime(2000, 1, 1)); S.save_item(_k6)
+    _qh0 = S.CFG["quiet_hours"]; S.CFG["quiet_hours"] = "00:00-23:59"
+    try:
+        _writer_case(); _wn.clear(); d.retry_inbound()
+    finally:
+        S.CFG["quiet_hours"] = _qh0
+    check("kept past the give-up age while quiet hours held it: failed, said once, no model call",
+          not _calls("-p") and S.load_item(_k6["id"])["status"] == "failed"
+          and len([n for n in _wn if "Couldn't handle" in n]) == 1, str(_wn))
+
+    # no holding reply for a message Solo would not answer unreviewed (escalate, ack, ignore)
+    _mode0 = S.CFG["mode"]; S.CFG["mode"] = "auto"
+    _k7 = _compose_item(); _k7["triage"] = {"route": "escalate"}
+    S.inbound_retry.schedule(_k7, "rate_limited", "429", now=S.datetime.now() - S.timedelta(hours=1))
+    _k7["retry"]["next_at"] = "2999-01-01T00:00:00"; S.save_item(_k7)
+    _hist_D = d.client.history.pop(D, None); _n2 = len(d.client.posted)
+    try:
+        d.retry_inbound()
+    finally:
+        S.CFG["mode"] = _mode0
+        if _hist_D is not None:
+            d.client.history[D] = _hist_D
+    check("an escalate message gets no holding reply", len(d.client.posted) == _n2
+          and S.load_item(_k7["id"])["retry"].get("held"), str(d.client.posted[_n2:]))
+    _k7 = S.load_item(_k7["id"]); _k7["status"] = "done"; S.save_item(_k7)
+
+    # Solo's own post in the conversation (a holding or auto reply) is not the owner answering
+    _k8 = _compose_item(); S.inbound_retry.schedule(_k8, "rate_limited", "429"); S.save_item(_k8)
+    d.client.history[D] = [{"ts": "9999999999.000002", "user": d.me, "text": "Seen this", "subtype": None}]
+    d.state.update(lambda x: x["sent"].__setitem__("9999999999.000002", {"item": "x.hold", "channel": D, "at": S.now_iso(), "text": "x"}))
+    try:
+        check("Solo's own post does not stand a kept message down", not d.stand_down_kept(S.load_item(_k8["id"])))
+    finally:
+        d.client.history.pop(D, None); d.state.update(lambda x: x["sent"].pop("9999999999.000002", None))
+        if _hist_D is not None:
+            d.client.history[D] = _hist_D
+    _k8 = S.load_item(_k8["id"]); _k8["status"] = "done"; S.save_item(_k8)
+
+    # …nor once `tick` has aged its holding reply out of `sent` (OBSERVE_HOURS): a message can be kept for longer
+    _k9 = _compose_item(); S.inbound_retry.schedule(_k9, "rate_limited", "429")
+    S.inbound_retry.mark_held(_k9, "9999999999.000003"); S.save_item(_k9)
+    _hist_D = d.client.history.pop(D, None)
+    d.client.history[D] = [{"ts": "9999999999.000003", "user": d.me, "text": S.inbound_retry.HOLDING_TEXT, "subtype": None}]
+    _aged = (S.datetime.now() - S.timedelta(hours=S.CFG["observe_hours"] + 1)).isoformat(timespec="seconds")
+    d.state.update(lambda x: x["sent"].__setitem__("9999999999.000003", {"item": _k9["id"] + ".hold", "channel": D, "at": _aged, "text": "x"}))
+    try:
+        d.tick()
+        check("its own holding reply, aged out of `sent`, does not stand a kept message down",
+              "9999999999.000003" not in d.state.read()["sent"] and not d.stand_down_kept(S.load_item(_k9["id"]))
+              and S.load_item(_k9["id"])["status"] == "retry_wait", json.dumps(S.load_item(_k9["id"]).get("outcome")))
+    finally:
+        d.client.history.pop(D, None)
+        if _hist_D is not None:
+            d.client.history[D] = _hist_D
+    _k9 = S.load_item(_k9["id"]); _k9["status"] = "done"; S.save_item(_k9)
+
+    # kept past INBOUND_RETRY_GIVE_UP_HOURS: fails the old way, with the per-message alert
+    _lim2.write_text("x"); os.environ["FAKE_LIMIT"] = str(_lim2)
+    try:
+        _writer_case(); _wn.clear(); _it4 = _compose_item()
+        _it4["retry"] = {"attempts": 9, "first_at": "2000-01-01T00:00:00"}; S.save_item(_it4)
+        d.handle_with_claude(dict(_it4))
+    finally:
+        os.environ.pop("FAKE_LIMIT"); _lim2.unlink()
+    check("kept past the give-up age: failed, and the owner hears about this message",
+          S.load_item(_it4["id"])["status"] == "failed" and any("Couldn't handle" in n for n in _wn), str(_wn))
+    d.state.update(lambda x: x.update(health={"ok": True}))
+
     # nonzero_exit: one fresh rerun, then it stops
     _writer_case()
     _e500 = TMP / "e500"; _e500.write_text("x"); os.environ["FAKE_500"] = str(_e500)
