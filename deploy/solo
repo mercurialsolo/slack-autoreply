@@ -128,10 +128,23 @@ case "${1:-status}" in
     here=$(git rev-parse HEAD)
     echo "→ deploying $(git log --oneline -1)"
     node-push -n "$NODE" >/dev/null || die "push refused — run: node-push -n $NODE   and read why"
-    # pipefail: without it the `| tail -1` below makes a failing suite look green, and the
-    # daemon would be restarted on code whose tests just failed.
-    ssh "$NODE" "set -o pipefail; cd $REMOTE_REPO && ./install.sh >/dev/null 2>&1 && $PICK_PY \"\$V\" tests/test_offline.py 2>&1 | tail -1 && $PICK_PY \"\$V\" tests/test_offline_intake.py 2>&1 | tail -1" \
-      || die "tests failed on $NODE — not restarting; the old daemon is still running"
+    # The gate runs as one bash script on the node: every step must pass, and a failing step
+    # prints which one and the tail of its output. (An inline `a | tail -1 && $PICK_PY b`
+    # chain masked failures twice over: tail's status hid the suite's, and the `;`s inside
+    # $PICK_PY cut the && chain, so only the last suite decided the exit code.)
+    ssh "$NODE" bash -s <<GATE || die "deploy gate failed on $NODE (see above) — not restarting; the old daemon is still running"
+cd $REMOTE_REPO || { echo "no checkout at $REMOTE_REPO"; exit 1; }
+log=\$(mktemp)
+step() {
+  "\$@" >"\$log" 2>&1 || { echo "FAILED: \$*"; tail -20 "\$log"; rm -f "\$log"; exit 1; }
+  tail -1 "\$log"
+}
+step ./install.sh
+$PICK_PY  # after install.sh, which may create the venv it prefers
+step "\$V" tests/test_offline.py
+step "\$V" tests/test_offline_intake.py
+rm -f "\$log"
+GATE
     ssh "$NODE" "launchctl kickstart -k gui/\$(id -u)/com.slack-autoreply" >/dev/null 2>&1
     sleep 5
     there=$(ssh "$NODE" "cd $REMOTE_REPO && git rev-parse HEAD")
