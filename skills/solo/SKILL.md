@@ -181,8 +181,8 @@ The owner's rule (2026-11-10), for every note Solo writes or relays to a person 
 - **No bulleted lists**, and nothing cut off with "…": the two or three things that matter go in a
   sentence ("What got better: speed, search and alerts"), the full list goes to Details.
 - Keep the **status icon headline**: ✅ live and green · ⚠️ live with a warning · 🔴 rolled back or
-  failed · ⏸️ held or frozen · 🚀 shipping · ❓ needs you. Notes from you inside five minutes become
-  one message.
+  failed · ⏸️ held or frozen · 🚀 shipping · ❓ needs you · ℹ️ for your information. Notes from you
+  inside five minutes become one message.
 
 What it looks like:
 
@@ -193,8 +193,9 @@ The task hit its budget again after one operator grant.
 ```
 
 Free text works: a small model reads what matters from your words, and the rule is applied to
-whatever it writes (no model, no quota: plain rules read it instead). To say it exactly, give the
-shape yourself — it is used as given and still rendered to the rule:
+whatever it writes (no model, no quota: plain rules read it instead). **A script or a scheduled
+job that reports to the owner gives the shape itself**: it knows the outcome, so it should not leave
+Solo to guess it from a paragraph. Given flags are used as given and still rendered to the rule:
 
 ```
 solo say "<full technical detail>" --to @owner --from release \
@@ -203,11 +204,47 @@ solo say "<full technical detail>" --to @owner --from release \
   --link https://dashboard/releases/552
 ```
 
+What each part is for, with the 2026-11-19 goal-sweep note as the example of getting it wrong:
+
+- **The icon comes from `--status`, never from a word in the text.** Without it Solo reads your
+  words, and "no new call failures" has "failures" in it. A routine run that found nothing is `ok`
+  (or `info`), never `failed`.
+- **The headline says what happened, not what you set out to do**: "Goal sweep: no new call
+  failures; one known issue already queued", not "Read CALL-REVIEWs since 16:20Z". Plain words, no
+  ids, no internal names (G1-G5, p50, CALL-REVIEW), no icon or "Done:" of your own: the status
+  gives both.
+- **Each `--point` is one complete fact** in a plain sentence. Two show under the headline: pick
+  the two that matter; never "…and 3 more in the thread" (the rest goes in `--details`), never a second report inside a
+  point.
+- **The detail (the text you pass, or `--details`) is the thread reply, written for a phone**: a
+  `*Section*` heading per topic, one `•` per fact, short lines, and a last `*Needs you*` section only when something does. Ids, shas,
+  counters and commands belong here. Never one long paragraph.
+- Write plain text: `->` is fine (it shows as an arrow), and you never escape `&`, `<` or `>`.
+  Do not wrap words in `*` or `_` yourself (a `*Section*` heading on its own line in the detail is
+  the one exception), and use one icon per line at most.
+
+The same goal-sweep note, as the job should send it:
+
+```
+details='*What was checked*
+• 14 call reviews since 16:20Z
+• Release-watch: v0.812.0 green, canary 5/5, promotes at 21:00Z
+
+*Known issue*
+• Hillsboro greeting cut off: already queued as t_5c2e10aa'
+
+solo say "$details" --to @owner --from goal-sweep --status ok \
+  --headline "Goal sweep: no new call failures; one known issue already queued" \
+  --point "14 calls checked since this afternoon, nothing new to fix." \
+  --point "The next release is still green and goes out tonight."
+```
+
 - `--status` ok | warn | failed | held | shipping | ask | info picks the icon (default: read from your words).
 - `--headline` one line, plain words. `--point` is a plain sentence, repeatable: the first two go
   under the headline, the rest to Details.
-- `--details` the technical detail for the thread (default: your intent, whole). `--link` the answer
-  page or a release page, shown as a labelled text link.
+- `--details` the technical detail for the thread when it differs from your text (default: your
+  text, whole), sectioned as above. `--link` the answer page or a release page, shown as a
+  labelled text link.
 - `--group <key>` groups notes that share the key, instead of by sender.
 - To ask the owner something, give the choices: `--option Yes --option No` (and `--link` to the
   answer page). They show as buttons where Slack allows, otherwise in words on the 👉 line. Their
