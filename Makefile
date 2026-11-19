@@ -20,6 +20,7 @@ test:           ## offline test suite (fake Slack, fake claude) — no tokens ne
 	$(PY) tests/test_factory_converse.py
 	$(PY) tests/test_writer_auth.py
 	$(PY) tests/test_note_mrkdwn.py
+	$(PY) tests/test_note_shape.py
 	$(PY) tests/test_inbound_retry.py
 
 setup:          ## interactive voice training in Claude Code

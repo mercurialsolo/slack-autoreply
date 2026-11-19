@@ -29,7 +29,7 @@ SECTION_RE = re.compile(r"^\s*(?:#{2,6}\s+[^\n]{1,60}?(?<![.!?])\s*#*|\*{1,2}[^*
 
 def _section(ln: str) -> bool:
     """A section heading heads everything up to the next one, so it stays while any of that does,
-    even when the note says its words."""
+    even when the note says its words; unless every fact before its first break was said (`_close`)."""
     return bool(SECTION_RE.match(ln))
 
 
@@ -136,15 +136,58 @@ def beyond(details: str, said: list[str], links: list[str] | tuple = ()) -> str:
 
     lines = (details or "").splitlines()
     kept: list[str] = []
+    title = None  # [its index in kept, "said" (a fact under it was dropped), "fresh" (one was kept)]
     for ln, fenced in zip(lines, _fences(lines)):
-        if fenced or not ln.strip() or _section(ln):  # a heading the note echoes still heads what is new
+        if not fenced and _section(ln):  # a heading the note echoes still heads what is new
+            _close(kept, title)
+            title = [len(kept), False, False]
+            kept.append(ln)
+            continue
+        if fenced or not ln.strip():
+            if not fenced and title and (title[1] or title[2]):  # a break after its facts ends what the title heads
+                _close(kept, title)
+                title = None
+            elif fenced and title:
+                title[2] = True
             kept.append(ln)
             continue
         units = _units(ln)
         fresh = [u for u in units if note_rules.COMMAND_RE.search(u) or new(u)]
         if fresh:
             kept.append(ln if LIST_ITEM_RE.match(ln) or len(fresh) == len(units) else " ".join(fresh).rstrip(" ;"))
+        if title:
+            title[2 if fresh else 1] = True
+    _close(kept, title)
     return _tidy(kept)
+
+
+def missing(text: str, details: str) -> str:
+    """The lines of `text` that `details` do not already say: a code block not in them whole, a
+    line whose words are new, a command line whose command they do not hold."""
+    if not (details or "").strip():
+        return (text or "").strip()
+    lines = (text or "").splitlines()
+    fenced, out, i = _fences(lines), [], 0
+    while i < len(lines):
+        if fenced[i]:
+            j = next((k for k in range(i, len(lines)) if not fenced[k]), len(lines))
+            if "\n".join(lines[i:j]).strip() not in details:
+                out += lines[i:j]
+            i = j
+            continue
+        ln, i = lines[i], i + 1
+        code = [m.group(0) for m in note_rules.CODE_RE.finditer(ln)]
+        if ln.strip() and ln.strip() not in details and (
+                any(c not in details for c in code) if code else beyond(ln, [details]).strip()):
+            out.append(ln)
+    return "\n".join(out).strip()
+
+
+def _close(kept: list[str], title) -> None:
+    """A heading whose facts before the first break were all said goes with them, so it never heads
+    the next paragraph (marked "" here; `_tidy` drops the gap)."""
+    if title and title[1] and not title[2]:
+        kept[title[0]] = ""
 
 
 def _tidy(lines: list[str]) -> str:
