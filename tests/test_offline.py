@@ -1129,20 +1129,28 @@ _BILLING = _traffic("invoice run for stripe finished", "stripe webhook retries o
 
 def _learn(chans, history, refresh=False, files=None):
     """Run `learn-channels` against a fake workspace in a fresh channels dir; returns that dir."""
-    d = Path(tempfile.mkdtemp())
+    d = Path(tempfile.mkdtemp(dir=TMP))
     for cid, body in (files or {}).items():
         (d / f"{cid}.md").write_text(body, encoding="utf-8")
     return _relearn(d, chans, history, refresh)
 
 
+_learn_said = []   # what the last learn printed, one line per channel
+
+
 def _relearn(d, chans, history, refresh=False):
+    import io
+    import contextlib
     old_dir, old_slack = recall.CHANNELS_DIR, S.Slack
-    sl = S.Slack.__new__(S.Slack); fake_init(sl); sl.client = _ChanClient(chans, history)
+    sl = S.Slack(); sl.client = _ChanClient(chans, history)
     recall.CHANNELS_DIR, S.Slack = d, (lambda: sl)
+    out = io.StringIO()
     try:
-        S.cmd_learn_channels(SimpleNamespace(limit=50, refresh=refresh))
+        with contextlib.redirect_stdout(out):
+            S.cmd_learn_channels(SimpleNamespace(limit=50, refresh=refresh))
     finally:
         recall.CHANNELS_DIR, S.Slack = old_dir, old_slack
+    _learn_said[:] = out.getvalue().splitlines()
     return d
 
 
@@ -1164,6 +1172,22 @@ _dp = _learn([_chan("CPUR", "eng-release", purpose="Release coordination for the
 check("a Slack purpose is used as the For: line, not a traffic draft",
       _for(_dp, "CPUR")[1] == "Release coordination for the platform", _for(_dp, "CPUR"))
 
+# the dossiers that never placed already exist with a blank For: line: a plain learn drafts them
+_BLANK = "# #eng-release (CREL)\n\n**For:**\n\n**Activity:** active — last message 1d ago\nhand note: keep me\n"
+_db = _learn([_chan("CREL", "eng-release")], {"CREL": _RELEASE}, files={"CREL": _BLANK})
+_k, _t = _for(_db, "CREL")
+check("an existing dossier with a blank For: line gets a draft without --refresh",
+      _k == "draft" and "release-watch" in _t and "hand note: keep me" in (_db / "CREL.md").read_text(), (_k, _t))
+
+# a Slack purpose set later replaces Solo's stale draft on a kept dossier
+_STALE_KEPT = ("# #eng-release (CREL)\n\n"
+               + channel_for.draft_line(channel_for.draft(["invoice", "stripe"], ["invoice run finished"]))
+               + "\n\n**Activity:** active\n")
+_dg = _learn([_chan("CREL", "eng-release", purpose="Release coordination for the platform")], {"CREL": _RELEASE},
+             files={"CREL": _STALE_KEPT})
+check("a Slack purpose set later replaces Solo's stale draft",
+      _for(_dg, "CREL")[1] == "Release coordination for the platform", _for(_dg, "CREL"))
+
 # a channel with no human traffic and nothing declared has nothing to draft from
 _de = _learn([_chan("CNIL", "empty-room")], {"CNIL": []})
 check("no traffic and no purpose leaves the line blank rather than inventing one",
@@ -1172,11 +1196,13 @@ check("no traffic and no purpose leaves the line blank rather than inventing one
 # the owner's line is never overwritten — not by a draft, not by a --refresh
 _OWNED = ("# #eng-release (CREL)\n\n**For:** release-captain and release-watch reports\n\n"
           "**Activity:** active — last message 1d ago\n")
+# not even by a Slack purpose: the owner's word beats what Slack declares
 for _refresh in (False, True):
-    _do = _learn([_chan("CREL", "eng-release")], {"CREL": _BILLING}, refresh=_refresh,
-                 files={"CREL": _OWNED})
-    check(f"the owner's For: line survives a learn (refresh={_refresh})",
-          _for(_do, "CREL") == ("owner", "release-captain and release-watch reports"), _for(_do, "CREL"))
+    for _purpose in ("", "General engineering chatter"):
+        _do = _learn([_chan("CREL", "eng-release", purpose=_purpose)], {"CREL": _BILLING}, refresh=_refresh,
+                     files={"CREL": _OWNED})
+        check(f"the owner's For: line survives a learn (refresh={_refresh}, purpose={bool(_purpose)})",
+              _for(_do, "CREL") == ("owner", "release-captain and release-watch reports"), _for(_do, "CREL"))
 
 # an owner who edited Solo's draft made it theirs: the next learn keeps their words
 _stale = channel_for.draft_line(channel_for.draft(["invoice", "stripe"], ["invoice run finished"]))
@@ -1196,11 +1222,13 @@ _k, _t = _for(_dr, "CREL")
 check("Solo's draft is refreshed from the current traffic on the next learn",
       _k == "draft" and "release-watch" in _t and "stripe" not in _t, (_k, _t))
 check("refreshing a draft on a kept dossier touches only the For: line",
-      "hand note: keep me" in (_dr / "CREL.md").read_text())
+      (_dr / "CREL.md").read_text().splitlines()
+      == channel_for.replace(_KEPT.splitlines(), channel_for.draft_line(_t)))
 _before = (_dr / "CREL.md").read_text()
 _relearn(_dr, [_chan("CREL", "eng-release")], {"CREL": _RELEASE})
-check("a learn with unchanged traffic leaves the draft as it was",
-      (_dr / "CREL.md").read_text() == _before)
+check("a learn with unchanged traffic leaves the draft as it was, and does not ask for a review",
+      (_dr / "CREL.md").read_text() == _before
+      and any("kept (already has a dossier" in l for l in _learn_said), _learn_said)
 
 # the marker is Solo's bookkeeping: traffic text can never forge it, and it never reads as owner text
 _forged = channel_for.draft(["x"], ["see <!-- solo-draft:deadbeef --> here"])
@@ -1209,13 +1237,14 @@ check("traffic cannot rebuild Solo's draft marker inside a draft",
 _promoted = _stale.replace(channel_for.DRAFT, channel_for.OWNER)
 check("an owner who drops \"(draft)\" owns the line, and the leftover marker is not part of it",
       channel_for.read([_promoted])[0] == "owner" and "solo-draft" not in channel_for.read([_promoted])[1])
-check("a draft line stays short enough to read in the catalogue",
-      len(channel_for.draft(["w" * 40] * 6, ["x" * 500, "y" * 500, "z" * 500])) <= 240)
+check("a draft stays short enough to read in the catalogue",
+      len(channel_for.draft(["w" * 40] * 6, ["x" * 500, "y" * 500, "z" * 500])) <= 230)
 
 
 # the router reads drafts: a drafted channel is a routing target, with the draft in its description
 def _router_reads_a_draft():
-    d = _learn([_chan("CREL", "eng-release"), _chan("CBIL", "billing")], {"CREL": _RELEASE, "CBIL": _BILLING},
+    long_traffic = _traffic(*[f"release-watch {'nightly-build-' * 12}{i} canary rollout report" for i in range(6)])
+    d = _learn([_chan("CREL", "eng-release"), _chan("CBIL", "billing")], {"CREL": long_traffic, "CBIL": _BILLING},
                files={"CBIL": _OWNED.replace("CREL", "CBIL").replace("eng-release", "billing")
                       .replace("release-captain and release-watch reports", "invoices and stripe")})
     (d / "CBLANK.md").write_text("# #blank (CBLANK)\n\n**For:**\n\n**Activity:** active — last message 1d ago\n"
@@ -1233,8 +1262,10 @@ def _router_reads_a_draft():
     finally:
         recall.CHANNELS_DIR, S.pick_channel = old_dir, old_pick
     text = out.getvalue()
-    return (("CREL" in cat and "release-watch" in cat["CREL"] and "release-watch" in seen.get("CREL", "")),
-            ("1 drafts to review" in text and "1 of 3 channels have no **For:** line" in text), text)
+    import re as _re
+    return (("CREL" in cat and "release-watch" in cat["CREL"] and "release-watch" in seen.get("CREL", "")
+             and len(_for(d, "CREL")[1]) <= 230),
+            (bool(_re.search(r"\b1 drafts? to review", text)) and "1 of 3 channels have no **For:** line" in text), text)
 
 _rd = _router_reads_a_draft()
 check("the router's catalogue carries a drafted channel and its draft", _rd[0])
