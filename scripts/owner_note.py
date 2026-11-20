@@ -608,16 +608,16 @@ GROUP_NAMED = 3
 
 
 def render_group(notes: list[Note], sender: str = "") -> str:
-    """Several notes inside the grouping window, as one message of prose: the worst icon, then each
-    headline as a sentence with its own icon, three at most and the rest counted."""
+    """Several notes inside the grouping window, as one message: a head line with the worst icon, then
+    one line per note with its own icon, three at most and the rest counted on a last line."""
     if len(notes) == 1:
         return render(notes[0])["text"]
     st = worst(n.status for n in notes)
-    head = f"{ICONS[st]} *{len(notes)} updates*" + (f" from {sender}" if sender else "") + "."
-    said = [f"{ICONS[n.status]} {emphasize(note_rules.sentence(lead_off(n.headline)))}" for n in notes[:GROUP_NAMED]]
+    lines = [f"{ICONS[st]} *{len(notes)} updates*" + (f" from {sender}" if sender else "")]
+    lines += [f"• {ICONS[n.status]} {emphasize(lead_off(n.headline).rstrip('.'))}" for n in notes[:GROUP_NAMED]]
     if len(notes) > GROUP_NAMED:
-        said.append(f"And {len(notes) - GROUP_NAMED} more in the thread.")
-    return " ".join([head] + said) + "\n_each one's detail is in the thread_"
+        lines.append(f"• {len(notes) - GROUP_NAMED} more in the thread")
+    return "\n".join(lines) + "\n_each one's detail is in the thread_"
 
 
 def to_dict(note: Note) -> dict:
