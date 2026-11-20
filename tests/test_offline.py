@@ -1531,9 +1531,9 @@ _g_posts = _con.posted[_n_g:]; _g_upd = _con.updates[_u_g:]
 check("the first note is a message of its own", _g_posts[0][1].startswith("✅ *Helsinki* shipped *v0.552.0*") and _g_posts[0][2] is None, _g_posts)
 check("the second, inside five minutes, joins it: one message, edited, not a second badge",
       len([q for q in _g_posts if q[2] is None]) == 1 and len(_g_upd) == 1 and _g_upd[0][1] == _g_posts[0][3], (_g_posts, _g_upd))
-check("…which leads with the worst of the two and lists each",
-      _g_upd[0][2].startswith("⏸️ *2 updates* from release-lane") and "✅ *Helsinki* shipped" in _g_upd[0][2] and "• " not in _g_upd[0][2]
-      and "⏸️ *Hillsboro* frozen at *v0.537.0*" in _g_upd[0][2], _g_upd)
+check("…which leads with the worst of the two and lists each on its own line",
+      _g_upd[0][2].startswith("⏸️ *2 updates* from release-lane") and "\n• ✅ *Helsinki* shipped" in _g_upd[0][2]
+      and "\n• ⏸️ *Hillsboro* frozen at *v0.537.0*" in _g_upd[0][2], _g_upd)
 _n_g2 = len(_con.posted); S.cmd_say(_say_args("Canary on Hillsboro is red", to="@barada", frm="release-lane", details="Canary on Hillsboro is red\nrollback ran at 14:02")); _g2 = _con.posted[_n_g2:]
 check("…no thread copy of a note the message says in full; a third note's thread entry is its details only (owner 11-11)", len(_g_posts) == 1 and len(_g2) == 1 and _g2[0][2] == _g_posts[0][3]
       and _g2[0][1].startswith("🔎 *Details*") and "rollback ran" in _g2[0][1] and "Canary on Hillsboro" not in _g2[0][1], _g2)  # the entry names it; its details add only the new

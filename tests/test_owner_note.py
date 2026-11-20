@@ -96,12 +96,21 @@ notes = [N.from_text("Helsinki shipped v0.552.0, all checks green", "solo-one"),
          N.from_text("Hillsboro frozen at v0.537.0 until you lift it", "solo-one"),
          N.from_text(TODAY, "solo-one")]
 g = N.render_group(notes, "solo-one")
-check("grouping: one message, the worst icon, one sentence per note, no bullets", g ==
-      "🔴 *3 updates* from solo-one. ✅ *Helsinki* shipped *v0.552.0*, all checks green. "
-      "⏸️ *Hillsboro* frozen at *v0.537.0* until you lift it. "
-      "🔴 *Helsinki* is not on the build it should be (a rollback, or a deploy by hand).\n"
+check("grouping: one message, the worst icon, then one line per note with its own icon", g ==
+      "🔴 *3 updates* from solo-one\n"
+      "• ✅ *Helsinki* shipped *v0.552.0*, all checks green\n"
+      "• ⏸️ *Hillsboro* frozen at *v0.537.0* until you lift it\n"
+      "• 🔴 *Helsinki* is not on the build it should be (a rollback, or a deploy by hand)\n"
       "_each one's detail is in the thread_", g)
-check("…more than three becomes 'And N more'", "And 1 more in the thread." in N.render_group(notes + notes[:1], "x"))
+_g4 = N.render_group(notes + notes[:1], "x")
+check("…more than three: three named, then a last line counting the rest",
+      _g4.splitlines()[-2] == "• 1 more in the thread" and len(_g4.splitlines()) == 6, _g4)
+check("…three items keep to the note rules", R.violations(g) == [], R.violations(g))
+check("…a final period goes, an ellipsis or a question mark stays",
+      N._no_period("Shipped v1.2.0.") == "Shipped v1.2.0" and N._no_period("Waiting...") == "Waiting..."
+      and N._no_period("Ship v2?") == "Ship v2?")
+check("…three or fewer: no 'more' line", "more in the thread" not in g, g)
+check("…one icon per line, never two", all(ln.count("✅") + ln.count("⏸️") + ln.count("🔴") <= 1 for ln in _g4.splitlines()), _g4)
 
 # today's message, the one the owner complained about
 golden("today's release note, rewritten", TODAY,

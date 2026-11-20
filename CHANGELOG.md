@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **A grouped digest lists each update on its own line.** Owner 20 Nov: "4 updates from factory" was
+  one paragraph. Now a head line with the worst icon, then `• <icon> <headline>` per update (three at
+  most) and `• N more in the thread` when there are more.
 - **A message no account had room for is kept and retried, not dropped.** 19 Nov 19:39Z: Matthew's DM
   came back 429 on every account, the owner got "Couldn't handle a message from Matthew" with the raw
   API error, and the message was never answered — Slack does not redeliver an acknowledged event. Now a
