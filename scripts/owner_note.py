@@ -21,13 +21,17 @@ import json
 import re
 from dataclasses import dataclass, field
 
+import note_mrkdwn
 import note_rules
 import note_thread
 from note_rules import COMMAND_RE
 
 # Most severe first: a message that is several things takes the icon of the worst.
 STATUSES = ("ask", "failed", "warn", "held", "shipping", "ok", "info")
-ICONS = {"ask": "❓", "failed": "🔴", "warn": "⚠️", "held": "⏸️", "shipping": "🚀", "ok": "✅", "info": "📨"}
+ICONS = {"ask": "❓", "failed": "🔴", "warn": "⚠️", "held": "⏸️", "shipping": "🚀", "ok": "✅", "info": "ℹ️"}
+# The sender's own leading icon says its status: "✅ No new failures" is ok, whatever its words match.
+ICON_STATUS = {**{v.rstrip("\ufe0f"): k for k, v in ICONS.items()}, "📨": "info", "❌": "failed", "🟢": "ok",
+               "🟡": "warn", "🟠": "warn", "✔": "ok", "☑": "ok", "⛔": "failed", "📣": "info"}
 ALIASES = {
     "needs-you": "ask", "question": "ask", "decide": "ask",
     "red": "failed", "fail": "failed", "rollback": "failed", "rolled-back": "failed", "error": "failed",
@@ -72,6 +76,7 @@ MS_RE = re.compile(r"([-+]?)(\d+(?:\.\d+)?)\s?ms\b")
 CLAUSE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z❓🔴⚠⏸🚀✅])|;\s+|,\s+(?=[A-Z][a-z]{2,}\s+" + BOX_VERBS + r"\b)")
 HEADLINE_MAX = 100  # longer, and the headline keeps its what; the why opens the summary
 SUMMARY_MAX = 2  # sentences under the headline
+POINTS_MAX = note_rules.BULLETS_MAX  # "• " facts under them (owner, 2026-11-19)
 SECTION_MAX = 2900  # Slack's limit on a section block's text is 3000
 GROUP_WINDOW_S = 300
 
@@ -90,9 +95,42 @@ VERB_STATUS = (("held", "held"), ("frozen", "held"), ("rolled back", "failed"), 
                ("shipping", "shipping"), ("shipped", "ok"), ("deployed", "ok"), ("live", "ok"), ("green", "ok"))
 
 
+# "no new failures", "0 failed", "without errors": the word is there, the failure is not.
+NEGATED_RE = re.compile(r"\b(?:no|zero|0|without|nothing|none)\s+(?:new\s+|more\s+|other\s+|open\s+)?(?:[\w-]+\s+)?"
+                        r"(?:fail\w*|errors?|crash\w*|warn\w*|regress\w*|retr\w*|broke\w*)\b|"
+                        r"\b(?:did ?n[o']t|didn't|not)\s+(?:fail|crash|break|regress)\b|"
+                        r"\b(?:fail\w*|errors?|crash\w*|warn\w*|regress\w*|retr\w*)\s*[:=]\s*(?:0|none)\b(?![.,]\d)", re.I)  # "failed: 0"
+
+
+def sender_status(text: str) -> str | None:
+    """The status the sender put first, as an icon or a label ("✅ …", "Done: …"), or None."""
+    return _icon_status(text) or label_status(text)
+
+
+def line_statuses(text: str) -> list[str]:
+    """Each line's status: its own leading icon or label if it has one, else its words. The note's is
+    the worst of these, so a later "🔴 hillsboro failed" is never hidden by a first ✅."""
+    out = []
+    for ln in (text or "").split("\n"):
+        if not ln.strip():
+            continue
+        ln = note_rules.LIST_ITEM_RE.sub("", ln)
+        # a command or a link ("`dev/rollback.sh`", ".../failed-jobs") and a zero ("failed: 0") say
+        # nothing of how it went
+        words = NEGATED_RE.sub("", note_mrkdwn.PROTECT.sub(" ", ln))
+        out.append(_icon_status(ln) or worst([label_status(words), status_of(words)]))
+    return out
+
+
+def _icon_status(text: str) -> str | None:
+    m = re.match(r"\s*(" + note_rules.EMOJI + r")", text or "")
+    return ICON_STATUS.get(m.group(1)) if m else None
+
+
 def status_of(text: str) -> str:
     """What the words say happened: the box's own verb first ("Helsinki held at …" is held, whatever
     its reason mentions), then the most severe status anywhere in them, or info when there is none."""
+    text = NEGATED_RE.sub("", text or "")
     m = re.match(r"\W*(?:[\w ]{0,20}:\s*)?(?!(?:Not|Live|Now|The|It|This)\b)[A-Z][a-z]{2,}\s+(held|frozen|rolled back|red|shipping|shipped|deployed|live|green)\b", text or "")
     if m:
         return dict(VERB_STATUS)[m.group(1)]
@@ -110,7 +148,7 @@ LABEL_STATUS = (("needs", "ask"), ("question", "ask"), ("ask", "ask"), ("fail", 
 def label_status(piece: str) -> str | None:
     """What the status word lead_off takes off says ("Blocked: …" is held), or None when there is none."""
     m = note_rules.STATUS_LABEL_RE.match(note_rules.ICON_RE.sub("", piece or ""))
-    word = m.group(0).lower().strip() if m else ""
+    word = m.group(0).lower().strip(" *_~") if m else ""
     return next((st for w, st in LABEL_STATUS if word.startswith(w)), None)
 
 
@@ -196,15 +234,13 @@ def humanize(text: str) -> str:
     return _restore(t, kept)
 
 
-def _escape(t: str) -> str:
-    """Slack's three control characters, as entities (an entity already written stays as it is)."""
-    return re.sub(r"&(?!(?:amp|lt|gt);)", "&amp;", t).replace("<", "&lt;").replace(">", "&gt;")
+_escape = note_mrkdwn.escape  # Slack's three control characters, escaped once; "->" an arrow
 
 
 def emphasize(text: str) -> str:
     """mrkdwn bold for the box and the version — the two things the eye looks for."""
     t, kept = _protect(text)
-    t = _escape(t)
+    t = note_mrkdwn.plain(t)  # entities, arrows, one icon, no stray markup: before the bold below
     if not COMMAND_RE.search(text):
         t = BOX_RE.sub(lambda m: m.group(0) if m.group(1) in WORDS_STOP else f"*{m.group(1)}*", t)
         t = VERSION_RE.sub(r"*\1*", t)
@@ -224,6 +260,7 @@ class Note:
     options: list[str] = field(default_factory=list)
     sender: str = ""
     reshape: bool = False      # a rule could not clean a part without leaving a hole: a model should word it
+    points: list = field(default_factory=list)  # at most three complete facts, one "• " line each
 
     @property
     def link(self) -> str:
@@ -378,15 +415,15 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
         holed |= hole
         return t
 
-    asks = ""
+    asks, pts = "", []
     if headline:
-        points = [p.strip() for p in (points or []) if p and p.strip()]
+        points = note_mrkdwn.bullets([p.strip() for p in (points or []) if p and p.strip()], cap=None)
         head, more = _split_long(c(headline))
-        body = [more] + [c(p) for p in points[:SUMMARY_MAX]]
+        body, pts = [more], [x for x in (c(p) for p in points[:POINTS_MAX]) if x]
         if not head:  # the headline could not be cleaned: the first plain point stands in for it
-            head, body = next(((b, body[:i] + body[i + 1:]) for i, b in enumerate(body) if b), ("", body))
-        st = norm_status(status) or ("ask" if options else worst([status_of(head)] + [status_of(b) for b in body if b] + labels))
-        extra = points[SUMMARY_MAX:]
+            head, pts = (pts[0], pts[1:]) if pts else ("", pts)
+        st = norm_status(status) or ("ask" if options else worst(line_statuses(headline) + [s for p in points for s in line_statuses(p)] + labels))
+        extra = points[POINTS_MAX:]
         whole = details if details is not None else intent  # pruned once, against the note as shown
         if extra and not all(x in whole for x in extra):
             whole = "\n".join(x for x in [whole] + extra if x)  # the points the body had no room for
@@ -396,12 +433,14 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
     elif shaped:
         head, more = _split_long(c(shaped.get("headline") or ""))
         body = [more, c(note_rules.flat(shaped.get("summary") or ""))]
+        pts = [x for x in (c(p) for p in note_mrkdwn.bullets(shaped.get("points") or [], POINTS_MAX)) if x]
         asks = c(shaped.get("ask") or "")  # the model's question; the choices are the options'
         taken[:0] = [(u, lb) for u, lb in shaped.get("links") or []]
         st = norm_status(status) or ("ask" if options else norm_status(shaped.get("status")) or "info")
         if not head:
             return from_text(intent, sender, status=status, details=details, options=options, link=link)
-        whole = details if details is not None else intent
+        # the model's sectioned Details, when it kept every fact of the agent's own words (note_shape)
+        whole = details if details is not None else (shaped.get("details") or intent)
     else:
         cleaned = [x for x in (c(p) for p in _pieces(intent)) if x]
         # "Reply yes or no" is the old way to ask; the question before it is the ask, never the headline
@@ -422,7 +461,6 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
         ask_i = max((i for i, x in enumerate(cleaned) if x.endswith("?")), default=None)
         asks = cleaned[ask_i] if ask_i is not None else ""
         rest = [x for i, x in enumerate(cleaned) if i != ask_i]
-        statuses = [status_of(x) for x in cleaned] + labels
         if rest:
             rs = [status_of(x) for x in rest]
             lead = rs.index(worst(rs))
@@ -431,15 +469,16 @@ def from_text(intent: str, sender: str = "", *, status: str | None = None, headl
             head, others, asks = asks, [], ""
         head, more = _split_long(head)
         body = [more] + others
-        st = norm_status(status) or ("ask" if options else worst(statuses))
+        st = norm_status(status) or ("ask" if options else worst(line_statuses(intent) + labels))
         whole = details if details is not None else intent
     summary = _summary([b for b in body if b])
     if had_cmd and CMD_NOTE not in summary:
         summary = (summary + " " + CMD_NOTE).strip()
+    pts = [note_rules.sentence(p) for p in pts if p != head]
     note = Note(st, head, summary, note_rules.sentence(asks) if asks else "", note_rules.merge_links(given, taken),
-                whole, options, sender, reshape=holed or not head or len(head) > HEADLINE_MAX)
+                whole, options, sender, reshape=holed or not head or len(head) > HEADLINE_MAX, points=pts)
     # The thread carries only what the note did not say; nothing new, no thread (owner, 2026-11-13)
-    note.details = note_thread.beyond(note.details, [head, summary, asks], [u for u, _ in note.links])
+    note.details = note_thread.beyond(note.details, [head, summary, asks, *pts], [u for u, _ in note.links])
     return note
 
 
@@ -472,6 +511,7 @@ def body_lines(note: Note, buttons: bool = True) -> list[str]:
     lines = [f"{ICONS[note.status]} {emphasize(lead_off(note.headline))}"]
     if note.summary:
         lines.append(emphasize(note.summary))
+    lines.extend("• " + emphasize(p) for p in note.points[:POINTS_MAX])
     q = ask_line(note, buttons)
     if q:
         lines.append(q)
@@ -512,7 +552,7 @@ def render(note: Note, buttons: bool = True) -> dict:
                   {"type": "actions", "block_id": "solo_ask", "elements": elements}]
         if foot:
             blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": foot}]})
-    details = "🔎 *Details*\n" + note.details if note.details else ""
+    details = "🔎 *Details*\n" + note_mrkdwn.details(note.details) if note.details else ""
     return {"text": text, "blocks": blocks, "details": details}
 
 
@@ -529,7 +569,7 @@ def group_thread(note: Note, details: bool = True, named: bool = True) -> str:
     details are already in the thread."""
     parts = body_lines(note, buttons=False)[0 if not named else 1:]
     if details and note.details:
-        parts.append("🔎 *Details*\n" + note.details)
+        parts.append("🔎 *Details*\n" + note_mrkdwn.details(note.details))
     return "\n".join(parts)
 
 
@@ -539,20 +579,25 @@ def scrub(note: Note, buttons: bool = True, body: str = "") -> Note:
     breaks it gives way to the first part that does not."""
     def ok(t):
         return bool(t) and not note_rules.violations(t) and len(t) <= HEADLINE_MAX * 2
-    before = (note.headline, note.summary, note.ask, list(note.options))
-    keep = [x for x in (note.headline, note.summary, note.ask) if ok(x)]
+    before = (note.headline, note.summary, note.ask, list(note.options), list(note.points))
+    keep = [x for x in (note.headline, note.summary, note.ask, *note.points) if ok(x)]  # a point can lead too
     head = note.headline if ok(note.headline) else (keep.pop(0) if keep else _FALLBACK.get(note.status, "An update."))
     note.summary = note.summary if ok(note.summary) and note.summary != head else ""
     note.ask = note.ask if ok(note.ask) and note.ask != head else ""
+    note.points = [p for p in note.points if ok(p) and p != head][:POINTS_MAX]
     note.headline, note.reshape = head, False
     if note_rules.violations(render(note, buttons)["text"]):  # the ask line or a link still breaks it
-        note.summary, note.ask = "", ""
+        note.summary, note.ask, note.points = "", "", []
     if note_rules.violations(render(note, buttons)["text"]):  # the choices' words do: Details has them
         note.options, note.links = [], []
-    if body and (note.headline, note.summary, note.ask, note.options) != before and body.strip() not in (note.details or ""):
-        note.details = (note.details + "\n" if note.details else "") + body.strip()  # a dropped part is never lost
+    if body and (note.headline, note.summary, note.ask, note.options, note.points) != before:
+        # a dropped part is never lost: what of the agent's words the (sectioned) Details do not already say
+        rest = note_thread.missing(body.strip(), note.details)
+        if rest:
+            note.details = (note.details + "\n" if note.details else "") + rest
     # ...and what the scrubbed note still says is not said again in its thread (owner, 2026-11-13)
-    note.details = note_thread.beyond(note.details, [note.headline, note.summary, note.ask], [u for u, _ in note.links])
+    note.details = note_thread.beyond(note.details, [note.headline, note.summary, note.ask, *note.points],
+                                      [u for u, _ in note.links])
     return note
 
 
@@ -562,23 +607,30 @@ _FALLBACK = {"ask": "A decision is waiting for you.", "failed": "Something faile
 GROUP_NAMED = 3
 
 
+def _no_period(text: str) -> str:
+    """A list line ends bare: one final period goes; an ellipsis, '?' or '!' stays."""
+    t = text.strip()
+    return t[:-1] if t.endswith(".") and not t.endswith("..") else t
+
+
 def render_group(notes: list[Note], sender: str = "") -> str:
-    """Several notes inside the grouping window, as one message of prose: the worst icon, then each
-    headline as a sentence with its own icon, three at most and the rest counted."""
+    """Several notes inside the grouping window, as one message: a head line with the worst icon, then
+    one line per note with its own icon, three at most and the rest counted on a last line. The count
+    line is the owner's 11-20 ask, so a digest of four or more has one more `• ` line than BULLETS_MAX."""
     if len(notes) == 1:
         return render(notes[0])["text"]
     st = worst(n.status for n in notes)
-    head = f"{ICONS[st]} *{len(notes)} updates*" + (f" from {sender}" if sender else "") + "."
-    said = [f"{ICONS[n.status]} {emphasize(note_rules.sentence(lead_off(n.headline)))}" for n in notes[:GROUP_NAMED]]
+    lines = [f"{ICONS[st]} *{len(notes)} updates*" + (f" from {sender}" if sender else "")]
+    lines += [f"• {ICONS[n.status]} {emphasize(_no_period(lead_off(n.headline)))}" for n in notes[:GROUP_NAMED]]
     if len(notes) > GROUP_NAMED:
-        said.append(f"And {len(notes) - GROUP_NAMED} more in the thread.")
-    return " ".join([head] + said) + "\n_each one's detail is in the thread_"
+        lines.append(f"• {len(notes) - GROUP_NAMED} more in the thread")
+    return "\n".join(lines) + "\n_each one's detail is in the thread_"
 
 
 def to_dict(note: Note) -> dict:
     return {"status": note.status, "headline": note.headline, "summary": note.summary, "ask": note.ask,
             "links": [list(x) for x in note.links], "details": note.details, "options": note.options,
-            "link": note.link, "sender": note.sender}
+            "link": note.link, "sender": note.sender, "points": list(note.points)}
 
 
 def from_dict(d: dict) -> Note:
@@ -586,7 +638,8 @@ def from_dict(d: dict) -> Note:
     summary = d.get("summary") or " ".join(note_rules.sentence(b) for b in d.get("bullets") or [])
     links = [tuple(x) for x in d.get("links") or []] or ([(d["link"], "Answer here")] if d.get("link") else [])
     return Note(d.get("status") or "info", d.get("headline") or "", summary, d.get("ask") or "", links,
-                d.get("details") or "", list(d.get("options") or []), d.get("sender") or "")
+                d.get("details") or "", list(d.get("options") or []), d.get("sender") or "",
+                points=list(d.get("points") or []))
 
 
 if __name__ == "__main__":  # quick look: python3 owner_note.py "text"

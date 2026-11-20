@@ -18,15 +18,20 @@ from __future__ import annotations
 import re
 
 MAX_LINKS = 2
+BULLETS_MAX = 3  # the message's own "• " facts (owner, 2026-11-19); the full list stays in Details
+# Words only the agents use: a percentile (p50), an all-caps internal name (CALL-REVIEWs), a range of
+# check names (G1-G5). The owner reads the news in plain words; these stay in Details.
+JARGON_RE = re.compile(r"\b[pP](?:50|90|95|99)\b|\b[A-Z]{3,}-[A-Z]{3,}s?\b|\b[A-Z]{2,}_[A-Z0-9_]+\b"
+                       r"|\b[A-Z]\d+\s?[-–]\s?[A-Z]\d+\b|\bG\d+\s?[-–]\s?\d+\b")  # not US-EAST, CI-CD, Q3-2026
 RULE = (
-    "Start with one or two short plain sentences: what happened and what it means. Then, only if "
-    "the owner has to decide something, one line asking it as a question with the choices in words "
-    "(\"one more round or stop it?\"). No task ids (t_…), shas, metric or field names, counters "
-    "(5/5, 274/1,200), file paths or CLI commands in the body — they stay in the Details thread. "
-    "Links are text links with a plain label (Answer here, What changed, Release page), one or two "
-    "at most; never a bare URL and never an id after a link. No bulleted lists: the two or three "
-    "things that matter go in a sentence and the full list stays in Details. Never cut a sentence "
-    "off with an ellipsis.")
+    "Start with one short plain headline: what happened, not what was read or checked to find out. "
+    "Then at most three short bullets, each one complete fact in plain words; never \"and N more\". "
+    "Then, only if the owner has to decide something, one line asking it as a question with the "
+    "choices in words (\"one more round or stop it?\"). No task ids (t_…), shas, metric or field "
+    "names, internal names or abbreviations (CALL-REVIEW, p50, G1-G5), counters (5/5, 274/1,200), "
+    "file paths or CLI commands in the message — they stay in the Details thread. Links are text "
+    "links with a plain label (Answer here, What changed, Release page), one or two at most; never "
+    "a bare URL and never an id after a link. Never cut a sentence off with an ellipsis.")
 
 URL = r"https?://[^\s<>|]+[^\s<>|.,;:!?)\]'\"]"
 URL_RE = re.compile(URL)
@@ -94,13 +99,13 @@ TRUNCATED_QUOTE_RE = re.compile(r"[\"“][^\"”\n]*(?:\.\.\.|…)[\"”]")
 ELLIPSIS_RE = re.compile(r"\s*(?:\.\.\.|…)")
 # Any leading pictograph (the factory starts its headlines with its own ✅ / 🔴 / ❓), once or twice:
 # the renderer adds exactly one icon of its own.
-EMOJI = "[\u2190-\u21ff\u2300-\u27bf\u2b00-\u2bff\U0001F000-\U0001FAFF]"
+EMOJI = "[\u2139\u2190-\u21ff\u2300-\u27bf\u2b00-\u2bff\U0001F000-\U0001FAFF]"
 ICON_RE = re.compile(r"^\s*(?:" + EMOJI + r"[\ufe0f\u200d]*\s*)+")
 # A status word the factory writes before its headline ("Done: …", "Needs your answer: …"): the icon
 # already says it. Taken off once, at the start only.
-STATUS_LABEL_RE = re.compile(r"^\s*(?:done|failed|failure|blocked|held|on hold|shipped|shipping|live|warning|"
+STATUS_LABEL_RE = re.compile(r"^\s*[*_~]*(?:done|failed|failure|blocked|held|on hold|shipped|shipping|live|warning|"
                              r"needs (?:your|an) (?:answer|call|decision|ok)|needs you|question|ask|fyi|info|cancelled|canceled|fix held)"
-                             r"(?: on [\w.-]+)?\s*[:\-–—]\s+", re.I)  # "Done on mini: …" (the factory's notify)
+                             r"(?: on [\w.-]+)?[*_~]*\s*[:\-–—][*_~]*\s+", re.I)  # "Done on mini: …" (the factory's notify), "*Done:*"
 # Labels a machine puts before a value ("Changelog: <url>", "Operator (budget): …"): the value is
 # what the owner reads.
 LABEL_RE = re.compile(r"^\s*(?:needs an answer(?: on [\w-]+)?|operator(?:\s*\([^)]*\))?|budget|burn(?: so far)?|"
@@ -284,8 +289,10 @@ def violations(text: str) -> list[str]:
         bad.append("a task id")
     if URL_RE.search(SLACK_LINK_RE.sub("", text)):
         bad.append("a bare URL")
-    if re.search(r"^\s*[-•*]\s", text, re.M):
-        bad.append("a bulleted line")
+    if re.search(r"^\s*[-*◦]\s", text, re.M) or len(re.findall(r"^\s*• ", text, re.M)) > BULLETS_MAX:
+        bad.append("a bulleted line")  # the message's own "• " facts, three at most (owner, 2026-11-19)
+    if JARGON_RE.search(SLACK_LINK_RE.sub("", CODE_RE.sub("", text))):
+        bad.append("agent jargon")
     if "…" in text or "..." in body:
         bad.append("an ellipsis")
     if len(SLACK_LINK_RE.findall(text)) > MAX_LINKS:

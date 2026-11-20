@@ -1,0 +1,83 @@
+"""A channel dossier's **For:** line: the owner's own, or a draft Solo writes from the traffic.
+
+The router places a report by what each channel is *for*. When the owner has not said and Slack
+has no purpose or topic, the line was left blank and routine reports never placed (release-watch
+at 0.49). A draft fills that gap from the channel's recent human traffic, and is marked so it is
+never mistaken for the owner's word:
+
+    **For (draft):** <text> <!-- solo-draft:<sig> -->
+
+- `**For:** ...` is the owner's line. Solo never rewrites it.
+- A draft whose text still matches its signature is Solo's, and the next learn refreshes it.
+- A draft whose text the owner changed is theirs now: kept verbatim, read as an owner line.
+
+The router reads either; `slackctl where` counts drafts separately, as lines to review.
+"""
+from __future__ import annotations
+
+import hashlib
+import re
+
+OWNER = "**For:**"
+DRAFT = "**For (draft):**"
+_QUOTES = str.maketrans("“”", '""')
+_MARK = re.compile(r"\s*<!--\s*solo-draft:([0-9a-f]{8})\s*-->")
+
+
+def _sig(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+
+
+def read(lines: list[str]) -> tuple[str, str]:
+    """('owner' | 'draft' | '', text) for a dossier's lines. '' is a blank or missing line."""
+    for l in lines:
+        if l.startswith(OWNER):
+            # An owner who dropped "(draft)" may have left Solo's marker behind; it is not theirs.
+            text = _MARK.sub("", l[len(OWNER):]).strip()
+            return ("owner", text) if text else ("", "")
+        if l.startswith(DRAFT):
+            rest = l[len(DRAFT):]
+            m = _MARK.search(rest)
+            text = " ".join(_MARK.sub(" ", rest).split())
+            if not text:
+                return "", ""
+            # Edited text (or a removed marker) means the owner touched it, so it is theirs.
+            return ("draft" if m and m.group(1) == _sig(text) else "owner"), text
+    return "", ""
+
+
+def _plain(text: str, n: int) -> str:
+    # "<" and ">" go entirely, so no nesting of traffic text can rebuild Solo's marker.
+    text = " ".join(text.replace("<", " ").replace(">", " ").split())
+    return text if len(text) <= n else text[: n - 1].rstrip() + "…"
+
+
+def draft(terms: list[str], recent: list[str]) -> str:
+    """A For: draft from recurring terms and a few recent lines; '' when there is nothing to go on.
+    Each part is cut on its own, so the whole stays under ~220 chars with every quote closed."""
+    parts = []
+    if terms:
+        parts.append(_plain("recent traffic about " + ", ".join(terms[:6]), 90))
+    # Curly quotes in the traffic become straight ones, so a cut never leaves Solo's quote open.
+    eg = [f"“{_plain(t.translate(_QUOTES), 55)}”" for t in recent if t.strip()][:2]
+    if eg:
+        parts.append("e.g. " + "; ".join(eg))
+    return " — ".join(parts)
+
+
+def draft_line(text: str) -> str:
+    """The marked line for a `draft()` result (or a Slack purpose/topic).
+    Whitespace is collapsed as `read` does, so a multi-line purpose stays one line and its
+    signature still matches."""
+    text = " ".join(text.split())
+    return f"{DRAFT} {text} <!-- solo-draft:{_sig(text)} -->"
+
+
+def replace(lines: list[str], new: str) -> list[str]:
+    """`lines` with the For: line (owner or draft) swapped for `new`; inserted after the title if
+    there is none."""
+    for i, l in enumerate(lines):
+        if l.startswith((OWNER, DRAFT)):
+            return lines[:i] + [new] + lines[i + 1:]
+    at = 2 if len(lines) > 1 and not lines[1].strip() else 1
+    return lines[:at] + [new] + lines[at:]

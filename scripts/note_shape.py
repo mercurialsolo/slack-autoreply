@@ -33,13 +33,14 @@ PROMPT = """You turn an agent's status note into a short note its owner reads on
 The owner's rule: {rule}
 
 Reply with JSON only, no prose around it:
-{{"status": one of "ask" (the owner must decide), "failed" (rolled back, broken), "warn" (live with a problem), "held" (frozen, paused), "shipping" (in progress), "ok" (done, live, green), "info",
- "headline": one short plain sentence, the news (under 100 characters),
- "summary": one or two more short plain sentences: what it means, the two or three things that matter. "" if the headline says it all,
+{{"status": what happened, not the words used for it ("no new failures" is "ok"): one of "ask" (the owner must decide), "failed" (rolled back, broken), "warn" (live with a problem), "held" (frozen, paused), "shipping" (in progress), "ok" (done, live, green), "info",
+ "headline": one short plain sentence, what happened (under 100 characters): "Goal sweep: no new call failures", never what was read or checked ("Read the reviews since 16:20Z"),
+ "points": at most three short plain sentences, each one whole fact the owner cares about; [] if the headline says it all. Never "and 3 more",
  "ask": only when the owner must decide: one question with the choices in words ("Give it one more round, or stop it?"); otherwise "",
- "links": at most two of the URLs in the note, the ones the owner would open: [{{"url": exact URL as written, "label": two or three plain words such as "Answer here", "What changed", "Release page"}}]. An answer page always comes first when there is one.}}
+ "links": at most two of the URLs in the note, the ones the owner would open: [{{"url": exact URL as written, "label": two or three plain words such as "Answer here", "What changed", "Release page"}}]. An answer page always comes first when there is one,
+ "sections": the whole note for the thread, every fact in it: [{{"title": two or three words, "facts": ["one fact per item, ids, numbers and links kept exactly as written"]}}]. A last section titled "Needs you" only when the owner must do something.}}
 
-Keep version numbers and box or machine names (v0.771.0, Helsinki). Leave out task ids, shas, field names, counters and commands entirely: they stay in the full note, which the owner can open.
+Keep version numbers and box or machine names (v0.771.0, Helsinki) in the headline and points. Leave out of them task ids, shas, field names, counters, commands and the agents' own names and abbreviations (CALL-REVIEW, p50, G1-G5): say what they mean in plain words. They stay in the sections.
 
 The agent's note:
 <note>
@@ -110,8 +111,59 @@ def parse(answer: str, source: str) -> dict | None:
     for x in d.get("links") or []:
         if isinstance(x, dict) and str(x.get("url") or "") and str(x["url"]) in source:
             links.append((str(x["url"]), str(x.get("label") or "").strip()))
+    raw_points = d.get("points") if isinstance(d.get("points"), list) else []  # a string is no list of facts
+    points = [p.strip() for p in raw_points if isinstance(p, str) and p.strip()]
     return {"status": status, "headline": headline, "summary": str(d.get("summary") or "").strip(),
-            "ask": str(d.get("ask") or "").strip(), "links": links}
+            "points": points[:owner_note.POINTS_MAX], "ask": str(d.get("ask") or "").strip(), "links": links,
+            "details": sections(d.get("sections"), source)}
+
+
+NEEDS_YOU = "needs you"
+FENCED_RE = re.compile(r"```.*?```", re.S)
+INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+FACT_TOKEN_RE = re.compile(r"https?://[^\s<>|]+|[^\s<>|]*\d[^\s<>|]*")
+
+
+def sections(raw, source: str) -> str:
+    """The model's sections as the thread's text (`*Title*`, one `•` per fact, "Needs you" last),
+    or "" — the agent's own words then — when they lost an id, a number or a link the agent wrote."""
+    if not isinstance(raw, list):
+        return ""
+    parts = []
+    for s in raw:
+        if not isinstance(s, dict):
+            return ""
+        title = str(s.get("title") or "").strip().strip("*_: ")
+        raw_facts = s.get("facts")
+        if not isinstance(raw_facts, list):  # a string would be read a character at a time
+            return ""
+        facts = [re.sub(r"^(?:[•◦]|[-*](?=\s))\s*", "", str(f).strip()) for f in raw_facts]
+        facts = [f for f in facts if f]
+        if title and facts:
+            parts.append((title, facts))
+    if not parts:
+        return ""
+    chunks = [f"*{t}*\n" + "\n".join("• " + f for f in fs) for t, fs in parts if t.lower() != NEEDS_YOU]
+    # a raw record (a fenced block) is no one-line fact: it stays whole, in a section of its own
+    blocks = [b for b in FENCED_RE.findall(source) if b not in "\n".join(chunks)]
+    chunks += ["*Raw record*\n" + "\n".join(blocks)] if blocks else []
+    chunks += [f"*{t}*\n" + "\n".join("• " + f for f in fs) for t, fs in parts if t.lower() == NEEDS_YOU]  # last
+    text = "\n\n".join(chunks)
+    kept = set(_tokens(text))
+    if not all(_kept(t, kept, text) for t in _tokens(source)):
+        return ""
+    # a command the agent wrote is its exact words: a section that lost one loses the note's point
+    return text if all(m.group(0) in text for m in INLINE_CODE_RE.finditer(FENCED_RE.sub("", source))) else ""
+
+
+def _kept(token: str, kept: set, text: str) -> bool:
+    """`token` (a number, an id, a URL of the agent's) is in `text` as itself, not inside a longer one:
+    "5" is not kept by "15", "1.5" or "5,000" (a changed count is a lost fact)."""
+    return token in kept or bool(re.search(r"(?<![\w.])" + re.escape(token) + r"(?!\w|[.,]\d)", text))
+
+
+def _tokens(text: str) -> list[str]:
+    return [m.group(0).strip(".,;:!?()[]*_`'\"") for m in FACT_TOKEN_RE.finditer(text or "")]
 
 
 def _resolve_call():
@@ -121,7 +173,7 @@ def _resolve_call():
 
 
 def shape(text: str, call=None, force: bool = False) -> dict | None:
-    """{status, headline, summary, ask, links} for a note, or None when the rules alone should read it.
+    """{status, headline, summary, points, ask, links, details} for a note, or None when the rules alone should read it.
 
     `call(prompt) -> str` is the model; tests pass their own. `force` asks even for a short or
     structured note — the rules already failed it. Never raises."""

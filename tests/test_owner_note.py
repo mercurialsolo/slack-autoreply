@@ -96,12 +96,21 @@ notes = [N.from_text("Helsinki shipped v0.552.0, all checks green", "solo-one"),
          N.from_text("Hillsboro frozen at v0.537.0 until you lift it", "solo-one"),
          N.from_text(TODAY, "solo-one")]
 g = N.render_group(notes, "solo-one")
-check("grouping: one message, the worst icon, one sentence per note, no bullets", g ==
-      "🔴 *3 updates* from solo-one. ✅ *Helsinki* shipped *v0.552.0*, all checks green. "
-      "⏸️ *Hillsboro* frozen at *v0.537.0* until you lift it. "
-      "🔴 *Helsinki* is not on the build it should be (a rollback, or a deploy by hand).\n"
+check("grouping: one message, the worst icon, then one line per note with its own icon", g ==
+      "🔴 *3 updates* from solo-one\n"
+      "• ✅ *Helsinki* shipped *v0.552.0*, all checks green\n"
+      "• ⏸️ *Hillsboro* frozen at *v0.537.0* until you lift it\n"
+      "• 🔴 *Helsinki* is not on the build it should be (a rollback, or a deploy by hand)\n"
       "_each one's detail is in the thread_", g)
-check("…more than three becomes 'And N more'", "And 1 more in the thread." in N.render_group(notes + notes[:1], "x"))
+_g4 = N.render_group(notes + notes[:1], "x")
+check("…more than three: three named, then a last line counting the rest",
+      _g4.splitlines()[-2] == "• 1 more in the thread" and len(_g4.splitlines()) == 6, _g4)
+check("…three items keep to the note rules", R.violations(g) == [], R.violations(g))
+check("…a final period goes, an ellipsis or a question mark stays",
+      N._no_period("Shipped v1.2.0.") == "Shipped v1.2.0" and N._no_period("Waiting...") == "Waiting..."
+      and N._no_period("Ship v2?") == "Ship v2?")
+check("…three or fewer: no 'more' line", "more in the thread" not in g, g)
+check("…one icon per line, never two", all(ln.count("✅") + ln.count("⏸️") + ln.count("🔴") <= 1 for ln in _g4.splitlines()), _g4)
 
 # today's message, the one the owner complained about
 golden("today's release note, rewritten", TODAY,
@@ -125,9 +134,9 @@ check("a short plain note is just its headline, with no thread", N.render(N.from
 _eight = N.from_text(". ".join(f"Box{i} shipped v1.{i}" for i in range(8)), "x")
 check("a long run: two sentences under the headline, the rest in Details",
       _eight.summary.count(". ") <= 1 and "Box7" in _eight.details and "Box7" not in N.render(_eight)["text"])
-check("an agent's explicit shape wins over the rules",
+check("an agent's explicit shape wins over the rules, its points one bullet each (owner, 2026-11-19)",
       N.render(N.from_text("raw dump 1225ms", "x", status="held", headline="Lisbon held at v0.9", points=["waiting on the gate"]))["text"]
-      == "⏸️ *Lisbon* held at *v0.9*\nWaiting on the gate.\n_from x · details in the thread_")
+      == "⏸️ *Lisbon* held at *v0.9*\n• Waiting on the gate.\n_from x · details in the thread_")
 try:
     N.norm_status("purple")
     check("an unknown status is refused", False)
@@ -145,8 +154,9 @@ check("more than five choices are all buttons", [e["text"]["text"] for e in _man
 _long = N.render(N.from_text("x", "x", headline="Deploy " + "a " * 2000, options=["Yes", "No"]))
 check("a section never passes Slack's 3000 characters", len(_long["blocks"][0]["text"]["text"]) <= 3000)
 _pts = N.from_text("x", "x", headline="h", points=list("abcde"))
-check("explicit points: two sentences under the headline, the rest in Details",
-      _pts.summary == "A. B." and all(f"\n{c}" in _pts.details for c in "cde"), repr((_pts.summary, _pts.details)))
+check("explicit points: three bullets under the headline, the rest in Details",
+      _pts.points == ["A.", "B.", "C."] and not _pts.summary and all(f"\n{c}" in _pts.details for c in "de"),
+      repr((_pts.points, _pts.details)))
 check("ms on its own becomes seconds", N.humanize("took 1460 ms") == "took 1.5 s" and N.humanize("took 40 ms") == "took 40 ms")
 
 # The two notes of 2026-11-10 that set the rule, replayed through every way in.
@@ -373,7 +383,7 @@ check("a digest thread entry keeps the ask", "Board it" in N.group_thread(_a) an
 # factory notes: a link reaches the owner as a link, in whatever form the factory wrote it (owner, 2026-11-13:
 # "See this": the 00:06Z burn alert showed its link as source)
 _dash = "https://factory.staffai.workers.dev/#factory/ops"
-_burn = ("⚠️ Alert: The operator's burn rule\n*Burn* is past the limit. See it on the dashboard.\n"
+_burn = ("⚠️ Alert: The operator's burn rule\n• *Burn* is past the limit.\n• See it on the dashboard.\n"
          f"<{_dash}|Open the dashboard>\n_from factory · details in the thread_")
 for _form, _link in (("Slack", f"<{_dash}|Open the dashboard>"), ("escaped", f"&lt;{_dash}|Open the dashboard&gt;"),
                      ("Markdown", f"[Open the dashboard]({_dash})")):
@@ -393,12 +403,12 @@ check("an image is not a link", R.slack_links("![logo](https://a.b/l.png)") == "
 for _kind, _spec, _want in (
         ("canary", {"status": "warn", "headline": "Canary: staff-factory PR #3062's train did not go green",
                     "points": ["The merge-path PRs on staff-factory are held.", f"See it on the dashboard: <{_dash}|Open the dashboard>."]},
-         "⚠️ Canary: staff-factory PR #3062's train did not go green\nThe merge-path PRs on staff-factory are held. "
-         f"See it on the dashboard.\n<{_dash}|Open the dashboard>\n_from factory_"),
+         "⚠️ Canary: staff-factory PR #3062's train did not go green\n• The merge-path PRs on staff-factory are held.\n"
+         f"• See it on the dashboard.\n<{_dash}|Open the dashboard>\n_from factory_"),
         ("schedule recovered", {"status": "ok", "headline": "Recovered: schedule nightly-build",
                                 "points": ["The schedule nightly-build ran clean again.",
                                            f"See it on the dashboard: &lt;{_dash}|Open the dashboard&gt;."]},
-         "✅ Recovered: schedule nightly-build\nThe schedule nightly-build ran clean again. See it on the dashboard.\n"
+         "✅ Recovered: schedule nightly-build\n• The schedule nightly-build ran clean again.\n• See it on the dashboard.\n"
          f"<{_dash}|Open the dashboard>\n_from factory_")):
     _r = N.render(note_shape.build("", "factory", _spec, call=lambda p: None))
     check(f"the factory's {_kind} note renders its link as a link", _r["text"] == _want, f"--- got\n{_r['text']}\n--- want\n{_want}")
@@ -442,7 +452,7 @@ KEY_HEALTH = ("Box memory high: 53% of 63 GB used, swap 76%. Nothing was stopped
               "- VMs running (3): agentvm, hillsboro, helsinki")
 _kh = N.from_text(KEY_HEALTH, "key-health")
 golden("key-health memory note, no model: the note says the state", KEY_HEALTH,
-       "📨 Box memory high: 53% of 63 GB used, swap 76%.\n*Nothing* was stopped.\n_from key-health · details in the thread_",
+       "ℹ️ Box memory high: 53% of 63 GB used, swap 76%.\n*Nothing* was stopped.\n_from key-health · details in the thread_",
        sender="key-health")
 check("…its thread has only the lists the note left out, no sentence of the note again",
       _kh.details == KEY_HEALTH.split("\n", 1)[1] and "Box memory" not in _kh.details and "stopped" not in _kh.details, repr(_kh.details))
@@ -465,6 +475,28 @@ check("beyond: a sentence in other filler words is a repeat; a new number, name 
 check("beyond: a header with no item left is dropped; a code block stays whole, repeats and all",
       T.beyond("Biggest:\n- qemu 18.2 GB", ["Biggest qemu 18.2 GB"]) == ""
       and T.beyond("```\nNothing was stopped.\n```", ["Nothing was stopped."]) == "```\nNothing was stopped.\n```")
+check("beyond: a *Section* heading the note echoes stays while an item under it is new; with none left it goes",
+      T.beyond("*Known issue*\n• Hillsboro greeting cut off: queued as t_5c2e10aa", ["One known issue already queued"])
+      == "*Known issue*\n• Hillsboro greeting cut off: queued as t_5c2e10aa"
+      and T.beyond("*Checked*\n• 14 calls checked, nothing new.\n\n*New*\n• canary 5/5", ["14 calls checked, nothing new."])
+      == "*New*\n• canary 5/5")
+check("beyond: a section heading stays over a sub-header; a ':' line or a bold sentence is still checked for repeats",
+      T.beyond("*Memory*\nBiggest:\n- qemu 18.2 GB", ["Box is busy"]) == "*Memory*\nBiggest:\n- qemu 18.2 GB"
+      and T.beyond("**Known issue**\n- Hillsboro cut off", ["One known issue"]) == "**Known issue**\n- Hillsboro cut off"
+      and T.beyond("Nothing was stopped. Top processes:\n- qemu 18 GB", ["Nothing was stopped."])
+      == "Top processes:\n- qemu 18 GB"
+      and T.beyond("*Nothing was stopped.*\nThe disk is at 80%.", ["Nothing was stopped."]) == "The disk is at 80%.")
+check("beyond: a heading whose sub-header lost every item goes too; a version in a heading is no sentence",
+      T.beyond("*Memory*\nTop processes:\n- qemu 18.2 GB\n\n*Disk*\n- 80% used on /var", ["qemu 18.2 GB"])
+      == "*Disk*\n- 80% used on /var"
+      and T.beyond("*Release v0.812.0*\n- canary 5/5 on helsinki", ["Release v0.812.0 promoted"])
+      == "*Release v0.812.0*\n- canary 5/5 on helsinki"
+      and T.beyond("Per site results:\n*Helsinki*\n- 3 passed", ["Release done"])
+      == "Per site results:\n*Helsinki*\n- 3 passed")
+check("model_beyond: a section heading is not the model's to drop; it goes only with all its lines",
+      T.model_beyond("*Known issue*\n- Hillsboro cut off\n*Other*\n- x", "n", lambda p: '{"new": [1]}')
+      == "*Known issue*\n- Hillsboro cut off"
+      and T.model_beyond("*Raw record*\n```\nx\n```\n- a", "n", lambda p: '{"new": []}') == "*Raw record*\n```\nx\n```")
 _d = "- Biggest: qemu 18.2 GB\n- VMs running (3): agentvm, hillsboro\n```\nraw\n```"
 check("model_beyond keeps only the lines the model calls new, and code blocks",
       T.model_beyond(_d, "note", lambda p: '{"new": [1]}') == "- Biggest: qemu 18.2 GB\n```\nraw\n```")
