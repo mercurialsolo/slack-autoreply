@@ -40,6 +40,8 @@ Reply with JSON only, no prose around it:
  "links": at most two of the URLs in the note, the ones the owner would open: [{{"url": exact URL as written, "label": two or three plain words such as "Answer here", "What changed", "Release page"}}]. An answer page always comes first when there is one,
  "sections": the whole note for the thread, every fact in it: [{{"title": two or three words, "facts": ["one fact per item, ids, numbers and links kept exactly as written"]}}]. A last section titled "Needs you" only when the owner must do something.}}
 
+Each fact in the sections leads with plain words: which behaviour broke or what changed, in a short sentence a person reads without the code ("The replay where a Slack ask also gets the line in the DM is red on two train runs, not due yet"). Then, after the words, each identifier the agent wrote (a file::test, a path, a task id, a sha, a field name, a command) exactly as written inside Slack inline code: `host/replay_test.py::test_ask_in_dm`. Never a bare identifier, never one as the fact's first words. Counts in words: "two train runs", "twice", never "2 train run(s)".
+
 Keep version numbers and box or machine names (v0.771.0, Helsinki) in the headline and points. Leave out of them task ids, shas, field names, counters, commands and the agents' own names and abbreviations (CALL-REVIEW, p50, G1-G5): say what they mean in plain words. They stay in the sections.
 
 The agent's note:
@@ -156,10 +158,20 @@ def sections(raw, source: str) -> str:
     return text if all(m.group(0) in text for m in INLINE_CODE_RE.finditer(FENCED_RE.sub("", source))) else ""
 
 
+# A small count the owner reads in words (owner, 2026-11-20: "red on two train runs", not "2 train run(s)").
+COUNT_WORDS = {"0": ("zero",), "1": ("one", "once"), "2": ("two", "twice"), "3": ("three",), "4": ("four",),
+               "5": ("five",), "6": ("six",), "7": ("seven",), "8": ("eight",), "9": ("nine",), "10": ("ten",),
+               "11": ("eleven",), "12": ("twelve",)}
+
+
 def _kept(token: str, kept: set, text: str) -> bool:
     """`token` (a number, an id, a URL of the agent's) is in `text` as itself, not inside a longer one:
-    "5" is not kept by "15", "1.5" or "5,000" (a changed count is a lost fact)."""
-    return token in kept or bool(re.search(r"(?<![\w.])" + re.escape(token) + r"(?!\w|[.,]\d)", text))
+    "5" is not kept by "15", "1.5" or "5,000" (a changed count is a lost fact). A small count is also
+    kept by its word ("2" by "two" or "twice")."""
+    if token in kept or re.search(r"(?<![\w.])" + re.escape(token) + r"(?!\w|[.,]\d)", text):
+        return True
+    words = COUNT_WORDS.get(token, ())
+    return bool(words) and bool(re.search(r"\b(?:" + "|".join(words) + r")\b", text, re.I))
 
 
 def _tokens(text: str) -> list[str]:
