@@ -38,7 +38,9 @@ Reply with JSON only, no prose around it:
  "points": at most three short plain sentences, each one whole fact the owner cares about; [] if the headline says it all. Never "and 3 more",
  "ask": only when the owner must decide: one question with the choices in words ("Give it one more round, or stop it?"); otherwise "",
  "links": at most two of the URLs in the note, the ones the owner would open: [{{"url": exact URL as written, "label": two or three plain words such as "Answer here", "What changed", "Release page"}}]. An answer page always comes first when there is one,
- "sections": the whole note for the thread, every fact in it: [{{"title": two or three words, "facts": ["one fact per item, ids, numbers and links kept exactly as written"]}}]. A last section titled "Needs you" only when the owner must do something.}}
+ "sections": the whole note for the thread, every fact in it: [{{"title": two or three words, "facts": ["one fact per item, ids, links and numbers kept exactly as written, except a small count in words as below"]}}]. A last section titled "Needs you" only when the owner must do something.}}
+
+Each fact in the sections leads with plain words: which behaviour broke or what changed, in a short sentence a person reads without the code ("The replay where a Slack ask also gets the line in the DM is red on two train runs, not due yet"). Then, after the words, each identifier the agent wrote (a file::test, a path, a task id, a sha, a field name, a command) exactly as written inside Slack inline code: `host/replay_test.py::test_ask_in_dm`. Never a bare identifier, never one as the fact's first words. Version numbers and box names are words, not code. A count from two to twelve in words, before the same word the agent wrote after it: "two train runs", never "2 train run(s)"; other numbers as written.
 
 Keep version numbers and box or machine names (v0.771.0, Helsinki) in the headline and points. Leave out of them task ids, shas, field names, counters, commands and the agents' own names and abbreviations (CALL-REVIEW, p50, G1-G5): say what they mean in plain words. They stay in the sections.
 
@@ -150,16 +152,41 @@ def sections(raw, source: str) -> str:
     chunks += [f"*{t}*\n" + "\n".join("• " + f for f in fs) for t, fs in parts if t.lower() == NEEDS_YOU]  # last
     text = "\n\n".join(chunks)
     kept = set(_tokens(text))
-    if not all(_kept(t, kept, text) for t in _tokens(source)):
+    if not all(_kept(t, kept, text, source) for t in _tokens(source)):
         return ""
     # a command the agent wrote is its exact words: a section that lost one loses the note's point
     return text if all(m.group(0) in text for m in INLINE_CODE_RE.finditer(FENCED_RE.sub("", source))) else ""
 
 
-def _kept(token: str, kept: set, text: str) -> bool:
+# A small count the owner reads in words (owner, 2026-11-20: "red on two train runs", not "2 train run(s)").
+# Not one: "one" is a pronoun as often as a count, so it would keep a lost "1".
+COUNT_WORDS = {"2": "two", "3": "three", "4": "four", "5": "five", "6": "six", "7": "seven", "8": "eight",
+               "9": "nine", "10": "ten", "11": "eleven", "12": "twelve"}
+
+
+def _kept(token: str, kept: set, text: str, source: str) -> bool:
     """`token` (a number, an id, a URL of the agent's) is in `text` as itself, not inside a longer one:
-    "5" is not kept by "15", "1.5" or "5,000" (a changed count is a lost fact)."""
-    return token in kept or bool(re.search(r"(?<![\w.])" + re.escape(token) + r"(?!\w|[.,]\d)", text))
+    "5" is not kept by "15", "1.5" or "5,000" (a changed count is a lost fact). A count from two to
+    twelve is also kept by its word before the word the agent wrote after it ("2 train run(s)" by
+    "two train runs"); "two failed" does not keep "2 passed"."""
+    if token in kept or re.search(r"(?<![\w.])" + re.escape(token) + r"(?!\w|[.,]\d)", text):
+        return True
+    word = COUNT_WORDS.get(token)
+    if not word:
+        return False
+    # The agent's word after each occurrence of the count, "" when none follows (end, punctuation).
+    nouns = re.findall(r"(?<![\w.])[*_]*" + re.escape(token) + r"[*_]*(?:\s+([A-Za-z]+))?", source)
+    for n in nouns:
+        if not n:
+            if re.search(rf"\b{word}\b", text, re.I):
+                return True
+            continue
+        stem = re.escape(n[:-1] if n.endswith("s") and len(n) > 3 else n)
+        # The count word, at most two plain words, then the agent's own word: "two new failing tests"
+        # keeps "2 failing tests"; "two testers" does not keep "2 tests".
+        if re.search(rf"\b{word}\s+(?:[A-Za-z-]+\s+){{0,2}}{stem}(?:e?s)?\b", text, re.I):
+            return True
+    return False
 
 
 def _tokens(text: str) -> list[str]:

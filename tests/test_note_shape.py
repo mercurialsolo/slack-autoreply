@@ -244,4 +244,42 @@ check("sections: one that kept 5 of 15 reads", "5 of 15" in S.sections(
 check("parse: points given as one string are no points",
       S.parse(json.dumps({**SWEEP_ANSWER, "points": "abc"}), SWEEP)["points"] == [])
 
+# Owner, 2026-11-20 (screenshot): a trains Details bullet led with a bare file::test that wrapped mid-word.
+# Details lead with plain words (which behaviour broke), the identifier after them in inline code, counts in words.
+RED_TEST = "host/perception/test_2026_11_11_muted_needed_replay.py::test_a_slack_ask_also_gets_the_line_in_the_dm"
+TRAINS = ("Train sweep on mini: v0.9.4 boarded, one test red.\n"
+          f"- Red on train runs: {RED_TEST} (red on 2 train run(s), not due yet)\n- Next sweep at 22:20Z.")
+TRAINS_ANSWER = {
+    "status": "warn", "headline": "Train sweep: one replay test is red", "points": ["It is not due yet."],
+    "ask": "", "links": [],
+    "sections": [{"title": "Red tests", "facts": [
+        f"The replay where a Slack ask also gets the line in the DM is red on two train runs, not due yet: `{RED_TEST}`"]},
+        {"title": "Release", "facts": ["v0.9.4 boarded on mini.", "Next sweep at 22:20Z."]}]}
+_r = N.render(S.build(TRAINS, "factory", call=model(TRAINS_ANSWER)))
+_red = next((ln for ln in _r["details"].split("\n") if "replay" in ln), "")
+check("trains: a red-test fact leads with plain words, not the file::test",
+      _red.startswith("• The replay where a Slack ask also gets the line in the DM"), _r["details"])
+check("trains: the file::test is in inline code, never bare", f"`{RED_TEST}`" in _red
+      and _r["details"].replace(f"`{RED_TEST}`", "").count(RED_TEST) == 0, _r["details"])
+check("trains: the count reads in words", "two train runs" in _red and "run(s)" not in _r["details"], _r["details"])
+check("sections: a count kept only as a word still holds the fact",
+      S.sections([{"title": "Red", "facts": ["Red on two runs."]}], "red on 2 runs") == "*Red*\n• Red on two runs.")
+check("sections: a count changed to another word is a lost fact",
+      S.sections([{"title": "Red", "facts": ["Red on three runs."]}], "red on 2 runs") == "")
+check("sections: a count word on another noun is a lost fact (swapped counts)",
+      S.sections([{"title": "Checks", "facts": ["Two failed and 1 passed."]}], "1 failed, 2 passed") == "")
+check("sections: 'one' as a pronoun does not keep a lost 1",
+      S.sections([{"title": "Runs", "facts": ["3 runs failed; the one to watch is Oslo."]}], "1 host red, 3 runs failed") == "")
+check("sections: a count word on a longer word is a lost fact",
+      S.sections([{"title": "Tests", "facts": ["Two testers left."]}], "2 tests failed") == "")
+check("sections: a count word with a plain word before the agent's noun holds the fact",
+      S.sections([{"title": "Tests", "facts": ["Two new failing tests."]}], "2 failing tests") != "")
+check("sections: a count with no word after it holds as a word",
+      S.sections([{"title": "Checks", "facts": ["Two of five checks."]}], "2 of 5") != "")
+check("sections: a bold count holds as a word",
+      S.sections([{"title": "Red", "facts": ["Red on two runs."]}], "red on **2** runs") != "")
+check("the prompt asks for plain words first, identifiers in inline code, counts in words",
+      all(w in S.PROMPT for w in ("leads with plain words", "inside Slack inline code", "Never a bare identifier",
+                                  "A count from two to twelve in words")))
+
 print(f"\n{passed} checks passed")
