@@ -607,14 +607,21 @@ _FALLBACK = {"ask": "A decision is waiting for you.", "failed": "Something faile
 GROUP_NAMED = 3
 
 
+def _no_period(text: str) -> str:
+    """A list line ends bare: one final period goes; an ellipsis, '?' or '!' stays."""
+    t = text.strip()
+    return t[:-1] if t.endswith(".") and not t.endswith("..") else t
+
+
 def render_group(notes: list[Note], sender: str = "") -> str:
     """Several notes inside the grouping window, as one message: a head line with the worst icon, then
-    one line per note with its own icon, three at most and the rest counted on a last line."""
+    one line per note with its own icon, three at most and the rest counted on a last line. The count
+    line is the owner's 11-20 ask, so a digest of four or more has one more `• ` line than BULLETS_MAX."""
     if len(notes) == 1:
         return render(notes[0])["text"]
     st = worst(n.status for n in notes)
     lines = [f"{ICONS[st]} *{len(notes)} updates*" + (f" from {sender}" if sender else "")]
-    lines += [f"• {ICONS[n.status]} {emphasize(lead_off(n.headline).rstrip('.'))}" for n in notes[:GROUP_NAMED]]
+    lines += [f"• {ICONS[n.status]} {emphasize(_no_period(lead_off(n.headline)))}" for n in notes[:GROUP_NAMED]]
     if len(notes) > GROUP_NAMED:
         lines.append(f"• {len(notes) - GROUP_NAMED} more in the thread")
     return "\n".join(lines) + "\n_each one's detail is in the thread_"
