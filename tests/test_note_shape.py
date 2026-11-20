@@ -270,8 +270,16 @@ check("sections: a count word on another noun is a lost fact (swapped counts)",
       S.sections([{"title": "Checks", "facts": ["Two failed and 1 passed."]}], "1 failed, 2 passed") == "")
 check("sections: 'one' as a pronoun does not keep a lost 1",
       S.sections([{"title": "Runs", "facts": ["3 runs failed; the one to watch is Oslo."]}], "1 host red, 3 runs failed") == "")
+check("sections: a count word on a longer word is a lost fact",
+      S.sections([{"title": "Tests", "facts": ["Two testers left."]}], "2 tests failed") == "")
+check("sections: a count word with a plain word before the agent's noun holds the fact",
+      S.sections([{"title": "Tests", "facts": ["Two new failing tests."]}], "2 failing tests") != "")
+check("sections: a count with no word after it holds as a word",
+      S.sections([{"title": "Checks", "facts": ["Two of five checks."]}], "2 of 5") != "")
+check("sections: a bold count holds as a word",
+      S.sections([{"title": "Red", "facts": ["Red on two runs."]}], "red on **2** runs") != "")
 check("the prompt asks for plain words first, identifiers in inline code, counts in words",
       all(w in S.PROMPT for w in ("leads with plain words", "inside Slack inline code", "Never a bare identifier",
-                                  "in words")))
+                                  "A count from two to twelve in words")))
 
 print(f"\n{passed} checks passed")
