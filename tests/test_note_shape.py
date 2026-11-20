@@ -263,11 +263,15 @@ check("trains: the file::test is in inline code, never bare", f"`{RED_TEST}`" in
       and _r["details"].replace(f"`{RED_TEST}`", "").count(RED_TEST) == 0, _r["details"])
 check("trains: the count reads in words", "two train runs" in _red and "run(s)" not in _r["details"], _r["details"])
 check("sections: a count kept only as a word still holds the fact",
-      S.sections([{"title": "Red", "facts": ["Red twice."]}], "red on 2 runs") == "*Red*\n• Red twice.")
+      S.sections([{"title": "Red", "facts": ["Red on two runs."]}], "red on 2 runs") == "*Red*\n• Red on two runs.")
 check("sections: a count changed to another word is a lost fact",
       S.sections([{"title": "Red", "facts": ["Red on three runs."]}], "red on 2 runs") == "")
+check("sections: a count word on another noun is a lost fact (swapped counts)",
+      S.sections([{"title": "Checks", "facts": ["Two failed and 1 passed."]}], "1 failed, 2 passed") == "")
+check("sections: 'one' as a pronoun does not keep a lost 1",
+      S.sections([{"title": "Runs", "facts": ["3 runs failed; the one to watch is Oslo."]}], "1 host red, 3 runs failed") == "")
 check("the prompt asks for plain words first, identifiers in inline code, counts in words",
       all(w in S.PROMPT for w in ("leads with plain words", "inside Slack inline code", "Never a bare identifier",
-                                  "Counts in words")))
+                                  "in words")))
 
 print(f"\n{passed} checks passed")
