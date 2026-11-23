@@ -116,6 +116,32 @@ nh = A.fetch([{"id": "FHTML", "name": "x.png", "mimetype": "image/png", "filetyp
              [(FakeBot(), "xoxb-test-bot")], download=download)
 check("Slack's sign-in page instead of the file: not saved as the image", nh[0]["path"] is None and "invite" in nh[0]["note"])
 
+class FakeOwner(FakeBot):
+    token = "xoxp-test-owner"
+
+
+DOWNLOADS.clear()
+dm = A.fetch(ev_files("FCSV"), "D1-1_0", [(FakeBot("file_not_found"), "xoxb-test-bot"), (FakeOwner(), "xoxp-test-owner")],
+             download=download)
+check("a DM file the bot cannot see: read with the owner's token when it can", dm[0]["path"] and DOWNLOADS[-1][1] == "xoxp-test-owner")
+dm2 = A.fetch(ev_files("FCSV"), "D1-2_0", [(FakeBot("file_not_found"), "xoxb-test-bot"), (FakeOwner("missing_scope"), "xoxp-test-owner")],
+              download=download)
+check("…and when neither can, the bot's reason is the one given", dm2[0]["path"] is None and dm2[0]["note"] == A.NO_ACCESS)
+
+FILES["FPOST"] = ({"id": "FPOST", "name": "notes", "mimetype": "text/html", "filetype": "post", "size": 20,
+                   "url_private_download": "https://files.slack.test/FPOST/download"}, b"<p>meeting notes</p>")
+_dl = download
+
+
+def download(url, token, max_bytes):  # noqa: F811 — a Slack Post really is served as text/html
+    if "/FPOST/" in url:
+        return 200, "text/html", FILES["FPOST"][1]
+    return _dl(url, token, max_bytes)
+
+
+post = A.fetch([dict(FILES["FPOST"][0])], "C1-7_0", [(FakeBot(), "xoxb-test-bot")], download=download)
+check("a Slack Post (served as text/html) is read, not taken for the sign-in page", post[0]["path"] and post[0].get("text_path"))
+
 big = dict(ev_files("FZIP")[0], size=50 * 1024 * 1024)
 DOWNLOADS.clear()
 nbig = A.fetch([big], "C1-5_0", [(FakeBot(), "xoxb-test-bot")], download=download)

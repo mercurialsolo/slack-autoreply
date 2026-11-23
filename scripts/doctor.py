@@ -141,6 +141,8 @@ def check_bot_files(r: Report):
         r.add(WARN, "files:read bot scope not granted", "Solo cannot see attached images or documents until you add it under OAuth & Permissions and reinstall the app (manifest.yaml has it)")
     elif scopes:
         r.add(OK, "bot token can read attachments (files:read)")
+    else:
+        r.add(WARN, "could not list bot scopes", "if attachments say files:read is missing, add it under OAuth & Permissions and reinstall the app")
 
 
 def check_socket_mode(r: Report):

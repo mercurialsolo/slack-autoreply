@@ -897,7 +897,12 @@ class Slack:
         files = attachments.gather(msgs)
         if not files:
             return []
-        return attachments.fetch(files, item_id, [(self.bot, self.bot.token)] if self.bot else [])
+        # The bot first (files:read); then the owner's own token, which reads a DM's files only if the
+        # owner granted it files:read too (the bot is never in a DM between two people).
+        clients = [(self.bot, self.bot.token)] if self.bot else []
+        if clients and getattr(self.client, "token", None):
+            clients.append((self.client, self.client.token))
+        return attachments.fetch(files, item_id, clients)
 
     def newer_messages(self, channel: str, thread_ts: str | None, since_ts: str) -> list[dict]:
         if thread_ts:

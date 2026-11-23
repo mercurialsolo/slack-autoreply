@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -49,13 +50,16 @@ IMAGE_MAX_B64 = 5 * 1024 * 1024
 IMAGE_MAX_EDGE = 1568
 TEXT_FILETYPES = {"text", "csv", "tsv", "markdown", "md", "json", "yaml", "yml", "xml", "html", "python",
                   "javascript", "typescript", "sql", "shell", "log", "plain", "post", "go", "rust"}
+# Slack serves these as text/html for real, so text/html is not its sign-in page for them.
+HTML_FILETYPES = {"html", "post"}
 DOCX_TYPES = {"docx"}
 PDF_TYPES = {"pdf"}
 
 NO_BOT = "not fetched: no bot token (SLACK_BOT_TOKEN) — add one with files:read to let Solo read attachments"
 NO_SCOPE = ("not fetched: the bot token lacks the files:read scope — add it under OAuth & Permissions "
             "(manifest.yaml has it) and reinstall the app")
-NO_ACCESS = "not fetched: Slack would not give this file to the bot (invite the bot to the channel)"
+NO_ACCESS = ("not fetched: Slack would not give this file to the bot (invite the bot to the channel; in a DM "
+             "only the owner's token can read it, and only with the files:read user scope)")
 
 
 # ------------------------------------------------------------ which files
@@ -95,6 +99,14 @@ def kind_of(f: dict) -> str:
 
 def item_dir(item_id: str) -> Path:
     return ROOT / re.sub(r"[^\w.-]", "_", item_id)
+
+
+def write_private(path: Path, data: bytes) -> None:
+    """Create the file 0600 from the start: no window where another local user can read it."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    os.chmod(path, 0o600)
 
 
 def safe_name(i: int, name: str) -> str:
@@ -162,36 +174,38 @@ def fetch(files: list[dict], item_id: str, clients: list[tuple[object, str]], *,
         if rec["size"] > max_bytes:
             rec["note"] = f"not fetched: {rec['size'] // (1024 * 1024)} MB is over the {max_bytes // (1024 * 1024)} MB limit"
             continue
-        note = None
+        notes: list[str] = []  # one per client tried; the first (the bot's) is the one reported
         for client, token in clients:
-            info, note = _info(client, rec["id"]) if rec["id"] else (f, None)
+            info, n = _info(client, rec["id"]) if rec["id"] else (f, None)
             if info is None:
+                notes.append(n)
                 continue
             url = info.get("url_private_download") or info.get("url_private")
             if not url:
-                note = "not fetched: Slack gave no download link (an external or deleted file)"
+                notes.append("not fetched: Slack gave no download link (an external or deleted file)")
                 continue
             try:
                 status, ctype, data = download(url, token, max_bytes)
             except Exception as e:  # noqa: BLE001 — a network fault is a note
-                note = f"not fetched: download failed ({type(e).__name__})"
+                notes.append(f"not fetched: download failed ({type(e).__name__})")
                 continue
             if data is None:
-                note = f"not fetched: over the {max_bytes // (1024 * 1024)} MB limit"
+                notes.insert(0, f"not fetched: over the {max_bytes // (1024 * 1024)} MB limit")
                 break
-            if status != 200 or ("text/html" in ctype and rec["filetype"] != "html"):
+            if status != 200 or ("text/html" in ctype and rec["filetype"] not in HTML_FILETYPES):
                 # Slack answers a token that may not read the file with its sign-in page, not a 403.
-                note = NO_ACCESS
+                notes.append(NO_ACCESS)
                 continue
-            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
             ROOT.chmod(0o700)
+            folder.mkdir(exist_ok=True, mode=0o700)
             path = folder / safe_name(i, rec["name"])
-            path.write_bytes(data)
-            path.chmod(0o600)
-            rec["path"], rec["size"], note = str(path), len(data), None
+            write_private(path, data)
+            rec["path"], rec["size"] = str(path), len(data)
             _extract(rec, data)
             break
-        rec["note"] = note if rec["path"] is None else rec.get("note")
+        if rec["path"] is None:
+            rec["note"] = notes[0] if notes else NO_ACCESS
     got = sum(1 for r in records if r["path"])
     log.info("attachments for %s: %d of %d fetched (%s)", item_id, got, len(records),
              ", ".join(sorted({r["kind"] for r in records})))
@@ -219,16 +233,14 @@ def _extract(rec: dict, data: bytes) -> None:
             body, mt = small
             if body is not data:
                 p = Path(rec["path"] + ".model" + {"image/png": ".png", "image/jpeg": ".jpg"}.get(mt, ""))
-                p.write_bytes(body)
-                p.chmod(0o600)
+                write_private(p, body)
                 rec["model_path"] = str(p)
             rec["model_type"] = mt
     if text is not None:
         text = text.strip()
         rec["text_chars"] = len(text)
         p = Path(rec["path"] + ".txt")
-        p.write_text(text[:TEXT_CHARS])
-        p.chmod(0o600)
+        write_private(p, text[:TEXT_CHARS].encode("utf-8"))
         rec["text_path"] = str(p)
 
 
@@ -238,10 +250,8 @@ def pdf_text(path: Path, data: bytes) -> str | None:
 
         reader = pypdf.PdfReader(io.BytesIO(data))
         return "\n".join((pg.extract_text() or "") for pg in reader.pages[:30])
-    except ImportError:
+    except Exception:  # noqa: BLE001 — no pypdf, or a PDF it cannot parse: try pdftotext
         pass
-    except Exception:  # noqa: BLE001 — a broken PDF is described, not fatal
-        return None
     exe = shutil.which("pdftotext")
     if not exe:
         return None
