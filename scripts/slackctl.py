@@ -40,6 +40,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import attachments  # noqa: E402
 import channel_for  # noqa: E402
 import config  # noqa: E402
 import linear  # noqa: E402
@@ -185,6 +186,9 @@ def attach_files(paths: list[str]) -> list[dict]:
         path = Path(raw).expanduser().resolve()
         if not path.is_file():
             sys.exit(f"--file {raw}: no such file (it must be on this machine, where the daemon sends from)")
+        if path.is_relative_to(attachments.ROOT.resolve()):
+            # A file someone sent the owner goes only where they sent it: never back out on a draft.
+            sys.exit(f"--file {raw}: refusing a file someone sent to the owner — Solo never forwards those")
         hidden = [part for part in path.parts if part.startswith(".")]
         if hidden and not path.is_relative_to(outbox):
             sys.exit(f"--file {raw}: refusing a path under a dot-directory ({hidden[0]}) — copy it somewhere plain first")
@@ -881,6 +885,19 @@ class Slack:
             if text:
                 lines.append(f"[{who}]: {text}")
         return "\n".join(lines)
+
+    def inbound_files(self, ev: dict, channel: str, thread_ts: str | None, item_id: str) -> list[dict]:
+        """Fetch the files on this message and its thread with the bot token (see attachments.py)."""
+        msgs = [ev]
+        if thread_ts:
+            try:
+                msgs += self.client.conversations_replies(channel=channel, ts=thread_ts, limit=200)["messages"][::-1]
+            except Exception:  # noqa: BLE001 — the message's own files still count
+                pass
+        files = attachments.gather(msgs)
+        if not files:
+            return []
+        return attachments.fetch(files, item_id, [(self.bot, self.bot.token)] if self.bot else [])
 
     def newer_messages(self, channel: str, thread_ts: str | None, since_ts: str) -> list[dict]:
         if thread_ts:
@@ -3516,6 +3533,11 @@ class Daemon(Slack):
             customer = None
         if customer:
             item["customer"] = customer
+        try:
+            if (atts := self.inbound_files(ev, channel, thread_ts, item["id"])):
+                item["attachments"] = atts
+        except Exception as e:  # noqa: BLE001 — a file Solo cannot read must never stop a draft
+            log.warning("attachments: fetch failed (%s)", type(e).__name__)
         state = {"owner": self.me_name, "owner_notes": voice.load_notes(), "owner_presence": "active" if self.presence_active() else "away",
                  "local_time": datetime.now().strftime("%A %H:%M"), "channel_type": ctype, "channel_name": item["channel_name"],
                  "sender": who, "sender_trusted_for_sharing": sender in self.share_trusted,
@@ -3712,7 +3734,8 @@ class Daemon(Slack):
     # ----------------------------------------------------------------- tick
 
     def tick(self) -> None:
-        """Every few minutes: score auto-sends that aged cleanly, expire stale drafts."""
+        """Every few minutes: score auto-sends that aged cleanly, expire stale drafts, drop old attachments."""
+        attachments.prune()
         st = self.state.read()
         now = datetime.now()
         for ts, s in list(st.get("sent", {}).items()):

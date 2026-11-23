@@ -22,6 +22,7 @@ test:           ## offline test suite (fake Slack, fake claude) — no tokens ne
 	$(PY) tests/test_note_mrkdwn.py
 	$(PY) tests/test_note_shape.py
 	$(PY) tests/test_inbound_retry.py
+	$(PY) tests/test_attachments.py
 
 setup:          ## interactive voice training in Claude Code
 	cd $(HOME) && claude "/solo:slack-autoreply setup"

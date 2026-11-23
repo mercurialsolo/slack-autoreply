@@ -48,11 +48,12 @@ settings:
 
 oauth_config:
   scopes:
-    # Bot scopes exist only so Solo can DM YOU that a draft is waiting.
+    # Bot scopes exist so Solo can DM YOU that a draft is waiting, and read files on messages it handles.
     bot:
       - chat:write
       - im:write
       - im:history        # read what the owner types to Solo in its DM
+      - files:read        # read the images and documents on a message Solo handles (never forwarded)
     # Replies use USER scopes, so they post as you. The bot above never replies to anyone;
     # it only DMs you that a draft is waiting.
     user:
