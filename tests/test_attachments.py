@@ -3,17 +3,22 @@ model input they become — without a name or a byte of them reaching the log, a
 from __future__ import annotations
 
 import io
+import shutil
+import json
 import logging
 import os
 import stat
+import sys
 import struct
 import time
+import types
 import zipfile
 import zlib
 
 import offline_harness as H  # noqa: E402  (sets the environment first)
 from offline_harness import TMP, STATE, FakeClient, check  # noqa: E402
 import attachments as A  # noqa: E402
+import slack_thread  # noqa: E402
 import slackctl as S  # noqa: E402
 from slack_sdk.errors import SlackApiError  # noqa: E402
 
@@ -73,13 +78,18 @@ class FakeBot(FakeClient):
 DOWNLOADS: list[tuple[str, str]] = []
 
 
-def download(url, token, max_bytes):
+def download(url, token, max_bytes, seconds_left=None):
     DOWNLOADS.append((url, token))
     fid = url.split("/")[-2]
     if fid == "FHTML":
         return 200, "text/html; charset=utf-8", b"<html>sign in</html>"
     data = FILES[fid][1]
     return (200, "application/octet-stream", None) if len(data) > max_bytes else (200, "application/octet-stream", data)
+
+
+def clear_cache():
+    """Forget every fetched file, so the next fetch downloads again."""
+    shutil.rmtree(A.ROOT / A.FILES_DIR, ignore_errors=True)
 
 
 def ev_files(*ids):
@@ -124,6 +134,7 @@ DOWNLOADS.clear()
 dm = A.fetch(ev_files("FCSV"), "D1-1_0", [(FakeBot("file_not_found"), "xoxb-test-bot"), (FakeOwner(), "xoxp-test-owner")],
              download=download)
 check("a DM file the bot cannot see: read with the owner's token when it can", dm[0]["path"] and DOWNLOADS[-1][1] == "xoxp-test-owner")
+clear_cache()
 dm2 = A.fetch(ev_files("FCSV"), "D1-2_0", [(FakeBot("file_not_found"), "xoxb-test-bot"), (FakeOwner("missing_scope"), "xoxp-test-owner")],
               download=download)
 check("…and when neither can, the bot's reason is the one given", dm2[0]["path"] is None and dm2[0]["note"] == A.NO_ACCESS)
@@ -133,7 +144,7 @@ FILES["FPOST"] = ({"id": "FPOST", "name": "notes", "mimetype": "text/html", "fil
 _dl = download
 
 
-def download(url, token, max_bytes):  # noqa: F811 — a Slack Post really is served as text/html
+def download(url, token, max_bytes, seconds_left=None):  # noqa: F811 — a Slack Post really is served as text/html
     if "/FPOST/" in url:
         return 200, "text/html", FILES["FPOST"][1]
     return _dl(url, token, max_bytes)
@@ -154,19 +165,23 @@ _h = logging.StreamHandler(logs)
 A.log.addHandler(_h)
 A.log.setLevel(logging.INFO)
 bot = FakeBot()
+clear_cache()
 DOWNLOADS.clear()
 recs = A.fetch(g, "CPRODUCT-1763869260_000100", [(bot, bot.token)], download=download)
 A.log.removeHandler(_h)
 by = {r["id"]: r for r in recs}
 check("fetched with the bot token, every file", [t for _, t in DOWNLOADS] == ["xoxb-test-bot"] * 5 and bot.infos == list(by))
-folder = A.item_dir("CPRODUCT-1763869260_000100")
-check("stored in a private per-item folder (0700, files 0600)",
-      stat.S_IMODE(folder.stat().st_mode) == 0o700 and stat.S_IMODE(A.ROOT.stat().st_mode) == 0o700
-      and all(stat.S_IMODE(os.stat(r["path"]).st_mode) == 0o600 for r in recs) and folder.is_relative_to(STATE))
+folder = A.file_dir("FCHART")
+dirs = [str(A.file_dir(r["id"])) for r in recs]
+check("stored in a private folder per Slack file id (0700, files 0600)",
+      all(stat.S_IMODE(os.stat(x).st_mode) == 0o700 for x in dirs) and stat.S_IMODE(A.ROOT.stat().st_mode) == 0o700
+      and stat.S_IMODE((A.ROOT / A.FILES_DIR).stat().st_mode) == 0o700
+      and all(stat.S_IMODE(os.stat(r["path"]).st_mode) == 0o600 for r in recs) and folder.resolve().is_relative_to(STATE.resolve())
+      and all(os.path.dirname(r["path"]) == x for r, x in zip(recs, dirs)))
 check("the image as saved is the image sent", open(by["FCHART"]["path"], "rb").read() == CHART)
 log_text = logs.getvalue()
 check("the log carries counts and kinds only — no names, no content",
-      "5 of 5 fetched" in log_text and not any(s in log_text for s in ("format-example", "signups", "2026-11-02", "plan.docx", "Ship charts")), log_text)
+      "5 of 5 fetched" in log_text and "0 of them kept" in log_text and not any(s in log_text for s in ("format-example", "signups", "2026-11-02", "plan.docx", "Ship charts")), log_text)
 
 # ------------------------------------------------------------------ model input
 blocks = A.image_blocks(recs)
@@ -186,8 +201,8 @@ check("triage lines: the chart is shown as an image, the CSV's text is quoted",
 sl = "\n".join(A.show_lines(recs))
 check("show lines: the path to Read for the image, and a never-forward warning",
       f"Read this path to see the image: {by['FCHART']['path']}" in sl and "never forward" in sl and "Ship charts" in sl, sl)
-check("read_dirs: the item's folder only when something was fetched",
-      A.read_dirs({"id": "CPRODUCT-1763869260_000100", "attachments": recs}) == [str(folder)]
+check("read_dirs: the folder of each fetched file, only when something was fetched",
+      A.read_dirs({"id": "CPRODUCT-1763869260_000100", "attachments": recs}) == dirs
       and A.read_dirs({"id": "C1-1_0", "attachments": nb}) == [] and A.read_dirs({"id": "x"}) == [])
 
 # 4 MB is ~5.3 MB once base64-encoded, over the 5 MB image-input limit; these bytes are no image Pillow
@@ -212,6 +227,227 @@ except SystemExit as e:
     forwarded, why = False, str(e)
 check("say --file refuses a fetched attachment", not forwarded and "never forwards" in why, why if not forwarded else "")
 
+# ------------------------------------------------------------------ the cache: a file is downloaded once
+logs = io.StringIO()
+_h = logging.StreamHandler(logs)
+A.log.addHandler(_h)
+bot2 = FakeBot()
+DOWNLOADS.clear()
+again = A.fetch(g, "CPRODUCT-1763869300_000100", [(bot2, bot2.token)], download=download)
+A.log.removeHandler(_h)
+# Every downloaded file is kept, one that could not be prepared too (with the tools it was tried with).
+kept = [r["id"] for r in recs if r["path"]]
+check("the next message in the thread: every fetched file from the cache, no download, no files.info",
+      len(kept) >= 4 and not DOWNLOADS and not bot2.infos
+      and [r["path"] for r in again] == [r["path"] for r in recs], str(DOWNLOADS))
+check("…the cached record keeps the extracted text", again[1].get("text_path") == by["FCSV"]["text_path"])
+check("…and the log says how many came from the cache, no names", f"{len(kept)} of them kept from before" in logs.getvalue()
+      and "signups" not in logs.getvalue(), logs.getvalue())
+check("a cached file is used even without a bot token", A.fetch(ev_files("FCSV"), "C1-9_0", [], download=download)[0]["path"]
+      == by["FCSV"]["path"])
+half = A.ROOT / A.FILES_DIR / "FHALF"  # a fetch cut short: the file is there, its record is not
+half.mkdir()
+check("a folder without its record is not a cache hit", A._cached("FHALF") is None)
+
+clear_cache()
+DOWNLOADS.clear()
+late = A.fetch(ev_files("FCHART", "FCSV"), "C1-8_0", [(FakeBot(), "xoxb-test-bot")], download=download, budget_s=0)
+check("out of time: nothing downloaded, and the note says Solo tries again",
+      not DOWNLOADS and all(r["path"] is None and "out of time" in r["note"] for r in late), str(late))
+now = [0.0]  # each download takes 100 s of a 10 s budget
+
+
+def took_long(url, token, max_bytes, seconds_left=None):
+    now[0] += 100.0
+    return download(url, token, max_bytes)
+
+
+DOWNLOADS.clear()
+part = A.fetch(ev_files("FCHART", "FCSV"), "C1-8_1", [(FakeBot(), "xoxb-test-bot")], download=took_long, budget_s=10,
+               clock=lambda: now[0])
+check("…the budget covers all of a message's files: the first is fetched, the next is not once time is up",
+      part[0]["path"] and part[1]["path"] is None and "out of time" in part[1]["note"] and len(DOWNLOADS) == 1, str(part))
+check("an out-of-time file is not cached: it downloads next time", A._cached("FCSV") is None)
+
+DOWNLOADS.clear()
+nbig2 = A.fetch([big], "C1-8_2", [(FakeBot(), "xoxb-test-bot")], download=download, budget_s=0)
+check("a file over the size limit says so even when time is up (it would never be fetched)",
+      "limit" in nbig2[0]["note"] and "out of time" not in nbig2[0]["note"], nbig2[0]["note"])
+
+
+def slow(url, token, max_bytes, seconds_left=None):
+    DOWNLOADS.append((url, token))
+    raise TimeoutError("cut off")
+
+
+DOWNLOADS.clear()
+cut = A.fetch(ev_files("FCSV"), "C1-8_3", [(FakeBot(), "xoxb-test-bot"), (FakeBot(), "xoxp-test-owner")], download=slow)
+check("a download cut off by the time bound: the owner's token gets no fresh go, the note says out of time",
+      len(DOWNLOADS) == 1 and "out of time" in cut[0]["note"], str(cut[0]["note"]))
+now[0] = 0.0
+
+
+def refused_slowly(url, token, max_bytes, seconds_left=None):
+    DOWNLOADS.append((url, token))
+    now[0] += 100.0
+    return 403, "text/plain", b""
+
+
+DOWNLOADS.clear()
+spent = A.fetch(ev_files("FCSV"), "C1-8_5", [(FakeBot(), "xoxb-test-bot"), (FakeBot(), "xoxp-test-owner")],
+                download=refused_slowly, budget_s=10, clock=lambda: now[0])
+check("…a second token is tried only with time left: none once the first spent it",
+      len(DOWNLOADS) == 1 and "out of time" in spent[0]["note"], str(spent[0]["note"]))
+
+
+class SlowInfo(FakeBot):
+    def files_info(self, file):
+        now[0] += 100.0
+        return super().files_info(file)
+
+
+now[0] = 0.0
+DOWNLOADS.clear()
+slowinfo = A.fetch(ev_files("FCSV"), "C1-8_6", [(SlowInfo(), "xoxb-test-bot")], download=download, budget_s=10,
+                   clock=lambda: now[0])
+check("…files.info that takes the rest of the time: no download starts on the time already spent",
+      not DOWNLOADS and "out of time" in slowinfo[0]["note"], str(slowinfo[0]["note"]))
+_left = []
+A.fetch(ev_files("FCSV"), "C1-8_4", [(FakeBot(), "xoxb-test-bot")], budget_s=10, clock=lambda: 3.0,
+        download=lambda u, t, m, seconds_left=None: (_left.append(seconds_left), download(u, t, m))[1])
+check("…and each download is handed the time left of the message's budget", _left == [10.0], str(_left))
+
+
+class SlowStream:
+    """httpx.stream for a download that trickles: a chunk every 50 ms, for ever."""
+    status_code, headers = 200, {"content-type": "text/csv"}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def iter_bytes(self):
+        while True:
+            time.sleep(0.05)
+            yield b"x"
+
+
+_httpx = sys.modules.get("httpx")
+class _Timeout(Exception):
+    pass
+
+
+def _stalled(*a, **k):
+    time.sleep(0.01)  # the wait httpx gave up after
+    raise _Timeout("read timed out")
+
+
+sys.modules["httpx"] = types.SimpleNamespace(stream=lambda *a, **k: SlowStream(), TimeoutException=_Timeout)
+try:
+    t0 = time.monotonic()
+    try:
+        A.http_download("https://files.slack.test/x", "xoxb-test-bot", 10**6, seconds_left=0.2)
+        stopped = False
+    except TimeoutError:
+        stopped = True
+    check("http_download stops a trickling download when the time left runs out", stopped and time.monotonic() - t0 < 2)
+    sys.modules["httpx"].stream = _stalled
+    try:
+        A.http_download("https://files.slack.test/x", "xoxb-test-bot", 10**6, seconds_left=0.001)
+        stalled = None
+    except Exception as e:  # noqa: BLE001
+        stalled = e
+    check("…an httpx timeout once the time left is gone counts as out of time", isinstance(stalled, TimeoutError), repr(stalled))
+    try:
+        A.http_download("https://files.slack.test/x", "xoxb-test-bot", 10**6, seconds_left=60)
+        early = None
+    except Exception as e:  # noqa: BLE001
+        early = e
+    check("…a stall with time still left is a failed try, not out of time",
+          isinstance(early, _Timeout) and not isinstance(early, TimeoutError), repr(early))
+finally:
+    if _httpx is None:
+        sys.modules.pop("httpx", None)
+    else:
+        sys.modules["httpx"] = _httpx
+
+clear_cache()
+csv1 = A.fetch(ev_files("FCSV"), "C1-10_0", [(FakeBot(), "xoxb-test-bot")], download=download)
+DOWNLOADS.clear()
+edited = dict(ev_files("FCSV")[0], size=FILES["FCSV"][0]["size"] + 5)
+A.fetch([edited], "C1-10_1", [(FakeBot(), "xoxb-test-bot")], download=download)
+check("a file edited in Slack since (a new size or edit time) is downloaded again, not served stale",
+      len(DOWNLOADS) == 1, str(DOWNLOADS))
+DOWNLOADS.clear()
+A.fetch([dict(ev_files("FCSV")[0], updated=1763869999)], "C1-10_2", [(FakeBot(), "xoxb-test-bot")], download=download)
+check("…the edit time alone counts too", len(DOWNLOADS) == 1, str(DOWNLOADS))
+DOWNLOADS.clear()
+A.fetch([{"id": "FCSV", "name": "signups.csv"}], "C1-10_3", [(FakeBot(), "xoxb-test-bot")], download=download)
+check("…a file object without edit time or size (a stub) is served from the cache", not DOWNLOADS, str(DOWNLOADS))
+_rec = A.file_dir("FCSV") / "record.json"
+_old = json.loads(_rec.read_text())
+_old.pop("version", None)
+_rec.write_text(json.dumps(_old))
+check("…and so is a record kept before versions were stored", A._cached("FCSV", A.version(FILES["FCSV"][0])) is not None)
+
+clear_cache()
+_fit = A.fit_image
+A.fit_image = lambda data, mt: None  # as without Pillow, for an image over the input limit
+try:
+    noimg = A.fetch(ev_files("FCHART"), "C1-11_0", [(FakeBot(), "xoxb-test-bot")], download=download)
+finally:
+    A.fit_image = _fit
+check("an image that could not be prepared is kept, with the tools it was tried with",
+      noimg[0]["path"] and "Pillow" in noimg[0]["note"] and (A._cached("FCHART") or {}).get("tools") == A.tools(),
+      str(noimg[0]["note"]))
+DOWNLOADS.clear()
+same = A.fetch(ev_files("FCHART"), "C1-11_1", [(FakeBot(), "xoxb-test-bot")], download=download)
+check("…the same tools: served as it was, no download, not prepared again", not DOWNLOADS and same[0]["note"] == noimg[0]["note"])
+_tools = A.tools
+A.tools = lambda: _tools() + ["a-new-tool"]
+try:
+    again_img = A.fetch(ev_files("FCHART"), "C1-11_2", [(FakeBot(), "xoxb-test-bot")], download=download)
+finally:
+    A.tools = _tools
+check("…a tool installed since: prepared again from disk, no download",
+      not DOWNLOADS and again_img[0]["note"] is None and again_img[0].get("model_type")
+      and A._cached("FCHART").get("tools") is None, str(again_img[0]))
+
+
+# ------------------------------------------------------------------ a long thread, read to its end
+class PagedClient(FakeClient):
+    """conversations.replies in pages of two, the root repeated at the top of each, as Slack does."""
+
+    def __init__(self, msgs):
+        super().__init__()
+        self.msgs, self.calls = msgs, []
+
+    def conversations_replies(self, channel, ts, limit=200, cursor=None, **kw):
+        self.calls.append(cursor)
+        start = int(cursor or 1)
+        page = [self.msgs[0]] + self.msgs[start:start + 2]
+        nxt = str(start + 2) if start + 2 < len(self.msgs) else ""
+        return {"messages": page, "response_metadata": {"next_cursor": nxt}}
+
+
+long_thread = [{"user": "U1", "ts": f"1763869000.{i:06d}", "text": f"m{i}"} for i in range(7)]
+pc = PagedClient(long_thread)
+got = slack_thread.replies(pc, C, long_thread[0]["ts"])
+check("replies: every page read, the root once, oldest first", got == long_thread and pc.calls == [None, "3", "5"],
+      f"{[m['ts'] for m in got]} {pc.calls}")
+pc = PagedClient(long_thread)
+_tlog = io.StringIO()
+_th = logging.StreamHandler(_tlog)
+slack_thread.log.addHandler(_th)
+try:
+    _short = slack_thread.replies(pc, C, long_thread[0]["ts"], max_pages=2)
+finally:
+    slack_thread.log.removeHandler(_th)
+check("replies: stops at max_pages", len(_short) == 5 and len(pc.calls) == 2)
+check("…and logs that the newest replies are missing", "stopped at 2 pages" in _tlog.getvalue(), _tlog.getvalue())
+
 # ------------------------------------------------------------------ the daemon: Matthew's #product ask
 d = S.Daemon("none")
 d.bot = FakeBot()
@@ -223,6 +459,7 @@ ask = {"type": "message", "user": MATTHEW, "channel": C, "channel_type": "channe
        "text": "<@UME> create a chart with last month's signups in the format of the attached image",
        "files": ev_files("FCHART"), "subtype": "file_share"}
 d.client.history[C] = [{k: ask[k] for k in ("user", "ts", "text", "files")}]
+clear_cache()
 DOWNLOADS.clear()
 d.on_event(ask)
 item = S.load_item("CPRODUCT-1763869260_000100")
@@ -232,13 +469,41 @@ check("on_inbound: the attached chart is fetched with the bot token and kept on 
       str(att))
 check("…the item carries a record, not the image bytes", "data" not in str(item) and len(str(item)) < 20000)
 
+clear_cache()  # a cached file needs no token; this one was never fetched
 d2 = S.Daemon("none")  # no bot token
 d2.on_event(dict(ask, ts="1763869261.000100"))
 it2 = S.load_item("CPRODUCT-1763869261_000100")
 check("on_inbound without a bot: the file is described with what to add", "SLACK_BOT_TOKEN" in (it2["attachments"][0]["note"] or ""))
+
+# A reply far down a long thread: the file is on the newest page, and the thread is read once for
+# the transcript and the files both.
+root_ts = "1763869400.000100"
+reply = {"type": "message", "user": MATTHEW, "channel": C, "channel_type": "channel", "ts": "1763869400.000900",
+         "thread_ts": root_ts, "text": "<@UME> same format as the chart above, please"}
+newest = {"user": "UOTHER", "ts": "1763869400.000800", "text": "here it is", "files": ev_files("FCSV")}
+msgs_l = [{"user": MATTHEW, "ts": root_ts, "text": "<@UME> thread"}] + [
+    {"user": "UOTHER", "ts": f"1763869400.00{i:02d}00", "text": f"m{i}"} for i in range(2, 8)] + [newest]
+d3 = S.Daemon("none")
+d3.bot = FakeBot()
+d3.client = PagedClient(msgs_l)
+d3.client.history[C] = []
+clear_cache()
+DOWNLOADS.clear()
+d3.on_event(reply)
+it3 = S.load_item("CPRODUCT-1763869400_000900")
+check("on_inbound in a long thread: the file on the newest page is fetched",
+      [a["id"] for a in it3.get("attachments") or []] == ["FCSV"] and len(DOWNLOADS) == 1, str(it3.get("attachments")))
+check("…the whole thread is read twice: once for the context and the files, once after the delay for the transcript",
+      d3.client.calls.count("7") == 2, str(d3.client.calls))
+
+
 A.fetch.__kwdefaults__["download"] = _real_dl
 
 # ------------------------------------------------------------------ use: triage sees the image
+# the cache and daemon checks above cleared the file folders: fetch the same files again
+clear_cache()
+recs = A.fetch(g, "CPRODUCT-1763869260_000100", [(bot, bot.token)], download=download)
+blocks = A.image_blocks(recs)
 import triage as T  # noqa: E402
 
 
@@ -348,11 +613,13 @@ check("replay: the handler prompt carries the chart's path to Read, who sent wha
       f"Read this path to see the image: {a3['FCHART']['path']}" in txt and "never forward" in txt
       and "format-example.png (image, " in txt and f"signups.csv (text, {A.human(len(CSV))}) — the owner's own" in txt, txt[-1200:])
 cmd, _, _ = S.claude_command(it3)
-f3 = str(A.item_dir(it3["id"]))
+f3 = [str(A.file_dir(fid)) for fid in ("FCHART", "FCSV")]
 tools = cmd[cmd.index("--allowedTools") + 1]
-check("replay: the writer may Read this item's folder, and only it, among the attachments",
-      f"Read(//{f3.lstrip('/')}/**)" in tools and f3 in [cmd[i + 1] for i, x in enumerate(cmd) if x == "--add-dir"]
-      and str(A.ROOT) not in [cmd[i + 1] for i, x in enumerate(cmd) if x == "--add-dir"], tools)
+added = [cmd[i + 1] for i, x in enumerate(cmd) if x == "--add-dir"]
+check("replay: the writer may Read this item's file folders, and only them, among the attachments",
+      all(f"Read(//{f.lstrip('/')}/**)" in tools and f in added for f in f3)
+      and str(A.ROOT) not in added and str(A.ROOT / A.FILES_DIR) not in added
+      and tools.count("/attachments/") == 2, tools)
 check("replay: what the files say is marked as data, not instructions", "not instructions to you" in txt)
 gone = {"id": "GONE-1_0", "attachments": [{**a3["FCHART"], "path": str(A.ROOT / "GONE-1_0" / "x.png")}]}
 check("pruned files: no Read path offered and no folder in reach",
@@ -365,8 +632,126 @@ check("an item without files: no attachments folder in the writer's reach", str(
 old = A.ROOT / "COLD-1_0"
 old.mkdir()
 os.utime(old, (time.time() - 30 * 86400,) * 2)
-check("prune: folders past ATTACH_KEEP_DAYS go, fresh ones stay", A.prune() == 1 and not old.exists() and folder.exists())
+old_file = A.ROOT / A.FILES_DIR / "FCOLD"
+old_file.mkdir(parents=True)
+for x in (old, old_file):
+    os.utime(x, (time.time() - 30 * 86400,) * 2)
+fresh = A.file_dir("FFRESH")
+fresh.mkdir()
+check("prune: folders past ATTACH_KEEP_DAYS go, cached files included; fresh ones stay",
+      A.prune() == 2 and not old.exists() and not old_file.exists() and fresh.exists() and (A.ROOT / A.FILES_DIR).exists())
 
-import shutil  # noqa: E402
+# ------------------------------------------------------------------ review round 3
+check("a Slack file named Record.json cannot take the record's name on a case-insensitive disk",
+      A.safe_name("Record.json").lower() != A.RECORD and A.safe_name("RECORD.JSON").lower() != A.RECORD)
+check("read_dirs: a path outside the attachments folder grants nothing",
+      A.read_dirs({"id": "x", "attachments": [{"path": "/etc/hosts"},
+                                               {"path": str(A.ROOT / "stray")}]}) == [])
+
+clear_cache()
+A.fetch(ev_files("FCSV"), "C1-12_0", [(FakeBot(), "xoxb-test-bot")], download=download)
+(A.file_dir("FCSV") / A.RECORD).write_text("[1, 2]")
+DOWNLOADS.clear()
+odd = A.fetch(ev_files("FCSV"), "C1-12_1", [(FakeBot(), "xoxb-test-bot")], download=download)
+check("a record that is not an object is a miss: the file downloads again", len(DOWNLOADS) == 1 and odd[0]["path"])
+
+_rec = A.file_dir("FCSV") / A.RECORD
+_r = json.loads(_rec.read_text())
+_rec.write_text(json.dumps(dict(_r, note="could not read", tools=["none-of-these"])))
+_pa = A._prepare_again
+
+
+def _gone(rec):
+    raise FileNotFoundError("pruned")
+
+
+A._prepare_again = _gone
+DOWNLOADS.clear()
+try:
+    raced = A.fetch(ev_files("FCSV"), "C1-12_2", [(FakeBot(), "xoxb-test-bot")], download=download)
+finally:
+    A._prepare_again = _pa
+check("a cached file gone before it is prepared again: downloaded again, not lost",
+      len(DOWNLOADS) == 1 and raced[0]["path"] and raced[0]["note"] is None, str(raced[0]))
+
+_r = json.loads(_rec.read_text())
+_rec.write_text(json.dumps(dict(_r, note="could not read", tools=["none-of-these"])))
+DOWNLOADS.clear()
+nolate = A.fetch(ev_files("FCSV"), "C1-12_3", [(FakeBot(), "xoxb-test-bot")], download=download, budget_s=0)
+check("out of time: a kept file is served as it was, not prepared again", not DOWNLOADS
+      and nolate[0]["note"] == "could not read", str(nolate[0]["note"]))
+
+clear_cache()
+first = A.fetch(ev_files("FCSV"), "C1-12_4", [(FakeBot(), "xoxb-test-bot")], download=download)
+renamed = dict(ev_files("FCSV")[0], name="signups-v2.csv", size=FILES["FCSV"][0]["size"] + 1)
+second = A.fetch([renamed], "C1-12_5", [(FakeBot(), "xoxb-test-bot")], download=download)
+check("a file edited and renamed in Slack: the old name and its text are gone from its folder",
+      not os.path.exists(first[0]["path"]) and not os.path.exists(first[0]["text_path"]) and os.path.isfile(second[0]["path"]),
+      str(sorted(p.name for p in A.file_dir("FCSV").iterdir())))
+
+
+class FlakyClient(PagedClient):
+    """The first `ok` pages answer; the next one fails, as a rate limit past its retries does."""
+
+    def __init__(self, msgs, ok):
+        super().__init__(msgs)
+        self.ok = ok
+
+    def conversations_replies(self, channel, ts, limit=200, cursor=None, **kw):
+        if len(self.calls) >= self.ok:
+            self.calls.append(cursor)
+            raise RuntimeError("ratelimited")
+        return super().conversations_replies(channel, ts, limit, cursor, **kw)
+
+
+_tlog = io.StringIO()
+_th = logging.StreamHandler(_tlog)
+slack_thread.log.addHandler(_th)
+try:
+    part_thread = slack_thread.replies(FlakyClient(long_thread, 2), C, long_thread[0]["ts"])
+finally:
+    slack_thread.log.removeHandler(_th)
+check("replies: a later page failing keeps the pages read, and says so",
+      part_thread == long_thread[:5] and "stopped after 2 pages" in _tlog.getvalue(), _tlog.getvalue())
+try:
+    slack_thread.replies(FlakyClient(long_thread, 0), C, long_thread[0]["ts"])
+    first_failed = False
+except RuntimeError:
+    first_failed = True
+check("replies: the first page failing still raises, as one read did", first_failed)
+
 shutil.rmtree(TMP, ignore_errors=True)
+
+clear_cache()
+_st = A._store
+
+
+def _full(rec, data, info):
+    raise OSError(28, "No space left on device")
+
+
+A._store = _full
+try:
+    nospace = A.fetch(ev_files("FCSV", "FCHART"), "C1-13_1", [(FakeBot(), "xoxb-test-bot")], download=download)
+finally:
+    A._store = _st
+check("a file that cannot be kept (disk full): a note on that file, the message's other files still go through",
+      all(r["path"] is None and "could not keep" in r["note"] for r in nospace) and len(nospace) == 2, str(nospace))
+
+clear_cache()
+
+
+_other: list[int] = []
+
+
+def _kept_meanwhile(url, token, max_bytes, seconds_left=None):
+    out = download(url, token, max_bytes)
+    other = A.fetch(ev_files("FCSV"), "C1-13_3", [(FakeBot(), "xoxb-test-bot")], download=download)
+    _other.append(os.stat(other[0]["path"]).st_ino)
+    return out
+
+
+both = A.fetch(ev_files("FCSV"), "C1-13_2", [(FakeBot(), "xoxb-test-bot")], download=_kept_meanwhile)
+check("another worker kept the same file while this one downloaded: its copy is used, not wiped",
+      _other and both[0]["path"] and os.stat(both[0]["path"]).st_ino == _other[0], str(both[0]))
 print(f"\n{H.passed} checks passed")

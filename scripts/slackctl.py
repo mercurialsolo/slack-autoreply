@@ -48,6 +48,7 @@ import owner_note  # noqa: E402
 import note_shape  # noqa: E402
 import outbound  # noqa: E402
 import recall  # noqa: E402
+import slack_thread  # noqa: E402
 import staff_intake  # noqa: E402
 import factory_converse  # noqa: E402
 import inbound_retry  # noqa: E402
@@ -867,9 +868,13 @@ class Slack:
                     break
         return ids
 
-    def transcript(self, channel: str, thread_ts: str | None, n: int) -> str:
+    def thread(self, channel: str, thread_ts: str | None) -> list[dict]:
+        """The whole thread, oldest first, read once for both the transcript and its files."""
+        return slack_thread.replies(self.client, channel, thread_ts) if thread_ts else []
+
+    def transcript(self, channel: str, thread_ts: str | None, n: int, thread: list[dict] | None = None) -> str:
         if thread_ts:
-            msgs = self.client.conversations_replies(channel=channel, ts=thread_ts, limit=200)["messages"]
+            msgs = thread if thread is not None else self.thread(channel, thread_ts)
             msgs = msgs[:1] + msgs[1:][-n:]
         else:
             msgs = self.client.conversations_history(channel=channel, limit=n)["messages"][::-1]
@@ -886,15 +891,9 @@ class Slack:
                 lines.append(f"[{who}]: {text}")
         return "\n".join(lines)
 
-    def inbound_files(self, ev: dict, channel: str, thread_ts: str | None, item_id: str) -> list[dict]:
-        """Fetch the files on this message and its thread with the bot token (see attachments.py)."""
-        msgs = [ev]
-        if thread_ts:
-            try:
-                msgs += self.client.conversations_replies(channel=channel, ts=thread_ts, limit=200)["messages"][::-1]
-            except Exception:  # noqa: BLE001 — the message's own files still count
-                pass
-        files = attachments.gather(msgs)
+    def inbound_files(self, ev: dict, thread: list[dict], item_id: str) -> list[dict]:
+        """Fetch, before triage reads them, the files on this message and its thread (see attachments.py)."""
+        files = attachments.gather([ev, *thread[::-1]])
         if not files:
             return []
         # The bot first (files:read); then the owner's own token, which reads a DM's files only if the
@@ -3516,6 +3515,7 @@ class Daemon(Slack):
             log.info("skip (rate limit) %s: %s", who, clean[:80]); return
 
         reply_thread_ts = thread_ts or (ev["ts"] if ctype in ("channel", "group") else None)
+        thread = self.thread(channel, thread_ts)  # read once: the context below and the files
         item = {
             "id": f"{channel}-{ev['ts'].replace('.', '_')}", "created": now_iso(), "status": "queued", "simulated": False,
             "channel": channel, "channel_type": ctype,
@@ -3523,7 +3523,7 @@ class Daemon(Slack):
             "ts": ev["ts"], "thread_ts": thread_ts, "reply_thread_ts": reply_thread_ts,
             "sender": sender, "sender_name": who, "sender_handle": self.handle_of(sender),
             "text": clean, "permalink": self.permalink(channel, ev["ts"]),
-            "context": self.transcript(channel, thread_ts, 8),
+            "context": self.transcript(channel, thread_ts, 8, thread),
             "mentioned": mentioned,
             # They are answering something the owner just said. 13 of the 20 reactions Solo ever
             # left were on exactly this — an emoji on "Yes Barada" under the owner's own "Hey Sri".
@@ -3542,7 +3542,7 @@ class Daemon(Slack):
         if customer:
             item["customer"] = customer
         try:
-            if (atts := self.inbound_files(ev, channel, thread_ts, item["id"])):
+            if (atts := self.inbound_files(ev, thread, item["id"])):
                 item["attachments"] = atts
         except Exception as e:  # noqa: BLE001 — a file Solo cannot read must never stop a draft
             log.warning("attachments: fetch failed (%s)", type(e).__name__)

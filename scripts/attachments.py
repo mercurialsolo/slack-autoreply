@@ -5,8 +5,9 @@ module the writer saw "[shared a file]" and could only say it could not see the 
 
   gather(messages)          the file objects on the handled message and its thread, newest ask first
   fetch(files, item_id, …)  download each one with the bot token (files:read) into a private
-                            per-item folder; a missing scope or a file the bot cannot see is a
-                            note on the record, never an exception
+                            folder per Slack file id, once: a later message in the same thread
+                            reuses it. A missing scope or a file the bot cannot see is a note on
+                            the record, never an exception
   image_blocks(records)     images as Anthropic image input, within the model's size limits
   triage_lines(records)     what a text-only classifier is told: name, kind, size, text excerpt
   show_lines(records)       what the writer is told in `show`: the same, plus the local path its
@@ -14,19 +15,24 @@ module the writer saw "[shared a file]" and could only say it could not see the 
 
 Rules this keeps:
 - Content never reaches a log line. Logs carry counts and kinds, not names, text or bytes.
-- A fetched file is never sent anywhere: it lives under STATE_DIR/attachments/<item>/ (0700/0600),
-  `say --file` refuses that folder, and `prune` removes folders older than ATTACH_KEEP_DAYS.
-- Limits: ATTACH_MAX_FILES per item, ATTACH_MAX_MB per file, TEXT_CHARS of extracted text.
+- A fetched file is never sent anywhere: it lives under STATE_DIR/attachments/files/<file id>/
+  (0700/0600), `say --file` refuses that folder, and `prune` removes folders not used for
+  ATTACH_KEEP_DAYS.
+- Limits: ATTACH_MAX_FILES per item, ATTACH_MAX_MB per file, ATTACH_FETCH_SECONDS for all the
+  downloads of one item (a download still running when it ends is cut off; a file past it is a
+  note; extracting the last file's text can add pdftotext's own 30 s), TEXT_CHARS of extracted text.
 """
 from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -39,6 +45,7 @@ ROOT = config.STATE_DIR / "attachments"
 MAX_FILES = config.env_int("ATTACH_MAX_FILES", 5)
 MAX_BYTES = int(config.env_float("ATTACH_MAX_MB", 20) * 1024 * 1024)
 KEEP_DAYS = config.env_float("ATTACH_KEEP_DAYS", 7)
+FETCH_SECONDS = config.env_float("ATTACH_FETCH_SECONDS", 45)
 TEXT_CHARS = 20_000
 TRIAGE_TEXT_CHARS = 1_500
 SHOW_TEXT_CHARS = 6_000
@@ -97,34 +104,117 @@ def kind_of(f: dict) -> str:
 
 # ------------------------------------------------------------ fetching
 
+FILES_DIR = "files"
+RECORD = "record.json"
+# What a cached record keeps: everything fetch learnt about the file, not who posted it this time.
+CACHED = ("name", "title", "mimetype", "filetype", "size", "kind", "path", "note", "text_path", "text_chars",
+          "model_path", "model_type", "version", "tools")
+
+
 def item_dir(item_id: str) -> Path:
+    """Where an item's files lived before they were kept per file id; still pruned and readable."""
     return ROOT / re.sub(r"[^\w.-]", "_", item_id)
 
 
+def file_dir(fid: str) -> Path:
+    return ROOT / FILES_DIR / re.sub(r"[^\w.-]", "_", fid)
+
+
 def write_private(path: Path, data: bytes) -> None:
-    """Create the file 0600 from the start: no window where another local user can read it."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(data)
-    os.chmod(path, 0o600)
+    """Create the file 0600 from the start, and whole: no window where another local user can read
+    it, and no half-written file for a concurrent fetch of the same file id to pick up."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{time.monotonic_ns()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
-def safe_name(i: int, name: str) -> str:
+def safe_name(name: str) -> str:
     base = re.sub(r"[^\w.-]", "_", Path(name or "file").name).lstrip(".") or "file"
-    return f"{i}-{base[:80]}"
+    # lower(): on a case-insensitive disk (macOS) "Record.json" is the record's own name
+    return base[:80] if base.lower() != RECORD else "file-" + base
 
 
-def http_download(url: str, token: str, max_bytes: int) -> tuple[int, str, bytes | None]:
-    """GET a Slack private file → (status, content-type, bytes, or None when it is over max_bytes)."""
+def _private_dir(d: Path) -> None:
+    for p in (ROOT, ROOT / FILES_DIR, d):
+        p.mkdir(parents=True, exist_ok=True, mode=0o700)
+        p.chmod(0o700)
+
+
+def version(f: dict) -> dict:
+    """What changes when a file is edited in Slack (a snippet or a Post): its edit time and size,
+    as far as this file object carries them (a `check_file_info` stub carries neither)."""
+    return {k: f[k] for k in ("updated", "size") if f.get(k)}
+
+
+def tools() -> list[str]:
+    """The optional tools that turn bytes into model input, as installed now."""
+    import importlib.util
+
+    have = {"pypdf": importlib.util.find_spec("pypdf"), "pdftotext": shutil.which("pdftotext"),
+            "PIL": importlib.util.find_spec("PIL")}
+    return sorted(k for k, v in have.items() if v)
+
+
+def _cached(fid: str, ver: dict | None = None) -> dict | None:
+    """The record of a file fetched before, when its bytes are still on disk and nothing in `ver`
+    (this message's file object) says it was edited since. Touches the folder, so `prune` counts
+    its age from the last message that used it."""
+    d = file_dir(fid)
+    try:
+        rec = json.loads((d / RECORD).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rec, dict) or not rec.get("path") or not Path(rec["path"]).is_file():
+        return None
+    kept = rec.get("version")
+    if ver and isinstance(kept, dict) and any(kept.get(k) != v for k, v in ver.items()):
+        return None
+    try:
+        os.utime(d)
+    except OSError:  # pruned just now
+        return None
+    return {k: rec.get(k) for k in CACHED if k in rec}
+
+
+def _keep(rec: dict) -> None:
+    write_private(file_dir(rec["id"]) / RECORD, json.dumps({k: rec.get(k) for k in CACHED if k in rec}).encode())
+
+
+def http_download(url: str, token: str, max_bytes: int,
+                  seconds_left: float | None = None) -> tuple[int, str, bytes | None]:
+    """GET a Slack private file → (status, content-type, bytes, or None when it is over max_bytes).
+    Raises TimeoutError once `seconds_left` have gone, however slowly the bytes come."""
     import httpx
 
+    stop = time.monotonic() + seconds_left if seconds_left is not None else None
+    # Checked between chunks, and no single wait is longer than the time left: a stalled server
+    # is cut off within twice the time left at worst.
+    wait = 30 if stop is None else max(0.1, min(30, seconds_left))
+    try:
+        return _stream(httpx, url, token, max_bytes, stop, wait)
+    except httpx.TimeoutException as e:
+        if stop is not None and time.monotonic() >= stop:  # the message's time is spent
+            raise TimeoutError("the download timed out") from e
+        raise  # a stall shorter than the time left: a failed try, the next token may still get it
+
+
+def _stream(httpx, url: str, token: str, max_bytes: int, stop: float | None, wait: float):
     with httpx.stream("GET", url, headers={"Authorization": f"Bearer {token}"}, follow_redirects=True,
-                      timeout=30) as r:
+                      timeout=wait) as r:
         ctype = r.headers.get("content-type", "")
         if r.status_code != 200:
             return r.status_code, ctype, b""
         buf = bytearray()
         for chunk in r.iter_bytes():
+            if stop is not None and time.monotonic() > stop:
+                raise TimeoutError("the message's download time ran out")
             buf += chunk
             if len(buf) > max_bytes:
                 return r.status_code, ctype, None
@@ -153,43 +243,77 @@ def _info(client, fid: str) -> tuple[dict | None, str | None]:
 
 
 def fetch(files: list[dict], item_id: str, clients: list[tuple[object, str]], *,
-          download=http_download, max_bytes: int = MAX_BYTES, owner: str | None = None) -> list[dict]:
-    """Download each file and return one record per file.
+          download=http_download, max_bytes: int = MAX_BYTES, owner: str | None = None,
+          budget_s: float = FETCH_SECONDS, clock=time.monotonic) -> list[dict]:
+    """Download each file once and return one record per file.
 
     `owner` is the owner's Slack user id: a file from their own message in the thread is marked
     `by_owner`, so the writer is not told someone sent it to them.
 
     `clients` is [(WebClient, token), …] in the order to try: the bot first (files:read), then the
     owner's user token, which works only if the owner granted it files:read too. A record always
-    has name/kind/size; `path` only when the bytes are on disk; `note` says why not."""
+    has name/kind/size; `path` only when the bytes are on disk; `note` says why not. A file fetched
+    for an earlier message is reused from its file-id folder, with no Slack call, unless it was
+    edited since (`version`); one whose text or image could not be prepared then is prepared again
+    from disk once the installed tools change. `budget_s` bounds all
+    of this item's downloads: one still running when it ends is cut off, the files left are notes."""
     records: list[dict] = []
     if not files:
         return records
-    folder = item_dir(item_id)
+    deadline = clock() + budget_s
+    cached = 0
     for i, f in enumerate(files):
-        rec = {"id": f.get("id"), "name": f.get("name") or f.get("title") or "file", "title": f.get("title") or "",
+        fid = f.get("id") or f"{item_id}-{i}"
+        rec = {"id": fid, "name": f.get("name") or f.get("title") or "file", "title": f.get("title") or "",
                "mimetype": f.get("mimetype") or "", "filetype": f.get("filetype") or "", "size": int(f.get("size") or 0),
                "kind": kind_of(f), "from": f.get("_from"), "path": None, "note": None}
         rec["by_owner"] = bool(owner) and rec["from"] == owner
         records.append(rec)
+        if (hit := _cached(fid, version(f))) is not None:
+            base = dict(rec)
+            rec.update(hit)
+            # Could not be read before; a tool installed since may read it, when there is time.
+            if rec.get("tools") is None or rec["tools"] == tools() or clock() >= deadline:
+                cached += 1
+                continue
+            try:
+                _prepare_again(rec)
+                cached += 1
+                continue
+            except OSError:  # pruned in between: download it again
+                rec.clear()
+                rec.update(base)
         if not clients:
             rec["note"] = NO_BOT
             continue
         if rec["size"] > max_bytes:
             rec["note"] = f"not fetched: {rec['size'] // (1024 * 1024)} MB is over the {max_bytes // (1024 * 1024)} MB limit"
             continue
+        late = f"not fetched: out of time ({budget_s:.0f} s for this message's files); Solo tries again on the next message"
+        if (left := deadline - clock()) <= 0:
+            rec["note"] = late
+            continue
         notes: list[str] = []  # one per client tried; the first (the bot's) is the one reported
         for client, token in clients:
-            info, n = _info(client, rec["id"]) if rec["id"] else (f, None)
+            if (left := deadline - clock()) <= 0:
+                notes.insert(0, late)
+                break
+            info, n = _info(client, fid) if f.get("id") else (f, None)
             if info is None:
                 notes.append(n)
                 continue
+            if (left := deadline - clock()) <= 0:  # files.info took the rest of the time
+                notes.insert(0, late)
+                break
             url = info.get("url_private_download") or info.get("url_private")
             if not url:
                 notes.append("not fetched: Slack gave no download link (an external or deleted file)")
                 continue
             try:
-                status, ctype, data = download(url, token, max_bytes)
+                status, ctype, data = download(url, token, max_bytes, seconds_left=left)
+            except TimeoutError:  # the time is spent: no other token gets a fresh go at it
+                notes.insert(0, late)
+                break
             except Exception as e:  # noqa: BLE001 — a network fault is a note
                 notes.append(f"not fetched: download failed ({type(e).__name__})")
                 continue
@@ -200,26 +324,65 @@ def fetch(files: list[dict], item_id: str, clients: list[tuple[object, str]], *,
                 # Slack answers a token that may not read the file with its sign-in page, not a 403.
                 notes.append(NO_ACCESS)
                 continue
-            ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
-            ROOT.chmod(0o700)
-            folder.mkdir(exist_ok=True, mode=0o700)
-            path = folder / safe_name(i, rec["name"])
-            write_private(path, data)
-            rec["path"], rec["size"] = str(path), len(data)
-            _extract(rec, data)
+            try:
+                with _lock(fid):  # the daemon's workers may fetch one file id at once
+                    hit = _cached(fid, version(f))  # the same test as the cache check above
+                    if hit is not None and hit.get("tools") in (None, tools()):
+                        rec.update(hit)  # another worker kept it while this one downloaded
+                    else:
+                        _store(rec, data, info)
+            except OSError as e:
+                for k in ("text_path", "text_chars", "model_path", "model_type"):
+                    rec.pop(k, None)
+                rec["path"] = None
+                notes.insert(0, f"not fetched: could not keep the file ({type(e).__name__})")
             break
         if rec["path"] is None:
             rec["note"] = notes[0] if notes else NO_ACCESS
     got = sum(1 for r in records if r["path"])
-    log.info("attachments for %s: %d of %d fetched (%s)", item_id, got, len(records),
-             ", ".join(sorted({r["kind"] for r in records})))
+    log.info("attachments for %s: %d of %d fetched, %d of them kept from before (%s)", item_id, got, len(records),
+             cached, ", ".join(sorted({r["kind"] for r in records})))
     return records
+
+
+_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock(fid: str) -> threading.Lock:
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(fid, threading.Lock())
+
+
+def _store(rec: dict, data: bytes, info: dict) -> None:
+    """Write a downloaded file into its file-id folder, replacing what was there (an edited file
+    leaves no old name or sidecar beside it), then its record."""
+    folder = file_dir(rec["id"])
+    if folder.exists():
+        shutil.rmtree(folder)
+    _private_dir(folder)
+    path = folder / safe_name(rec["name"])
+    write_private(path, data)
+    rec["path"], rec["size"] = str(path), len(data)
+    rec["version"] = version(info)
+    _extract(rec, data)
+    _keep(rec)  # last: a record on disk means the file and its sidecars are whole
 
 
 # ------------------------------------------------------------ turning bytes into model input
 
+def _prepare_again(rec: dict) -> None:
+    """Extract a kept file again from its bytes on disk, with no download."""
+    for k in ("note", "text_path", "text_chars", "model_path", "model_type", "tools"):
+        rec.pop(k, None)
+    rec["note"] = None
+    _extract(rec, Path(rec["path"]).read_bytes())
+    _keep(rec)
+
+
 def _extract(rec: dict, data: bytes) -> None:
-    """Text for documents, a model-sized copy for images. Writes sidecar files next to the original."""
+    """Text for documents, a model-sized copy for images. Writes sidecar files next to the original.
+    A file that could not be prepared also records `tools`, so it is tried again once they change."""
     text = None
     if rec["kind"] == "text":
         text = data.decode("utf-8", errors="replace")
@@ -246,6 +409,8 @@ def _extract(rec: dict, data: bytes) -> None:
         p = Path(rec["path"] + ".txt")
         write_private(p, text[:TEXT_CHARS].encode("utf-8"))
         rec["text_path"] = str(p)
+    if rec["note"] is not None:
+        rec["tools"] = tools()
 
 
 def pdf_text(path: Path, data: bytes) -> str | None:
@@ -382,20 +547,30 @@ def show_lines(records: list[dict]) -> list[str]:
 
 
 def read_dirs(item: dict) -> list[str]:
-    """The folder the writer may Read for this item, when it has fetched files."""
-    if any(r.get("path") for r in item.get("attachments") or []) and item_dir(item["id"]).is_dir():
-        return [str(item_dir(item["id"]))]
-    return []
+    """The folders the writer may Read for this item: one per fetched file still on disk, and only
+    folders inside ROOT, whatever path an item carries."""
+    out: list[str] = []
+    root = ROOT.resolve()
+    for r in item.get("attachments") or []:
+        if not r.get("path"):
+            continue
+        d = Path(r["path"]).parent
+        if d.is_dir() and d.resolve() != root and d.resolve().is_relative_to(root) and str(d) not in out:
+            out.append(str(d))
+    return out
 
 
 def prune(days: float = KEEP_DAYS, now: float | None = None) -> int:
-    """Remove per-item folders older than `days`. → how many went."""
+    """Remove file folders (and older per-item folders) not used for `days`. → how many went."""
     if not ROOT.is_dir():
         return 0
     cutoff = (now or time.time()) - days * 86400
+    files = ROOT / FILES_DIR
     gone = 0
-    for d in ROOT.iterdir():
-        if d.is_dir() and d.stat().st_mtime < cutoff:
+    for d in [*ROOT.iterdir(), *(files.iterdir() if files.is_dir() else [])]:
+        if d == files or not d.is_dir():
+            continue
+        if d.stat().st_mtime < cutoff:
             shutil.rmtree(d, ignore_errors=True)
             gone += 1
     return gone
