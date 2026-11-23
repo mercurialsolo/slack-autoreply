@@ -238,6 +238,90 @@ it2 = S.load_item("CPRODUCT-1763869261_000100")
 check("on_inbound without a bot: the file is described with what to add", "SLACK_BOT_TOKEN" in (it2["attachments"][0]["note"] or ""))
 A.fetch.__kwdefaults__["download"] = _real_dl
 
+# ------------------------------------------------------------------ use: triage sees the image
+import triage as T  # noqa: E402
+
+
+class FakeAnthropic:
+    def __init__(self):
+        self.calls = []
+        self.messages = self
+
+    def create(self, **k):
+        self.calls.append(k)
+        return type("R", (), {"content": [type("B", (), {"text": '{"route": "full", "route_confidence": 0.9}'})()]})()
+
+
+fa = FakeAnthropic()
+T.claude({"latest_message": "do it in this format", "attachments": A.triage_lines(recs)}, "Barada", fa, "m", images=blocks)
+content = fa.calls[0]["messages"][0]["content"]
+check("triage (Claude): the chart goes in as an image block before the question, the file list in the state",
+      isinstance(content, list) and content[0] == blocks[0] and content[-1]["type"] == "text"
+      and "format-example.png (image" in content[-1]["text"], str(content)[:300])
+T.claude({"latest_message": "hi"}, "Barada", fa, "m")
+check("triage (Claude) without files: the prompt stays plain text", isinstance(fa.calls[1]["messages"][0]["content"], str))
+tr = T.Triager("Barada", T.Policy(), fa, "m")
+tr.jev_ok = False
+tr.run({"latest_message": "x"}, images=blocks)
+check("Triager.run hands the images to the Claude fallback", fa.calls[2]["messages"][0]["content"][0] == blocks[0])
+
+# ------------------------------------------------------------------ provenance
+own = A.fetch([{**ev_files("FCSV")[0], "_from": "UME"}, {**ev_files("FCHART")[0], "_from": MATTHEW}], "C1-9_0",
+              [(FakeBot(), "xoxb-test-bot")], download=download, owner="UME")
+osl = "\n".join(A.show_lines(own))
+check("provenance: a file from the owner's own thread message is labelled theirs, not 'sent to the owner'",
+      own[0]["by_owner"] and not own[1]["by_owner"]
+      and f"signups.csv (text, {A.human(len(CSV))}) — the owner's own" in osl and "format-example.png (image, " in osl
+      and osl.count("sent to the owner") == 1 and "from the owner" in A.triage_lines(own)[0]
+      and "from the owner" not in A.triage_lines(own)[1], osl)
+check("provenance: no owner given, nothing is marked theirs", not any(r["by_owner"] for r in A.fetch(ev_files("FCSV"), "C1-10_0",
+      [(FakeBot(), "xoxb-test-bot")], download=download)))
+
+# ------------------------------------------------------------------ replay: Matthew's #product thread (23 Nov 03:41Z)
+# The owner had posted last month's numbers in the thread; Matthew replies with the chart whose format he wants.
+d3 = S.Daemon("none")
+d3.bot = FakeBot()
+A.fetch.__kwdefaults__["download"] = download
+root_ts, ask_ts = "1763869000.000100", "1763869262.000100"
+root = {"type": "message", "user": "UME", "ts": root_ts, "text": "last month's signups attached", "files": ev_files("FCSV")}
+reply = {"type": "message", "user": MATTHEW, "channel": C, "channel_type": "channel", "ts": ask_ts, "thread_ts": root_ts,
+         "text": "<@UME> create a chart with last month's signups in the format of the attached image",
+         "files": ev_files("FCHART"), "subtype": "file_share"}
+d3.client.replies = {root_ts: [root, {k: reply[k] for k in ("user", "ts", "thread_ts", "text", "files")}]}
+d3.client.history[C] = [root]
+seen = {}
+_run = d3.triager.run
+
+
+def spy(state, images=None):
+    seen.update(state=state, images=images)
+    return _run(state, images=images)
+
+
+d3.triager.run = spy
+d3.on_event(reply)
+A.fetch.__kwdefaults__["download"] = _real_dl
+it3 = S.load_item("CPRODUCT-1763869262_000100")
+a3 = {r["id"]: r for r in it3.get("attachments") or []}
+check("replay: the chart and the owner's CSV are both on the item, the chart Matthew's",
+      set(a3) == {"FCHART", "FCSV"} and not a3["FCHART"]["by_owner"] and a3["FCSV"]["by_owner"], str(list(a3)))
+check("replay: triage got the chart as an image block and the file list in its state",
+      seen.get("images") and seen["images"][0]["source"]["media_type"] == "image/png"
+      and A.base64.b64decode(seen["images"][0]["source"]["data"]) == CHART
+      and any("format-example.png (image" in ln for ln in seen["state"].get("attachments", [])), str(seen.get("state", {}).get("attachments")))
+txt = S.render_item(it3, d3.ledger, set())
+check("replay: the handler prompt carries the chart's path to Read, who sent what, and never-forward",
+      f"Read this path to see the image: {a3['FCHART']['path']}" in txt and "never forward" in txt
+      and "format-example.png (image, " in txt and f"signups.csv (text, {A.human(len(CSV))}) — the owner's own" in txt, txt[-1200:])
+cmd, _, _ = S.claude_command(it3)
+f3 = str(A.item_dir(it3["id"]))
+tools = cmd[cmd.index("--allowedTools") + 1]
+check("replay: the writer may Read this item's folder, and only it, among the attachments",
+      f"Read(//{f3.lstrip('/')}/**)" in tools and f3 in [cmd[i + 1] for i, x in enumerate(cmd) if x == "--add-dir"]
+      and str(A.ROOT) not in [cmd[i + 1] for i, x in enumerate(cmd) if x == "--add-dir"], tools)
+cmd0, _, _ = S.claude_command({"id": "ITEM"})
+check("an item without files: no attachments folder in the writer's reach", str(A.ROOT) not in " ".join(cmd0))
+
 # ------------------------------------------------------------------ prune
 old = A.ROOT / "COLD-1_0"
 old.mkdir()

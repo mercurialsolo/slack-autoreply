@@ -153,8 +153,11 @@ def _info(client, fid: str) -> tuple[dict | None, str | None]:
 
 
 def fetch(files: list[dict], item_id: str, clients: list[tuple[object, str]], *,
-          download=http_download, max_bytes: int = MAX_BYTES) -> list[dict]:
+          download=http_download, max_bytes: int = MAX_BYTES, owner: str | None = None) -> list[dict]:
     """Download each file and return one record per file.
+
+    `owner` is the owner's Slack user id: a file from their own message in the thread is marked
+    `by_owner`, so the writer is not told someone sent it to them.
 
     `clients` is [(WebClient, token), …] in the order to try: the bot first (files:read), then the
     owner's user token, which works only if the owner granted it files:read too. A record always
@@ -167,6 +170,7 @@ def fetch(files: list[dict], item_id: str, clients: list[tuple[object, str]], *,
         rec = {"id": f.get("id"), "name": f.get("name") or f.get("title") or "file", "title": f.get("title") or "",
                "mimetype": f.get("mimetype") or "", "filetype": f.get("filetype") or "", "size": int(f.get("size") or 0),
                "kind": kind_of(f), "from": f.get("_from"), "path": None, "note": None}
+        rec["by_owner"] = bool(owner) and rec["from"] == owner
         records.append(rec)
         if not clients:
             rec["note"] = NO_BOT
@@ -334,10 +338,10 @@ def image_blocks(records: list[dict]) -> list[dict]:
 
 
 def triage_lines(records: list[dict]) -> list[str]:
-    """One line per file for a classifier: what it is, and the start of its text."""
+    """One line per file for a classifier: who sent it, what it is, and the start of its text."""
     out = []
     for r in records:
-        line = f"{label(r)}"
+        line = f"{label(r)}{' — from the owner' if r.get('by_owner') else ''}"
         if r["kind"] == "image" and "model_type" in r:
             line += " — shown as an image"
         if (t := _text(r, TRIAGE_TEXT_CHARS)):
@@ -349,12 +353,13 @@ def triage_lines(records: list[dict]) -> list[str]:
 
 
 def show_lines(records: list[dict]) -> list[str]:
-    """The `show` section for the writer: each file, where to Read it, and its extracted text."""
+    """The `show` section for the writer: each file, who sent it, where to Read it, and its text."""
     if not records:
         return []
-    out = ["--- files on this message or its thread (sent to the owner, not by them; never forward them) ---"]
+    out = ["--- files on this message or its thread (read them; never forward them — `say --file` refuses them) ---"]
     for r in records:
-        out.append(f"- {label(r)}")
+        who = "the owner's own, from their message in the thread" if r.get("by_owner") else "sent to the owner"
+        out.append(f"- {label(r)} — {who}")
         if r.get("path"):
             how = {"image": "Read this path to see the image", "pdf": "Read this path to see the PDF"}.get(
                 r["kind"], "Read this path for the whole file")
