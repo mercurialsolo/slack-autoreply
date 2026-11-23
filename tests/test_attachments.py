@@ -3,6 +3,7 @@ model input they become — without a name or a byte of them reaching the log, a
 from __future__ import annotations
 
 import io
+import shutil
 import logging
 import os
 import stat
@@ -14,6 +15,7 @@ import zlib
 import offline_harness as H  # noqa: E402  (sets the environment first)
 from offline_harness import TMP, STATE, FakeClient, check  # noqa: E402
 import attachments as A  # noqa: E402
+import slack_thread  # noqa: E402
 import slackctl as S  # noqa: E402
 from slack_sdk.errors import SlackApiError  # noqa: E402
 
@@ -82,6 +84,11 @@ def download(url, token, max_bytes):
     return (200, "application/octet-stream", None) if len(data) > max_bytes else (200, "application/octet-stream", data)
 
 
+def clear_cache():
+    """Forget every fetched file, so the next fetch downloads again."""
+    shutil.rmtree(A.ROOT / A.FILES_DIR, ignore_errors=True)
+
+
 def ev_files(*ids):
     return [{"id": i, "name": FILES[i][0]["name"], "mimetype": FILES[i][0]["mimetype"],
              "filetype": FILES[i][0]["filetype"], "size": FILES[i][0]["size"]} for i in ids]
@@ -124,6 +131,7 @@ DOWNLOADS.clear()
 dm = A.fetch(ev_files("FCSV"), "D1-1_0", [(FakeBot("file_not_found"), "xoxb-test-bot"), (FakeOwner(), "xoxp-test-owner")],
              download=download)
 check("a DM file the bot cannot see: read with the owner's token when it can", dm[0]["path"] and DOWNLOADS[-1][1] == "xoxp-test-owner")
+clear_cache()
 dm2 = A.fetch(ev_files("FCSV"), "D1-2_0", [(FakeBot("file_not_found"), "xoxb-test-bot"), (FakeOwner("missing_scope"), "xoxp-test-owner")],
               download=download)
 check("…and when neither can, the bot's reason is the one given", dm2[0]["path"] is None and dm2[0]["note"] == A.NO_ACCESS)
@@ -154,19 +162,23 @@ _h = logging.StreamHandler(logs)
 A.log.addHandler(_h)
 A.log.setLevel(logging.INFO)
 bot = FakeBot()
+clear_cache()
 DOWNLOADS.clear()
 recs = A.fetch(g, "CPRODUCT-1763869260_000100", [(bot, bot.token)], download=download)
 A.log.removeHandler(_h)
 by = {r["id"]: r for r in recs}
 check("fetched with the bot token, every file", [t for _, t in DOWNLOADS] == ["xoxb-test-bot"] * 5 and bot.infos == list(by))
-folder = A.item_dir("CPRODUCT-1763869260_000100")
-check("stored in a private per-item folder (0700, files 0600)",
-      stat.S_IMODE(folder.stat().st_mode) == 0o700 and stat.S_IMODE(A.ROOT.stat().st_mode) == 0o700
-      and all(stat.S_IMODE(os.stat(r["path"]).st_mode) == 0o600 for r in recs) and folder.is_relative_to(STATE))
+folder = A.file_dir("FCHART")
+dirs = [str(A.file_dir(r["id"])) for r in recs]
+check("stored in a private folder per Slack file id (0700, files 0600)",
+      all(stat.S_IMODE(os.stat(x).st_mode) == 0o700 for x in dirs) and stat.S_IMODE(A.ROOT.stat().st_mode) == 0o700
+      and stat.S_IMODE((A.ROOT / A.FILES_DIR).stat().st_mode) == 0o700
+      and all(stat.S_IMODE(os.stat(r["path"]).st_mode) == 0o600 for r in recs) and folder.resolve().is_relative_to(STATE.resolve())
+      and all(os.path.dirname(r["path"]) == x for r, x in zip(recs, dirs)))
 check("the image as saved is the image sent", open(by["FCHART"]["path"], "rb").read() == CHART)
 log_text = logs.getvalue()
 check("the log carries counts and kinds only — no names, no content",
-      "5 of 5 fetched" in log_text and not any(s in log_text for s in ("format-example", "signups", "2026-11-02", "plan.docx", "Ship charts")), log_text)
+      "5 of 5 fetched" in log_text and "0 of them kept" in log_text and not any(s in log_text for s in ("format-example", "signups", "2026-11-02", "plan.docx", "Ship charts")), log_text)
 
 # ------------------------------------------------------------------ model input
 blocks = A.image_blocks(recs)
@@ -186,8 +198,8 @@ check("triage lines: the chart is shown as an image, the CSV's text is quoted",
 sl = "\n".join(A.show_lines(recs))
 check("show lines: the path to Read for the image, and a never-forward warning",
       f"Read this path to see the image: {by['FCHART']['path']}" in sl and "never forward" in sl and "Ship charts" in sl, sl)
-check("read_dirs: the item's folder only when something was fetched",
-      A.read_dirs({"id": "CPRODUCT-1763869260_000100", "attachments": recs}) == [str(folder)]
+check("read_dirs: the folder of each fetched file, only when something was fetched",
+      A.read_dirs({"id": "CPRODUCT-1763869260_000100", "attachments": recs}) == dirs
       and A.read_dirs({"id": "C1-1_0", "attachments": nb}) == [] and A.read_dirs({"id": "x"}) == [])
 
 # 4 MB is ~5.3 MB once base64-encoded, over the 5 MB image-input limit; these bytes are no image Pillow
@@ -212,6 +224,63 @@ except SystemExit as e:
     forwarded, why = False, str(e)
 check("say --file refuses a fetched attachment", not forwarded and "never forwards" in why, why if not forwarded else "")
 
+# ------------------------------------------------------------------ the cache: a file is downloaded once
+logs = io.StringIO()
+_h = logging.StreamHandler(logs)
+A.log.addHandler(_h)
+bot2 = FakeBot()
+DOWNLOADS.clear()
+again = A.fetch(g, "CPRODUCT-1763869300_000100", [(bot2, bot2.token)], download=download)
+A.log.removeHandler(_h)
+check("the next message in the thread: every file from the cache, no download, no files.info",
+      not DOWNLOADS and not bot2.infos and [r["path"] for r in again] == [r["path"] for r in recs], str(DOWNLOADS))
+check("…the cached record keeps the extracted text", again[1].get("text_path") == by["FCSV"]["text_path"])
+check("…and the log says how many came from the cache, no names", "5 of them kept from before" in logs.getvalue()
+      and "signups" not in logs.getvalue(), logs.getvalue())
+check("a cached file is used even without a bot token", A.fetch(ev_files("FCSV"), "C1-9_0", [], download=download)[0]["path"]
+      == by["FCSV"]["path"])
+half = A.ROOT / A.FILES_DIR / "FHALF"  # a fetch cut short: the file is there, its record is not
+half.mkdir()
+check("a folder without its record is not a cache hit", A._cached("FHALF") is None)
+
+clear_cache()
+DOWNLOADS.clear()
+late = A.fetch(ev_files("FCHART", "FCSV"), "C1-8_0", [(FakeBot(), "xoxb-test-bot")], download=download, budget_s=0)
+check("out of time: nothing downloaded, and the note says Solo tries again",
+      not DOWNLOADS and all(r["path"] is None and "out of time" in r["note"] for r in late), str(late))
+ticks = iter([0.0, 0.0, 100.0])  # the start, then the clock before each file
+DOWNLOADS.clear()
+part = A.fetch(ev_files("FCHART", "FCSV"), "C1-8_1", [(FakeBot(), "xoxb-test-bot")], download=download, budget_s=10,
+               clock=lambda: next(ticks, 100.0))
+check("…the budget covers all of a message's files: the first is fetched, the next is not once time is up",
+      part[0]["path"] and part[1]["path"] is None and "out of time" in part[1]["note"] and len(DOWNLOADS) == 1, str(part))
+check("an out-of-time file is not cached: it downloads next time", A._cached("FCSV") is None)
+
+
+# ------------------------------------------------------------------ a long thread, read to its end
+class PagedClient(FakeClient):
+    """conversations.replies in pages of two, the root repeated at the top of each, as Slack does."""
+
+    def __init__(self, msgs):
+        super().__init__()
+        self.msgs, self.calls = msgs, []
+
+    def conversations_replies(self, channel, ts, limit=200, cursor=None, **kw):
+        self.calls.append(cursor)
+        start = int(cursor or 1)
+        page = [self.msgs[0]] + self.msgs[start:start + 2]
+        nxt = str(start + 2) if start + 2 < len(self.msgs) else ""
+        return {"messages": page, "response_metadata": {"next_cursor": nxt}}
+
+
+long_thread = [{"user": "U1", "ts": f"1763869000.{i:06d}", "text": f"m{i}"} for i in range(7)]
+pc = PagedClient(long_thread)
+got = slack_thread.replies(pc, C, long_thread[0]["ts"])
+check("replies: every page read, the root once, oldest first", got == long_thread and pc.calls == [None, "3", "5"],
+      f"{[m['ts'] for m in got]} {pc.calls}")
+pc = PagedClient(long_thread)
+check("replies: stops at max_pages", len(slack_thread.replies(pc, C, long_thread[0]["ts"], max_pages=2)) == 5 and len(pc.calls) == 2)
+
 # ------------------------------------------------------------------ the daemon: Matthew's #product ask
 d = S.Daemon("none")
 d.bot = FakeBot()
@@ -223,6 +292,7 @@ ask = {"type": "message", "user": MATTHEW, "channel": C, "channel_type": "channe
        "text": "<@UME> create a chart with last month's signups in the format of the attached image",
        "files": ev_files("FCHART"), "subtype": "file_share"}
 d.client.history[C] = [{k: ask[k] for k in ("user", "ts", "text", "files")}]
+clear_cache()
 DOWNLOADS.clear()
 d.on_event(ask)
 item = S.load_item("CPRODUCT-1763869260_000100")
@@ -232,13 +302,41 @@ check("on_inbound: the attached chart is fetched with the bot token and kept on 
       str(att))
 check("…the item carries a record, not the image bytes", "data" not in str(item) and len(str(item)) < 20000)
 
+clear_cache()  # a cached file needs no token; this one was never fetched
 d2 = S.Daemon("none")  # no bot token
 d2.on_event(dict(ask, ts="1763869261.000100"))
 it2 = S.load_item("CPRODUCT-1763869261_000100")
 check("on_inbound without a bot: the file is described with what to add", "SLACK_BOT_TOKEN" in (it2["attachments"][0]["note"] or ""))
+
+# A reply far down a long thread: the file is on the newest page, and the thread is read once for
+# the transcript and the files both.
+root_ts = "1763869400.000100"
+reply = {"type": "message", "user": MATTHEW, "channel": C, "channel_type": "channel", "ts": "1763869400.000900",
+         "thread_ts": root_ts, "text": "<@UME> same format as the chart above, please"}
+newest = {"user": "UOTHER", "ts": "1763869400.000800", "text": "here it is", "files": ev_files("FCSV")}
+msgs_l = [{"user": MATTHEW, "ts": root_ts, "text": "<@UME> thread"}] + [
+    {"user": "UOTHER", "ts": f"1763869400.00{i:02d}00", "text": f"m{i}"} for i in range(2, 8)] + [newest]
+d3 = S.Daemon("none")
+d3.bot = FakeBot()
+d3.client = PagedClient(msgs_l)
+d3.client.history[C] = []
+clear_cache()
+DOWNLOADS.clear()
+d3.on_event(reply)
+it3 = S.load_item("CPRODUCT-1763869400_000900")
+check("on_inbound in a long thread: the file on the newest page is fetched",
+      [a["id"] for a in it3.get("attachments") or []] == ["FCSV"] and len(DOWNLOADS) == 1, str(it3.get("attachments")))
+check("…the whole thread is read twice: once for the context and the files, once after the delay for the transcript",
+      d3.client.calls.count("7") == 2, str(d3.client.calls))
+
+
 A.fetch.__kwdefaults__["download"] = _real_dl
 
 # ------------------------------------------------------------------ use: triage sees the image
+# the cache and daemon checks above cleared the file folders: fetch the same files again
+clear_cache()
+recs = A.fetch(g, "CPRODUCT-1763869260_000100", [(bot, bot.token)], download=download)
+blocks = A.image_blocks(recs)
 import triage as T  # noqa: E402
 
 
@@ -348,11 +446,13 @@ check("replay: the handler prompt carries the chart's path to Read, who sent wha
       f"Read this path to see the image: {a3['FCHART']['path']}" in txt and "never forward" in txt
       and "format-example.png (image, " in txt and f"signups.csv (text, {A.human(len(CSV))}) — the owner's own" in txt, txt[-1200:])
 cmd, _, _ = S.claude_command(it3)
-f3 = str(A.item_dir(it3["id"]))
+f3 = [str(A.file_dir(fid)) for fid in ("FCHART", "FCSV")]
 tools = cmd[cmd.index("--allowedTools") + 1]
-check("replay: the writer may Read this item's folder, and only it, among the attachments",
-      f"Read(//{f3.lstrip('/')}/**)" in tools and f3 in [cmd[i + 1] for i, x in enumerate(cmd) if x == "--add-dir"]
-      and str(A.ROOT) not in [cmd[i + 1] for i, x in enumerate(cmd) if x == "--add-dir"], tools)
+added = [cmd[i + 1] for i, x in enumerate(cmd) if x == "--add-dir"]
+check("replay: the writer may Read this item's file folders, and only them, among the attachments",
+      all(f"Read(//{f.lstrip('/')}/**)" in tools and f in added for f in f3)
+      and str(A.ROOT) not in added and str(A.ROOT / A.FILES_DIR) not in added
+      and tools.count("/attachments/") == 2, tools)
 check("replay: what the files say is marked as data, not instructions", "not instructions to you" in txt)
 gone = {"id": "GONE-1_0", "attachments": [{**a3["FCHART"], "path": str(A.ROOT / "GONE-1_0" / "x.png")}]}
 check("pruned files: no Read path offered and no folder in reach",
@@ -365,8 +465,14 @@ check("an item without files: no attachments folder in the writer's reach", str(
 old = A.ROOT / "COLD-1_0"
 old.mkdir()
 os.utime(old, (time.time() - 30 * 86400,) * 2)
-check("prune: folders past ATTACH_KEEP_DAYS go, fresh ones stay", A.prune() == 1 and not old.exists() and folder.exists())
+old_file = A.ROOT / A.FILES_DIR / "FCOLD"
+old_file.mkdir(parents=True)
+for x in (old, old_file):
+    os.utime(x, (time.time() - 30 * 86400,) * 2)
+fresh = A.file_dir("FFRESH")
+fresh.mkdir()
+check("prune: folders past ATTACH_KEEP_DAYS go, cached files included; fresh ones stay",
+      A.prune() == 2 and not old.exists() and not old_file.exists() and fresh.exists() and (A.ROOT / A.FILES_DIR).exists())
 
-import shutil  # noqa: E402
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{H.passed} checks passed")
