@@ -190,10 +190,19 @@ check("read_dirs: the item's folder only when something was fetched",
       A.read_dirs({"id": "CPRODUCT-1763869260_000100", "attachments": recs}) == [str(folder)]
       and A.read_dirs({"id": "C1-1_0", "attachments": nb}) == [] and A.read_dirs({"id": "x"}) == [])
 
-if A.fit_image(b"\0" * (4 * 1024 * 1024), "image/png") is None:
-    check("an image too large for image input without Pillow: not sent as input, the writer can Read it", True)
-else:  # Pillow is installed: it is resized instead
-    check("an image too large for image input is resized by Pillow", True)
+# 4 MB is ~5.3 MB once base64-encoded, over the 5 MB image-input limit; these bytes are no image Pillow
+# can open, so with or without Pillow they cannot be made to fit.
+check("an image too large for image input: not sent as input, the writer can Read it",
+      A.fit_image(b"\0" * (4 * 1024 * 1024), "image/png") is None)
+check("an image within the limits is sent as it is", A.fit_image(CHART, "image/png") == (CHART, "image/png"))
+try:
+    from PIL import Image as _Image
+except ImportError:
+    _Image = None
+if _Image is not None:  # Pillow is installed: a long edge past IMAGE_MAX_EDGE is scaled down to it
+    _wide = A.fit_image(png(2000, 40), "image/png")
+    check("an image past the edge limit is resized by Pillow",
+          _wide is not None and max(_Image.open(io.BytesIO(_wide[0])).size) <= A.IMAGE_MAX_EDGE, str(_wide and _wide[1]))
 
 # ------------------------------------------------------------------ never forwarded
 try:
