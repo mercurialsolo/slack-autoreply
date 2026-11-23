@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import shutil
+import json
 import logging
 import os
 import stat
@@ -234,11 +235,10 @@ bot2 = FakeBot()
 DOWNLOADS.clear()
 again = A.fetch(g, "CPRODUCT-1763869300_000100", [(bot2, bot2.token)], download=download)
 A.log.removeHandler(_h)
-# A file whose text or image could not be prepared (here maybe the stub PDF) is not kept: it is tried again.
-kept = [r["id"] for r in recs if r["note"] is None]
-check("the next message in the thread: every prepared file from the cache, no download, no files.info",
-      len(kept) >= 4 and sorted(u.split("/")[-2] for u, _ in DOWNLOADS) == sorted(set(r["id"] for r in recs) - set(kept))
-      and sorted(bot2.infos) == sorted(set(r["id"] for r in recs) - set(kept))
+# Every downloaded file is kept, one that could not be prepared too (with the tools it was tried with).
+kept = [r["id"] for r in recs if r["path"]]
+check("the next message in the thread: every fetched file from the cache, no download, no files.info",
+      len(kept) >= 4 and not DOWNLOADS and not bot2.infos
       and [r["path"] for r in again] == [r["path"] for r in recs], str(DOWNLOADS))
 check("…the cached record keeps the extracted text", again[1].get("text_path") == by["FCSV"]["text_path"])
 check("…and the log says how many came from the cache, no names", f"{len(kept)} of them kept from before" in logs.getvalue()
@@ -254,10 +254,17 @@ DOWNLOADS.clear()
 late = A.fetch(ev_files("FCHART", "FCSV"), "C1-8_0", [(FakeBot(), "xoxb-test-bot")], download=download, budget_s=0)
 check("out of time: nothing downloaded, and the note says Solo tries again",
       not DOWNLOADS and all(r["path"] is None and "out of time" in r["note"] for r in late), str(late))
-ticks = iter([0.0, 0.0, 100.0])  # the start, then the clock before each file
+now = [0.0]  # each download takes 100 s of a 10 s budget
+
+
+def took_long(url, token, max_bytes, seconds_left=None):
+    now[0] += 100.0
+    return download(url, token, max_bytes)
+
+
 DOWNLOADS.clear()
-part = A.fetch(ev_files("FCHART", "FCSV"), "C1-8_1", [(FakeBot(), "xoxb-test-bot")], download=download, budget_s=10,
-               clock=lambda: next(ticks, 100.0))
+part = A.fetch(ev_files("FCHART", "FCSV"), "C1-8_1", [(FakeBot(), "xoxb-test-bot")], download=took_long, budget_s=10,
+               clock=lambda: now[0])
 check("…the budget covers all of a message's files: the first is fetched, the next is not once time is up",
       part[0]["path"] and part[1]["path"] is None and "out of time" in part[1]["note"] and len(DOWNLOADS) == 1, str(part))
 check("an out-of-time file is not cached: it downloads next time", A._cached("FCSV") is None)
@@ -277,6 +284,20 @@ DOWNLOADS.clear()
 cut = A.fetch(ev_files("FCSV"), "C1-8_3", [(FakeBot(), "xoxb-test-bot"), (FakeBot(), "xoxp-test-owner")], download=slow)
 check("a download cut off by the time bound: the owner's token gets no fresh go, the note says out of time",
       len(DOWNLOADS) == 1 and "out of time" in cut[0]["note"], str(cut[0]["note"]))
+now[0] = 0.0
+
+
+def refused_slowly(url, token, max_bytes, seconds_left=None):
+    DOWNLOADS.append((url, token))
+    now[0] += 100.0
+    return 403, "text/plain", b""
+
+
+DOWNLOADS.clear()
+spent = A.fetch(ev_files("FCSV"), "C1-8_5", [(FakeBot(), "xoxb-test-bot"), (FakeBot(), "xoxp-test-owner")],
+                download=refused_slowly, budget_s=10, clock=lambda: now[0])
+check("…a second token is tried only with time left: none once the first spent it",
+      len(DOWNLOADS) == 1 and "out of time" in spent[0]["note"], str(spent[0]["note"]))
 _left = []
 A.fetch(ev_files("FCSV"), "C1-8_4", [(FakeBot(), "xoxb-test-bot")], budget_s=10, clock=lambda: 3.0,
         download=lambda u, t, m, seconds_left=None: (_left.append(seconds_left), download(u, t, m))[1])
@@ -300,7 +321,15 @@ class SlowStream:
 
 
 _httpx = sys.modules.get("httpx")
-sys.modules["httpx"] = types.SimpleNamespace(stream=lambda *a, **k: SlowStream())
+class _Timeout(Exception):
+    pass
+
+
+def _stalled(*a, **k):
+    raise _Timeout("read timed out")
+
+
+sys.modules["httpx"] = types.SimpleNamespace(stream=lambda *a, **k: SlowStream(), TimeoutException=_Timeout)
 try:
     t0 = time.monotonic()
     try:
@@ -309,6 +338,13 @@ try:
     except TimeoutError:
         stopped = True
     check("http_download stops a trickling download when the time left runs out", stopped and time.monotonic() - t0 < 2)
+    sys.modules["httpx"].stream = _stalled
+    try:
+        A.http_download("https://files.slack.test/x", "xoxb-test-bot", 10**6, seconds_left=5)
+        stalled = None
+    except Exception as e:  # noqa: BLE001
+        stalled = e
+    check("…an httpx timeout (a stalled server) counts as out of time too", isinstance(stalled, TimeoutError), repr(stalled))
 finally:
     if _httpx is None:
         sys.modules.pop("httpx", None)
@@ -325,6 +361,14 @@ check("a file edited in Slack since (a new size or edit time) is downloaded agai
 DOWNLOADS.clear()
 A.fetch([dict(ev_files("FCSV")[0], updated=1763869999)], "C1-10_2", [(FakeBot(), "xoxb-test-bot")], download=download)
 check("…the edit time alone counts too", len(DOWNLOADS) == 1, str(DOWNLOADS))
+DOWNLOADS.clear()
+A.fetch([{"id": "FCSV", "name": "signups.csv"}], "C1-10_3", [(FakeBot(), "xoxb-test-bot")], download=download)
+check("…a file object without edit time or size (a stub) is served from the cache", not DOWNLOADS, str(DOWNLOADS))
+_rec = A.file_dir("FCSV") / "record.json"
+_old = json.loads(_rec.read_text())
+_old.pop("version", None)
+_rec.write_text(json.dumps(_old))
+check("…and so is a record kept before versions were stored", A._cached("FCSV", A.version(FILES["FCSV"][0])) is not None)
 
 clear_cache()
 _fit = A.fit_image
@@ -333,8 +377,21 @@ try:
     noimg = A.fetch(ev_files("FCHART"), "C1-11_0", [(FakeBot(), "xoxb-test-bot")], download=download)
 finally:
     A.fit_image = _fit
-check("an image that could not be prepared is not kept: it is prepared again once Pillow is there",
-      noimg[0]["path"] and "Pillow" in noimg[0]["note"] and A._cached("FCHART") is None, str(noimg[0]["note"]))
+check("an image that could not be prepared is kept, with the tools it was tried with",
+      noimg[0]["path"] and "Pillow" in noimg[0]["note"] and (A._cached("FCHART") or {}).get("tools") == A.tools(),
+      str(noimg[0]["note"]))
+DOWNLOADS.clear()
+same = A.fetch(ev_files("FCHART"), "C1-11_1", [(FakeBot(), "xoxb-test-bot")], download=download)
+check("…the same tools: served as it was, no download, not prepared again", not DOWNLOADS and same[0]["note"] == noimg[0]["note"])
+_tools = A.tools
+A.tools = lambda: _tools() + ["a-new-tool"]
+try:
+    again_img = A.fetch(ev_files("FCHART"), "C1-11_2", [(FakeBot(), "xoxb-test-bot")], download=download)
+finally:
+    A.tools = _tools
+check("…a tool installed since: prepared again from disk, no download",
+      not DOWNLOADS and again_img[0]["note"] is None and again_img[0].get("model_type")
+      and A._cached("FCHART").get("tools") is None, str(again_img[0]))
 
 
 # ------------------------------------------------------------------ a long thread, read to its end
@@ -359,7 +416,15 @@ got = slack_thread.replies(pc, C, long_thread[0]["ts"])
 check("replies: every page read, the root once, oldest first", got == long_thread and pc.calls == [None, "3", "5"],
       f"{[m['ts'] for m in got]} {pc.calls}")
 pc = PagedClient(long_thread)
-check("replies: stops at max_pages", len(slack_thread.replies(pc, C, long_thread[0]["ts"], max_pages=2)) == 5 and len(pc.calls) == 2)
+_tlog = io.StringIO()
+_th = logging.StreamHandler(_tlog)
+slack_thread.log.addHandler(_th)
+try:
+    _short = slack_thread.replies(pc, C, long_thread[0]["ts"], max_pages=2)
+finally:
+    slack_thread.log.removeHandler(_th)
+check("replies: stops at max_pages", len(_short) == 5 and len(pc.calls) == 2)
+check("…and logs that the newest replies are missing", "stopped at 2 pages" in _tlog.getvalue(), _tlog.getvalue())
 
 # ------------------------------------------------------------------ the daemon: Matthew's #product ask
 d = S.Daemon("none")

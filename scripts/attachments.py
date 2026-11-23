@@ -107,7 +107,7 @@ FILES_DIR = "files"
 RECORD = "record.json"
 # What a cached record keeps: everything fetch learnt about the file, not who posted it this time.
 CACHED = ("name", "title", "mimetype", "filetype", "size", "kind", "path", "note", "text_path", "text_chars",
-          "model_path", "model_type", "version")
+          "model_path", "model_type", "version", "tools")
 
 
 def item_dir(item_id: str) -> Path:
@@ -145,14 +145,24 @@ def _private_dir(d: Path) -> None:
         p.chmod(0o700)
 
 
-def version(f: dict) -> list:
-    """What changes when a file is edited in Slack (a snippet or a Post): its edit time and size."""
-    return [f.get("updated") or f.get("timestamp") or f.get("created"), int(f.get("size") or 0)]
+def version(f: dict) -> dict:
+    """What changes when a file is edited in Slack (a snippet or a Post): its edit time and size,
+    as far as this file object carries them (a `check_file_info` stub carries neither)."""
+    return {k: f[k] for k in ("updated", "size") if f.get(k)}
 
 
-def _cached(fid: str, ver: list | None = None) -> dict | None:
-    """The record of a file fetched before, when its bytes are still on disk and the file is the
-    same version (`ver`, from this message's file object). Touches the folder, so `prune` counts
+def tools() -> list[str]:
+    """The optional tools that turn bytes into model input, as installed now."""
+    import importlib.util
+
+    have = {"pypdf": importlib.util.find_spec("pypdf"), "pdftotext": shutil.which("pdftotext"),
+            "PIL": importlib.util.find_spec("PIL")}
+    return sorted(k for k, v in have.items() if v)
+
+
+def _cached(fid: str, ver: dict | None = None) -> dict | None:
+    """The record of a file fetched before, when its bytes are still on disk and nothing in `ver`
+    (this message's file object) says it was edited since. Touches the folder, so `prune` counts
     its age from the last message that used it."""
     d = file_dir(fid)
     try:
@@ -161,7 +171,8 @@ def _cached(fid: str, ver: list | None = None) -> dict | None:
         return None
     if not rec.get("path") or not Path(rec["path"]).is_file():
         return None
-    if ver is not None and rec.get("version") != ver:
+    kept = rec.get("version")
+    if ver and kept is not None and any(kept.get(k) != v for k, v in ver.items()):
         return None
     os.utime(d)
     return {k: rec.get(k) for k in CACHED if k in rec}
@@ -178,7 +189,16 @@ def http_download(url: str, token: str, max_bytes: int,
     import httpx
 
     stop = time.monotonic() + seconds_left if seconds_left is not None else None
+    # Checked between chunks, and no single wait is longer than the time left: a stalled server
+    # is cut off within twice the time left at worst.
     wait = 30 if stop is None else max(0.1, min(30, seconds_left))
+    try:
+        return _stream(httpx, url, token, max_bytes, stop, wait)
+    except httpx.TimeoutException as e:
+        raise TimeoutError("the download timed out") from e
+
+
+def _stream(httpx, url: str, token: str, max_bytes: int, stop: float | None, wait: float):
     with httpx.stream("GET", url, headers={"Authorization": f"Bearer {token}"}, follow_redirects=True,
                       timeout=wait) as r:
         ctype = r.headers.get("content-type", "")
@@ -227,7 +247,8 @@ def fetch(files: list[dict], item_id: str, clients: list[tuple[object, str]], *,
     owner's user token, which works only if the owner granted it files:read too. A record always
     has name/kind/size; `path` only when the bytes are on disk; `note` says why not. A file fetched
     for an earlier message is reused from its file-id folder, with no Slack call, unless it was
-    edited since (`version`) or its text or image could not be prepared then. `budget_s` bounds all
+    edited since (`version`); one whose text or image could not be prepared then is prepared again
+    from disk once the installed tools change. `budget_s` bounds all
     of this item's downloads: one still running when it ends is cut off, the files left are notes."""
     records: list[dict] = []
     if not files:
@@ -241,10 +262,11 @@ def fetch(files: list[dict], item_id: str, clients: list[tuple[object, str]], *,
                "kind": kind_of(f), "from": f.get("_from"), "path": None, "note": None}
         rec["by_owner"] = bool(owner) and rec["from"] == owner
         records.append(rec)
-        rec["version"] = version(f)
-        if (hit := _cached(fid, rec["version"])) is not None:
+        if (hit := _cached(fid, version(f))) is not None:
             rec.update(hit)
             cached += 1
+            if rec.get("tools") is not None and rec["tools"] != tools():
+                _prepare_again(rec)  # it could not be read before; a tool installed since may read it
             continue
         if not clients:
             rec["note"] = NO_BOT
@@ -258,6 +280,9 @@ def fetch(files: list[dict], item_id: str, clients: list[tuple[object, str]], *,
             continue
         notes: list[str] = []  # one per client tried; the first (the bot's) is the one reported
         for client, token in clients:
+            if (left := deadline - clock()) <= 0:
+                notes.insert(0, late)
+                break
             info, n = _info(client, fid) if f.get("id") else (f, None)
             if info is None:
                 notes.append(n)
@@ -286,9 +311,9 @@ def fetch(files: list[dict], item_id: str, clients: list[tuple[object, str]], *,
             path = folder / safe_name(rec["name"])
             write_private(path, data)
             rec["path"], rec["size"] = str(path), len(data)
+            rec["version"] = version(info)
             _extract(rec, data)
-            if rec["note"] is None:  # text or image that could not be prepared: try again next time
-                _keep(rec)  # last: a record on disk means the file and its sidecars are whole
+            _keep(rec)  # last: a record on disk means the file and its sidecars are whole
             break
         if rec["path"] is None:
             rec["note"] = notes[0] if notes else NO_ACCESS
@@ -300,8 +325,18 @@ def fetch(files: list[dict], item_id: str, clients: list[tuple[object, str]], *,
 
 # ------------------------------------------------------------ turning bytes into model input
 
+def _prepare_again(rec: dict) -> None:
+    """Extract a kept file again from its bytes on disk, with no download."""
+    for k in ("note", "text_path", "text_chars", "model_path", "model_type", "tools"):
+        rec.pop(k, None)
+    rec["note"] = None
+    _extract(rec, Path(rec["path"]).read_bytes())
+    _keep(rec)
+
+
 def _extract(rec: dict, data: bytes) -> None:
-    """Text for documents, a model-sized copy for images. Writes sidecar files next to the original."""
+    """Text for documents, a model-sized copy for images. Writes sidecar files next to the original.
+    A file that could not be prepared also records `tools`, so it is tried again once they change."""
     text = None
     if rec["kind"] == "text":
         text = data.decode("utf-8", errors="replace")
@@ -328,6 +363,8 @@ def _extract(rec: dict, data: bytes) -> None:
         p = Path(rec["path"] + ".txt")
         write_private(p, text[:TEXT_CHARS].encode("utf-8"))
         rec["text_path"] = str(p)
+    if rec["note"] is not None:
+        rec["tools"] = tools()
 
 
 def pdf_text(path: Path, data: bytes) -> str | None:
