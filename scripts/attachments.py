@@ -32,6 +32,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -199,7 +200,9 @@ def http_download(url: str, token: str, max_bytes: int,
     try:
         return _stream(httpx, url, token, max_bytes, stop, wait)
     except httpx.TimeoutException as e:
-        raise TimeoutError("the download timed out") from e
+        if stop is not None and time.monotonic() >= stop:  # the message's time is spent
+            raise TimeoutError("the download timed out") from e
+        raise  # a stall shorter than the time left: a failed try, the next token may still get it
 
 
 def _stream(httpx, url: str, token: str, max_bytes: int, stop: float | None, wait: float):
@@ -299,6 +302,9 @@ def fetch(files: list[dict], item_id: str, clients: list[tuple[object, str]], *,
             if info is None:
                 notes.append(n)
                 continue
+            if (left := deadline - clock()) <= 0:  # files.info took the rest of the time
+                notes.insert(0, late)
+                break
             url = info.get("url_private_download") or info.get("url_private")
             if not url:
                 notes.append("not fetched: Slack gave no download link (an external or deleted file)")
@@ -318,15 +324,18 @@ def fetch(files: list[dict], item_id: str, clients: list[tuple[object, str]], *,
                 # Slack answers a token that may not read the file with its sign-in page, not a 403.
                 notes.append(NO_ACCESS)
                 continue
-            folder = file_dir(fid)
-            shutil.rmtree(folder, ignore_errors=True)  # an edited file: no old name or sidecar left beside it
-            _private_dir(folder)
-            path = folder / safe_name(rec["name"])
-            write_private(path, data)
-            rec["path"], rec["size"] = str(path), len(data)
-            rec["version"] = version(info)
-            _extract(rec, data)
-            _keep(rec)  # last: a record on disk means the file and its sidecars are whole
+            try:
+                with _lock(fid):  # the daemon's workers may fetch one file id at once
+                    hit = _cached(fid, version(f))  # the same test as the cache check above
+                    if hit is not None and hit.get("tools") in (None, tools()):
+                        rec.update(hit)  # another worker kept it while this one downloaded
+                    else:
+                        _store(rec, data, info)
+            except OSError as e:
+                for k in ("text_path", "text_chars", "model_path", "model_type"):
+                    rec.pop(k, None)
+                rec["path"] = None
+                notes.insert(0, f"not fetched: could not keep the file ({type(e).__name__})")
             break
         if rec["path"] is None:
             rec["note"] = notes[0] if notes else NO_ACCESS
@@ -334,6 +343,30 @@ def fetch(files: list[dict], item_id: str, clients: list[tuple[object, str]], *,
     log.info("attachments for %s: %d of %d fetched, %d of them kept from before (%s)", item_id, got, len(records),
              cached, ", ".join(sorted({r["kind"] for r in records})))
     return records
+
+
+_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock(fid: str) -> threading.Lock:
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(fid, threading.Lock())
+
+
+def _store(rec: dict, data: bytes, info: dict) -> None:
+    """Write a downloaded file into its file-id folder, replacing what was there (an edited file
+    leaves no old name or sidecar beside it), then its record."""
+    folder = file_dir(rec["id"])
+    if folder.exists():
+        shutil.rmtree(folder)
+    _private_dir(folder)
+    path = folder / safe_name(rec["name"])
+    write_private(path, data)
+    rec["path"], rec["size"] = str(path), len(data)
+    rec["version"] = version(info)
+    _extract(rec, data)
+    _keep(rec)  # last: a record on disk means the file and its sidecars are whole
 
 
 # ------------------------------------------------------------ turning bytes into model input

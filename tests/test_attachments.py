@@ -298,6 +298,20 @@ spent = A.fetch(ev_files("FCSV"), "C1-8_5", [(FakeBot(), "xoxb-test-bot"), (Fake
                 download=refused_slowly, budget_s=10, clock=lambda: now[0])
 check("…a second token is tried only with time left: none once the first spent it",
       len(DOWNLOADS) == 1 and "out of time" in spent[0]["note"], str(spent[0]["note"]))
+
+
+class SlowInfo(FakeBot):
+    def files_info(self, file):
+        now[0] += 100.0
+        return super().files_info(file)
+
+
+now[0] = 0.0
+DOWNLOADS.clear()
+slowinfo = A.fetch(ev_files("FCSV"), "C1-8_6", [(SlowInfo(), "xoxb-test-bot")], download=download, budget_s=10,
+                   clock=lambda: now[0])
+check("…files.info that takes the rest of the time: no download starts on the time already spent",
+      not DOWNLOADS and "out of time" in slowinfo[0]["note"], str(slowinfo[0]["note"]))
 _left = []
 A.fetch(ev_files("FCSV"), "C1-8_4", [(FakeBot(), "xoxb-test-bot")], budget_s=10, clock=lambda: 3.0,
         download=lambda u, t, m, seconds_left=None: (_left.append(seconds_left), download(u, t, m))[1])
@@ -326,6 +340,7 @@ class _Timeout(Exception):
 
 
 def _stalled(*a, **k):
+    time.sleep(0.01)  # the wait httpx gave up after
     raise _Timeout("read timed out")
 
 
@@ -340,11 +355,18 @@ try:
     check("http_download stops a trickling download when the time left runs out", stopped and time.monotonic() - t0 < 2)
     sys.modules["httpx"].stream = _stalled
     try:
-        A.http_download("https://files.slack.test/x", "xoxb-test-bot", 10**6, seconds_left=5)
+        A.http_download("https://files.slack.test/x", "xoxb-test-bot", 10**6, seconds_left=0.001)
         stalled = None
     except Exception as e:  # noqa: BLE001
         stalled = e
-    check("…an httpx timeout (a stalled server) counts as out of time too", isinstance(stalled, TimeoutError), repr(stalled))
+    check("…an httpx timeout once the time left is gone counts as out of time", isinstance(stalled, TimeoutError), repr(stalled))
+    try:
+        A.http_download("https://files.slack.test/x", "xoxb-test-bot", 10**6, seconds_left=60)
+        early = None
+    except Exception as e:  # noqa: BLE001
+        early = e
+    check("…a stall with time still left is a failed try, not out of time",
+          isinstance(early, _Timeout) and not isinstance(early, TimeoutError), repr(early))
 finally:
     if _httpx is None:
         sys.modules.pop("httpx", None)
@@ -699,4 +721,37 @@ except RuntimeError:
 check("replies: the first page failing still raises, as one read did", first_failed)
 
 shutil.rmtree(TMP, ignore_errors=True)
+
+clear_cache()
+_st = A._store
+
+
+def _full(rec, data, info):
+    raise OSError(28, "No space left on device")
+
+
+A._store = _full
+try:
+    nospace = A.fetch(ev_files("FCSV", "FCHART"), "C1-13_1", [(FakeBot(), "xoxb-test-bot")], download=download)
+finally:
+    A._store = _st
+check("a file that cannot be kept (disk full): a note on that file, the message's other files still go through",
+      all(r["path"] is None and "could not keep" in r["note"] for r in nospace) and len(nospace) == 2, str(nospace))
+
+clear_cache()
+
+
+_other: list[int] = []
+
+
+def _kept_meanwhile(url, token, max_bytes, seconds_left=None):
+    out = download(url, token, max_bytes)
+    other = A.fetch(ev_files("FCSV"), "C1-13_3", [(FakeBot(), "xoxb-test-bot")], download=download)
+    _other.append(os.stat(other[0]["path"]).st_ino)
+    return out
+
+
+both = A.fetch(ev_files("FCSV"), "C1-13_2", [(FakeBot(), "xoxb-test-bot")], download=_kept_meanwhile)
+check("another worker kept the same file while this one downloaded: its copy is used, not wiped",
+      _other and both[0]["path"] and os.stat(both[0]["path"]).st_ino == _other[0], str(both[0]))
 print(f"\n{H.passed} checks passed")
