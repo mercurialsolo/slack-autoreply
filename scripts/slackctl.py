@@ -902,7 +902,7 @@ class Slack:
         clients = [(self.bot, self.bot.token)] if self.bot else []
         if clients and getattr(self.client, "token", None):
             clients.append((self.client, self.client.token))
-        return attachments.fetch(files, item_id, clients)
+        return attachments.fetch(files, item_id, clients, owner=self.me)
 
     def newer_messages(self, channel: str, thread_ts: str | None, since_ts: str) -> list[dict]:
         if thread_ts:
@@ -1278,6 +1278,7 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
                    "conversation and will carry it. An emoji on an answer to your own message is noise: react to "
                    "nothing, reply to nothing, unless they asked something new.")
     out += ["", "--- recent conversation ---", item.get("context") or "(none)", ""]
+    out += attachments.show_lines(item.get("attachments") or [])
     # Not under seal: during a rehearsal an agent report is future information the writer would
     # not have had when the real reply was written.
     reports = [] if item.get("sealed") else channel_reports(item)
@@ -1866,6 +1867,8 @@ def claude_command(item: dict, session: tuple[str, bool] | None = None, prompt: 
     mcp, mcp_file = mcp_config_for(cwd, CFG["mcp_allow"])
     allowed = bash_rules()
     allowed += ["Glob", "Grep", "WebFetch", "WebSearch"]
+    # The files on this message: Read is how the writer sees an image or a PDF. Only this item's folder.
+    dirs += [d for d in attachments.read_dirs(item) if d not in dirs]
     allowed += ["Read"] if any_dir else [f"Read(//{d.lstrip('/')}/**)" for d in dirs]
     allowed += [f"mcp__{n}__*" for n in mcp]
     cmd = [CFG["claude_bin"], "-p", prompt or f"{config.SKILL_COMMAND} handle {item_path(item['id'])}",
@@ -3549,7 +3552,15 @@ class Daemon(Slack):
                  "what_owner_knows_about_sender": recall.trim(recall.load_dossier("people", sender)),
                  "what_owner_knows_about_channel": recall.trim(recall.load_dossier("channels", channel)) if ctype != "im" else "",
                  "recent_conversation": item["context"], "latest_message": clean}
-        t = self.triager.run(state)
+        recs = item.get("attachments") or []
+        if recs:   # the classifier is told what the files are; the Claude fallback also sees the images
+            state["attachments"] = attachments.triage_lines(recs)
+        # Built only if the Claude fallback runs. Called with `images` only when there are images,
+        # because the offline tests stub `triager.run` as a one-argument lambda.
+        if any(r.get("kind") == "image" and r.get("path") for r in recs):
+            t = self.triager.run(state, images=lambda: attachments.image_blocks(recs, captioned=True))
+        else:
+            t = self.triager.run(state)
         item["triage"] = None if t.source == "default" else t.__dict__ | {"raw": None}
         save_item(item)
         log.info("%s in %s: %s → %s", who, ctype, clean[:80], t.summary() if item["triage"] else "no triage")

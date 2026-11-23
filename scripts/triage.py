@@ -352,7 +352,9 @@ def jev(state: dict, me: str, api_key: str, timeout: float = 8.0, attempts: int 
 # ------------------------------------------------------------ Claude fallback
 
 
-def claude(state: dict, me: str, client, model: str) -> Triage:
+def claude(state: dict, me: str, client, model: str, images: list[dict] | None = None) -> Triage:
+    """`images` are Anthropic image blocks for the files on the message (attachments.image_blocks):
+    "what does the attached chart show" or "do it in this format" is only judged right with them."""
     q = questions(me)
     schema_hint = {
         "route": "one of " + ", ".join(ROUTES),
@@ -373,7 +375,8 @@ def claude(state: dict, me: str, client, model: str) -> Triage:
         f"{json.dumps(schema_hint, indent=1)}\n\n"
         f"QUESTIONS:\n{json.dumps(q, indent=1)}\n\nSTATE:\n{json.dumps(state, ensure_ascii=False, indent=1)}"
     )
-    resp = client.messages.create(model=model, max_tokens=200, messages=[{"role": "user", "content": prompt}])
+    content = [*images, {"type": "text", "text": prompt}] if images else prompt
+    resp = client.messages.create(model=model, max_tokens=200, messages=[{"role": "user", "content": content}])
     text = "".join(getattr(b, "text", "") for b in resp.content)
     m = re.search(r"\{.*\}", text, re.S)
     data = json.loads(m.group(0)) if m else {}
@@ -410,7 +413,10 @@ class Triager:
         elif not self.jev_ok:
             log.info("no triage configured (no TYPESAFE_API_KEY / ANTHROPIC_API_KEY) — Claude Code decides routes")
 
-    def run(self, state: dict) -> Triage:
+    def run(self, state: dict, images=None) -> Triage:
+        """`images`: image blocks for the message's files, or a callable returning them (built only
+        when the fallback runs). Jev takes text only (state["attachments"] describes the files); the
+        Claude fallback sees the images too, and is asked again without them if that call fails."""
         t: Triage | None = None
         # `apply` gates on a score the message's own length tells us to distrust, and it is the
         # only place the message itself is still in hand.
@@ -422,9 +428,21 @@ class Triager:
                 log.warning("Jev call failed (%s) — falling back to %s", e, self.fallback_model)
         if t is None and self.anthropic is not None:
             try:
-                t = claude(state, self.me, self.anthropic, self.fallback_model)
+                images = images() if callable(images) else images
             except Exception as e:
-                log.error("triage fallback failed too (%s)", e)
+                log.warning("image input could not be built (%s) — triaging on text", e)
+                images = None
+            try:
+                t = claude(state, self.me, self.anthropic, self.fallback_model, images=images)
+            except Exception as e:
+                if images:
+                    log.warning("triage fallback with images failed (%s) — retrying on text", e)
+                    try:
+                        t = claude(state, self.me, self.anthropic, self.fallback_model)
+                    except Exception as e2:
+                        log.error("triage fallback failed too (%s)", e2)
+                else:
+                    log.error("triage fallback failed too (%s)", e)
         if t is None:
             t = Triage("hold", 0.0, 3.0, 2.0, 0.5, 0.0, "default", forced="triage unavailable")
         t.chars = chars
