@@ -136,7 +136,8 @@ def write_private(path: Path, data: bytes) -> None:
 
 def safe_name(name: str) -> str:
     base = re.sub(r"[^\w.-]", "_", Path(name or "file").name).lstrip(".") or "file"
-    return base[:80] if base != RECORD else "file-" + base
+    # lower(): on a case-insensitive disk (macOS) "Record.json" is the record's own name
+    return base[:80] if base.lower() != RECORD else "file-" + base
 
 
 def _private_dir(d: Path) -> None:
@@ -169,12 +170,15 @@ def _cached(fid: str, ver: dict | None = None) -> dict | None:
         rec = json.loads((d / RECORD).read_text())
     except (OSError, ValueError):
         return None
-    if not rec.get("path") or not Path(rec["path"]).is_file():
+    if not isinstance(rec, dict) or not rec.get("path") or not Path(rec["path"]).is_file():
         return None
     kept = rec.get("version")
-    if ver and kept is not None and any(kept.get(k) != v for k, v in ver.items()):
+    if ver and isinstance(kept, dict) and any(kept.get(k) != v for k, v in ver.items()):
         return None
-    os.utime(d)
+    try:
+        os.utime(d)
+    except OSError:  # pruned just now
+        return None
     return {k: rec.get(k) for k in CACHED if k in rec}
 
 
@@ -263,11 +267,19 @@ def fetch(files: list[dict], item_id: str, clients: list[tuple[object, str]], *,
         rec["by_owner"] = bool(owner) and rec["from"] == owner
         records.append(rec)
         if (hit := _cached(fid, version(f))) is not None:
+            base = dict(rec)
             rec.update(hit)
-            cached += 1
-            if rec.get("tools") is not None and rec["tools"] != tools():
-                _prepare_again(rec)  # it could not be read before; a tool installed since may read it
-            continue
+            # Could not be read before; a tool installed since may read it, when there is time.
+            if rec.get("tools") is None or rec["tools"] == tools() or clock() >= deadline:
+                cached += 1
+                continue
+            try:
+                _prepare_again(rec)
+                cached += 1
+                continue
+            except OSError:  # pruned in between: download it again
+                rec.clear()
+                rec.update(base)
         if not clients:
             rec["note"] = NO_BOT
             continue
@@ -307,6 +319,7 @@ def fetch(files: list[dict], item_id: str, clients: list[tuple[object, str]], *,
                 notes.append(NO_ACCESS)
                 continue
             folder = file_dir(fid)
+            shutil.rmtree(folder, ignore_errors=True)  # an edited file: no old name or sidecar left beside it
             _private_dir(folder)
             path = folder / safe_name(rec["name"])
             write_private(path, data)
@@ -501,10 +514,15 @@ def show_lines(records: list[dict]) -> list[str]:
 
 
 def read_dirs(item: dict) -> list[str]:
-    """The folders the writer may Read for this item: one per fetched file still on disk."""
+    """The folders the writer may Read for this item: one per fetched file still on disk, and only
+    folders inside ROOT, whatever path an item carries."""
     out: list[str] = []
+    root = ROOT.resolve()
     for r in item.get("attachments") or []:
-        if r.get("path") and (d := Path(r["path"]).parent).is_dir() and str(d) not in out:
+        if not r.get("path"):
+            continue
+        d = Path(r["path"]).parent
+        if d.is_dir() and d.resolve() != root and d.resolve().is_relative_to(root) and str(d) not in out:
             out.append(str(d))
     return out
 

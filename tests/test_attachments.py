@@ -619,5 +619,84 @@ fresh.mkdir()
 check("prune: folders past ATTACH_KEEP_DAYS go, cached files included; fresh ones stay",
       A.prune() == 2 and not old.exists() and not old_file.exists() and fresh.exists() and (A.ROOT / A.FILES_DIR).exists())
 
+# ------------------------------------------------------------------ review round 3
+check("a Slack file named Record.json cannot take the record's name on a case-insensitive disk",
+      A.safe_name("Record.json").lower() != A.RECORD and A.safe_name("RECORD.JSON").lower() != A.RECORD)
+check("read_dirs: a path outside the attachments folder grants nothing",
+      A.read_dirs({"id": "x", "attachments": [{"path": "/etc/hosts"},
+                                               {"path": str(A.ROOT / "stray")}]}) == [])
+
+clear_cache()
+A.fetch(ev_files("FCSV"), "C1-12_0", [(FakeBot(), "xoxb-test-bot")], download=download)
+(A.file_dir("FCSV") / A.RECORD).write_text("[1, 2]")
+DOWNLOADS.clear()
+odd = A.fetch(ev_files("FCSV"), "C1-12_1", [(FakeBot(), "xoxb-test-bot")], download=download)
+check("a record that is not an object is a miss: the file downloads again", len(DOWNLOADS) == 1 and odd[0]["path"])
+
+_rec = A.file_dir("FCSV") / A.RECORD
+_r = json.loads(_rec.read_text())
+_rec.write_text(json.dumps(dict(_r, note="could not read", tools=["none-of-these"])))
+_pa = A._prepare_again
+
+
+def _gone(rec):
+    raise FileNotFoundError("pruned")
+
+
+A._prepare_again = _gone
+DOWNLOADS.clear()
+try:
+    raced = A.fetch(ev_files("FCSV"), "C1-12_2", [(FakeBot(), "xoxb-test-bot")], download=download)
+finally:
+    A._prepare_again = _pa
+check("a cached file gone before it is prepared again: downloaded again, not lost",
+      len(DOWNLOADS) == 1 and raced[0]["path"] and raced[0]["note"] is None, str(raced[0]))
+
+_r = json.loads(_rec.read_text())
+_rec.write_text(json.dumps(dict(_r, note="could not read", tools=["none-of-these"])))
+DOWNLOADS.clear()
+nolate = A.fetch(ev_files("FCSV"), "C1-12_3", [(FakeBot(), "xoxb-test-bot")], download=download, budget_s=0)
+check("out of time: a kept file is served as it was, not prepared again", not DOWNLOADS
+      and nolate[0]["note"] == "could not read", str(nolate[0]["note"]))
+
+clear_cache()
+first = A.fetch(ev_files("FCSV"), "C1-12_4", [(FakeBot(), "xoxb-test-bot")], download=download)
+renamed = dict(ev_files("FCSV")[0], name="signups-v2.csv", size=FILES["FCSV"][0]["size"] + 1)
+second = A.fetch([renamed], "C1-12_5", [(FakeBot(), "xoxb-test-bot")], download=download)
+check("a file edited and renamed in Slack: the old name and its text are gone from its folder",
+      not os.path.exists(first[0]["path"]) and not os.path.exists(first[0]["text_path"]) and os.path.isfile(second[0]["path"]),
+      str(sorted(p.name for p in A.file_dir("FCSV").iterdir())))
+
+
+class FlakyClient(PagedClient):
+    """The first `ok` pages answer; the next one fails, as a rate limit past its retries does."""
+
+    def __init__(self, msgs, ok):
+        super().__init__(msgs)
+        self.ok = ok
+
+    def conversations_replies(self, channel, ts, limit=200, cursor=None, **kw):
+        if len(self.calls) >= self.ok:
+            self.calls.append(cursor)
+            raise RuntimeError("ratelimited")
+        return super().conversations_replies(channel, ts, limit, cursor, **kw)
+
+
+_tlog = io.StringIO()
+_th = logging.StreamHandler(_tlog)
+slack_thread.log.addHandler(_th)
+try:
+    part_thread = slack_thread.replies(FlakyClient(long_thread, 2), C, long_thread[0]["ts"])
+finally:
+    slack_thread.log.removeHandler(_th)
+check("replies: a later page failing keeps the pages read, and says so",
+      part_thread == long_thread[:5] and "stopped after 2 pages" in _tlog.getvalue(), _tlog.getvalue())
+try:
+    slack_thread.replies(FlakyClient(long_thread, 0), C, long_thread[0]["ts"])
+    first_failed = False
+except RuntimeError:
+    first_failed = True
+check("replies: the first page failing still raises, as one read did", first_failed)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{H.passed} checks passed")

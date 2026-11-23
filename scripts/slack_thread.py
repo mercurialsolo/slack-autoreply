@@ -21,7 +21,14 @@ def replies(client, channel: str, thread_ts: str, *, page: int = PAGE, max_pages
     cursor = None
     for _ in range(max_pages):
         kw = {"cursor": cursor} if cursor else {}
-        res = client.conversations_replies(channel=channel, ts=thread_ts, limit=page, **kw)
+        try:
+            res = client.conversations_replies(channel=channel, ts=thread_ts, limit=page, **kw)
+        except Exception as e:  # noqa: BLE001 — a later page failing keeps the pages read
+            if not pages:
+                raise
+            log.warning("thread read stopped after %d pages (%s): its newest replies are missing", len(pages),
+                        type(e).__name__)
+            break
         pages.append(res.get("messages") or [])
         cursor = (res.get("response_metadata") or {}).get("next_cursor")
         if not cursor:
