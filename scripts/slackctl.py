@@ -40,6 +40,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import attachments  # noqa: E402
 import channel_for  # noqa: E402
 import config  # noqa: E402
 import linear  # noqa: E402
@@ -185,6 +186,9 @@ def attach_files(paths: list[str]) -> list[dict]:
         path = Path(raw).expanduser().resolve()
         if not path.is_file():
             sys.exit(f"--file {raw}: no such file (it must be on this machine, where the daemon sends from)")
+        if path.is_relative_to(attachments.ROOT.resolve()):
+            # A file someone sent the owner goes only where they sent it: never back out on a draft.
+            sys.exit(f"--file {raw}: refusing a file someone sent to the owner — Solo never forwards those")
         hidden = [part for part in path.parts if part.startswith(".")]
         if hidden and not path.is_relative_to(outbox):
             sys.exit(f"--file {raw}: refusing a path under a dot-directory ({hidden[0]}) — copy it somewhere plain first")
@@ -882,6 +886,24 @@ class Slack:
                 lines.append(f"[{who}]: {text}")
         return "\n".join(lines)
 
+    def inbound_files(self, ev: dict, channel: str, thread_ts: str | None, item_id: str) -> list[dict]:
+        """Fetch the files on this message and its thread with the bot token (see attachments.py)."""
+        msgs = [ev]
+        if thread_ts:
+            try:
+                msgs += self.client.conversations_replies(channel=channel, ts=thread_ts, limit=200)["messages"][::-1]
+            except Exception:  # noqa: BLE001 — the message's own files still count
+                pass
+        files = attachments.gather(msgs)
+        if not files:
+            return []
+        # The bot first (files:read); then the owner's own token, which reads a DM's files only if the
+        # owner granted it files:read too (the bot is never in a DM between two people).
+        clients = [(self.bot, self.bot.token)] if self.bot else []
+        if clients and getattr(self.client, "token", None):
+            clients.append((self.client, self.client.token))
+        return attachments.fetch(files, item_id, clients, owner=self.me)
+
     def newer_messages(self, channel: str, thread_ts: str | None, since_ts: str) -> list[dict]:
         if thread_ts:
             msgs = self.client.conversations_replies(channel=channel, ts=thread_ts, limit=200)["messages"]
@@ -1256,6 +1278,7 @@ def render_item(item: dict, ledger: Ledger, share_trusted: set[str], followups: 
                    "conversation and will carry it. An emoji on an answer to your own message is noise: react to "
                    "nothing, reply to nothing, unless they asked something new.")
     out += ["", "--- recent conversation ---", item.get("context") or "(none)", ""]
+    out += attachments.show_lines(item.get("attachments") or [])
     # Not under seal: during a rehearsal an agent report is future information the writer would
     # not have had when the real reply was written.
     reports = [] if item.get("sealed") else channel_reports(item)
@@ -1844,6 +1867,8 @@ def claude_command(item: dict, session: tuple[str, bool] | None = None, prompt: 
     mcp, mcp_file = mcp_config_for(cwd, CFG["mcp_allow"])
     allowed = bash_rules()
     allowed += ["Glob", "Grep", "WebFetch", "WebSearch"]
+    # The files on this message: Read is how the writer sees an image or a PDF. Only this item's folder.
+    dirs += [d for d in attachments.read_dirs(item) if d not in dirs]
     allowed += ["Read"] if any_dir else [f"Read(//{d.lstrip('/')}/**)" for d in dirs]
     allowed += [f"mcp__{n}__*" for n in mcp]
     cmd = [CFG["claude_bin"], "-p", prompt or f"{config.SKILL_COMMAND} handle {item_path(item['id'])}",
@@ -3516,13 +3541,26 @@ class Daemon(Slack):
             customer = None
         if customer:
             item["customer"] = customer
+        try:
+            if (atts := self.inbound_files(ev, channel, thread_ts, item["id"])):
+                item["attachments"] = atts
+        except Exception as e:  # noqa: BLE001 — a file Solo cannot read must never stop a draft
+            log.warning("attachments: fetch failed (%s)", type(e).__name__)
         state = {"owner": self.me_name, "owner_notes": voice.load_notes(), "owner_presence": "active" if self.presence_active() else "away",
                  "local_time": datetime.now().strftime("%A %H:%M"), "channel_type": ctype, "channel_name": item["channel_name"],
                  "sender": who, "sender_trusted_for_sharing": sender in self.share_trusted,
                  "what_owner_knows_about_sender": recall.trim(recall.load_dossier("people", sender)),
                  "what_owner_knows_about_channel": recall.trim(recall.load_dossier("channels", channel)) if ctype != "im" else "",
                  "recent_conversation": item["context"], "latest_message": clean}
-        t = self.triager.run(state)
+        recs = item.get("attachments") or []
+        if recs:   # the classifier is told what the files are; the Claude fallback also sees the images
+            state["attachments"] = attachments.triage_lines(recs)
+        # Built only if the Claude fallback runs. Called with `images` only when there are images,
+        # because the offline tests stub `triager.run` as a one-argument lambda.
+        if any(r.get("kind") == "image" and r.get("path") for r in recs):
+            t = self.triager.run(state, images=lambda: attachments.image_blocks(recs, captioned=True))
+        else:
+            t = self.triager.run(state)
         item["triage"] = None if t.source == "default" else t.__dict__ | {"raw": None}
         save_item(item)
         log.info("%s in %s: %s → %s", who, ctype, clean[:80], t.summary() if item["triage"] else "no triage")
@@ -3712,7 +3750,8 @@ class Daemon(Slack):
     # ----------------------------------------------------------------- tick
 
     def tick(self) -> None:
-        """Every few minutes: score auto-sends that aged cleanly, expire stale drafts."""
+        """Every few minutes: score auto-sends that aged cleanly, expire stale drafts, drop old attachments."""
+        attachments.prune()
         st = self.state.read()
         now = datetime.now()
         for ts, s in list(st.get("sent", {}).items()):

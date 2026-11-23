@@ -123,6 +123,28 @@ def check_slack(r: Report):
         return None
 
 
+def check_bot_files(r: Report):
+    """files:read on the bot token is what lets Solo see an image or document someone attaches."""
+    bot = config.env("SLACK_BOT_TOKEN")
+    if not bot.startswith("xoxb-"):
+        r.add(WARN, "no bot token", "Solo cannot read attachments (images, PDFs) on the messages it handles without SLACK_BOT_TOKEN with files:read")
+        return
+    try:
+        from slack_sdk import WebClient
+        who = WebClient(token=bot).auth_test()
+    except Exception as e:
+        r.add(WARN, "bot token rejected", f"{e}".splitlines()[0][:200])
+        return
+    hdr = (getattr(who, "headers", None) or {}).get("x-oauth-scopes") or ""
+    scopes = {x.strip() for x in hdr.split(",") if x.strip()}
+    if scopes and "files:read" not in scopes:
+        r.add(WARN, "files:read bot scope not granted", "Solo cannot see attached images or documents until you add it under OAuth & Permissions and reinstall the app (manifest.yaml has it)")
+    elif scopes:
+        r.add(OK, "bot token can read attachments (files:read)")
+    else:
+        r.add(WARN, "could not list bot scopes", "if attachments say files:read is missing, add it under OAuth & Permissions and reinstall the app")
+
+
 def check_socket_mode(r: Report):
     app = config.env("SLACK_APP_TOKEN")
     if not app.startswith("xapp-") or len(app) < 20 or app.endswith("..."):
@@ -305,6 +327,7 @@ def run() -> int:
     check_secrets(r)
     check_slack(r)
     check_socket_mode(r)
+    check_bot_files(r)
     check_claude(r)
     check_context(r)
     check_triage(r)
