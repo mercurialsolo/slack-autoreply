@@ -413,9 +413,10 @@ class Triager:
         elif not self.jev_ok:
             log.info("no triage configured (no TYPESAFE_API_KEY / ANTHROPIC_API_KEY) — Claude Code decides routes")
 
-    def run(self, state: dict, images: list[dict] | None = None) -> Triage:
-        """`images`: image blocks for the message's files. Jev takes text only (state["attachments"]
-        describes the files); the Claude fallback sees the images too."""
+    def run(self, state: dict, images=None) -> Triage:
+        """`images`: image blocks for the message's files, or a callable returning them (built only
+        when the fallback runs). Jev takes text only (state["attachments"] describes the files); the
+        Claude fallback sees the images too, and is asked again without them if that call fails."""
         t: Triage | None = None
         # `apply` gates on a score the message's own length tells us to distrust, and it is the
         # only place the message itself is still in hand.
@@ -427,9 +428,21 @@ class Triager:
                 log.warning("Jev call failed (%s) — falling back to %s", e, self.fallback_model)
         if t is None and self.anthropic is not None:
             try:
+                images = images() if callable(images) else images
+            except Exception as e:
+                log.warning("image input could not be built (%s) — triaging on text", e)
+                images = None
+            try:
                 t = claude(state, self.me, self.anthropic, self.fallback_model, images=images)
             except Exception as e:
-                log.error("triage fallback failed too (%s)", e)
+                if images:
+                    log.warning("triage fallback with images failed (%s) — retrying on text", e)
+                    try:
+                        t = claude(state, self.me, self.anthropic, self.fallback_model)
+                    except Exception as e2:
+                        log.error("triage fallback failed too (%s)", e2)
+                else:
+                    log.error("triage fallback failed too (%s)", e)
         if t is None:
             t = Triage("hold", 0.0, 3.0, 2.0, 0.5, 0.0, "default", forced="triage unavailable")
         t.chars = chars

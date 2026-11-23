@@ -3555,8 +3555,12 @@ class Daemon(Slack):
         recs = item.get("attachments") or []
         if recs:   # the classifier is told what the files are; the Claude fallback also sees the images
             state["attachments"] = attachments.triage_lines(recs)
-        images = attachments.image_blocks(recs)
-        t = self.triager.run(state, images=images) if images else self.triager.run(state)
+        # Built only if the Claude fallback runs. Called with `images` only when there are images,
+        # because the offline tests stub `triager.run` as a one-argument lambda.
+        if any(r.get("kind") == "image" and r.get("path") for r in recs):
+            t = self.triager.run(state, images=lambda: attachments.image_blocks(recs, captioned=True))
+        else:
+            t = self.triager.run(state)
         item["triage"] = None if t.source == "default" else t.__dict__ | {"raw": None}
         save_item(item)
         log.info("%s in %s: %s → %s", who, ctype, clean[:80], t.summary() if item["triage"] else "no triage")
