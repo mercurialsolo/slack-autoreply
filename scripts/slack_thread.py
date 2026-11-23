@@ -7,6 +7,10 @@ misses its newest replies.
 """
 from __future__ import annotations
 
+import logging
+
+log = logging.getLogger("slack_thread")
+
 PAGE = 200
 MAX_PAGES = 50  # 10,000 replies: a bound on calls, not a thread length seen in practice
 
@@ -22,6 +26,8 @@ def replies(client, channel: str, thread_ts: str, *, page: int = PAGE, max_pages
         cursor = (res.get("response_metadata") or {}).get("next_cursor")
         if not cursor:
             break
+    else:
+        log.warning("thread read stopped at %d pages: its newest replies are missing", max_pages)
     out: list[dict] = []
     seen: set[str] = set()
     for m in [m for p in pages for m in p]:
